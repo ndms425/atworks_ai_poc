@@ -90,6 +90,20 @@ def build_tools(
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20}},
                 "additionalProperties": False},
         },
+        {
+            "name": "aggregate_runs",
+            "description": ("Group run results by ONE axis and return per-group counts, first-failure time, the last "
+                            "pass before it, flakiness (flaky_v1) and p95 duration — all computed by the host, never by "
+                            "you. Use it for 'group failures by cause' (failed_rule), 'since when is X broken' (api + "
+                            "api_id), 'which APIs flap' (api_env_data). Call it before present_run_groups. / 실행 기록을 "
+                            "한 축으로 묶어 집계한다. 숫자는 서버 계산이다."),
+            "input_schema": {"type": "object", "properties": {
+                "group_by": {"type": "string", "enum": ["api", "failed_rule", "http_status", "env", "api_env_data"]},
+                "since": {"type": "string", "description": _ISO_DATETIME + f" Default and ceiling: now minus {config.max_aggregate_window_days} days."},
+                "status": {"type": "string", "enum": ["pass", "fail", "error", "non_pass"]},
+                "api_id": {"type": "string", "description": _SESSION_API_ID}},
+                "required": ["group_by"], "additionalProperties": False},
+        },
         # -- 실행 계획 ------------------------------------------------------------------
         {
             "name": "get_pending_jobs",

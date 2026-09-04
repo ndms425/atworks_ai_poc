@@ -3,7 +3,7 @@ import json
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.tools.registry import build_tools
 
-EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs",
+EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
             "present_run_digest", "present_job_preview", "present_question_form", "present_suggestions"]
 
@@ -65,3 +65,10 @@ def test_stage_job_select_where_schema_forbids_extra_properties():
     select_where = stage["input_schema"]["properties"]["select_where"]
     assert select_where["additionalProperties"] is False
     assert set(select_where["properties"]) == {"query", "group", "updated_after"}
+
+
+def test_aggregate_runs_schema_lists_the_axes():
+    tool = next(t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "aggregate_runs")
+    props = tool["input_schema"]["properties"]
+    assert props["group_by"]["enum"] == ["api", "failed_rule", "http_status", "env", "api_env_data"]
+    assert tool["input_schema"]["required"] == ["group_by"]

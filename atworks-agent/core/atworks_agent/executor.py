@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from commerce_common.execution import BaseToolExecutor, Handler, clamp_limit, parse_argument
@@ -14,6 +14,7 @@ from commerce_common.presentation import PresentationComponent, PresentationExte
 from commerce_common.skills import SkillRegistry
 from commerce_common.streaming import AgentEvent, ToolOutcome
 
+from .aggregation import GROUP_BY, aggregate
 from .backend import AtworksBackend
 from .config import AtworksAgentConfig
 from .enrichment import PRESENTATION_COMPONENTS
@@ -148,6 +149,10 @@ class AtworksToolExecutor(BaseToolExecutor):
                 return ToolOutcome.error(f"{error.field} must be an integer; adjust and call again.")
             if error.kind == "status":
                 return ToolOutcome.error(f"{error.field} must be one of pass, fail, error, non_pass; adjust and call again.")
+            if error.kind == "enum":
+                return ToolOutcome.error(f"{error.field} must be one of {', '.join(GROUP_BY)}; adjust and call again.")
+            if error.kind == "provenance":
+                return ToolOutcome.error(f"{error.field} must be an api_id that search_apis or get_api returned this session; call search_apis first.")
             if error.kind == "object":
                 if error.field == "test_data.values":
                     return ToolOutcome.error(
@@ -190,6 +195,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "list_runs": self._list_runs,
             "get_run": self._get_run,
             "rank_failed_runs": self._rank_failed_runs,
+            "aggregate_runs": self._aggregate_runs,
             "get_pending_jobs": self._get_pending_jobs,
             "stage_job": self._stage_job,
             "apply_job": self._apply_job,
@@ -272,6 +278,43 @@ class AtworksToolExecutor(BaseToolExecutor):
         return self._fenced({
             "scorer": scorer, "population": self._state.last_population, "ranked": [rank_record(r) for r in ranked],
             "note": "A reading order over this session's non-pass runs, not a verdict. Present with present_run_digest.",
+        })
+
+    async def _aggregate_runs(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        group_by = str(tool_input.get("group_by", ""))
+        if group_by not in GROUP_BY:
+            raise InvalidToolArgument("group_by", kind="enum")
+        status = tool_input.get("status") or None
+        if status is not None and status not in RUN_STATUS_FILTERS:
+            raise InvalidToolArgument("status", kind="status")
+        api_id = tool_input.get("api_id") or None
+        if api_id is not None and str(api_id) not in self._state.seen_apis:
+            raise InvalidToolArgument("api_id", kind="provenance")
+        floor = datetime.now(UTC) - timedelta(days=self._config.max_aggregate_window_days)
+        since = _iso(tool_input.get("since"), "since")
+        since = floor if since is None or since < floor else since
+        runs = await self._backend.list_runs(
+            self._session, since=since, status=status, api_id=api_id, limit=self._config.max_aggregate_runs,
+        )
+        for run in runs:
+            self._state.remember_run(run)
+        # The api axis labels groups by method+path: fetch the specs the session has not seen yet
+        # so the card can name them (each one is remembered, so it also passes provenance later).
+        if group_by == "api":
+            for missing in {r.api_id for r in runs} - set(self._state.seen_apis):
+                api = await self._backend.get_api(self._session, missing)
+                if api is not None:
+                    self._state.remember_api(api)
+        groups = aggregate(runs, self._state.seen_apis, group_by, flaky_min_transitions=self._config.flaky_min_transitions)
+        self._state.last_population = len(runs)
+        self._state.last_listed_filter = status or "all"
+        self._state.remember_groups(group_by, groups, since)
+        shown = groups[: self._config.max_group_items * 2]
+        return self._fenced({
+            "group_by": group_by, "since": since.isoformat(), "population": len(runs),
+            "groups": [g.model_dump(mode="json", exclude_none=True, exclude={"run_ids"}) | {"run_ids": g.run_ids[:3]} for g in shown],
+            "more": max(0, len(groups) - len(shown)),
+            "note": "Figures are host-computed; show them with present_run_groups (group keys above), never in prose.",
         })
 
     # -- 실행 계획 ----------------------------------------------------------------------

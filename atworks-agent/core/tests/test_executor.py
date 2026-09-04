@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 from atworks_agent.executor import AtworksToolExecutor
 
@@ -348,6 +349,39 @@ async def test_preview_job_once_per_turn_then_a_different_job_still_renders(back
     assert not other.refused
     other_kinds = [(e.type, e.data.get("component")) for e in other.events]
     assert other_kinds == [("change_update", None), ("ui", "job_preview")]
+
+
+async def test_aggregate_runs_records_groups_population_and_axis(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    out = await ex.execute("aggregate_runs", {"group_by": "api"})
+    assert not out.is_error
+    assert state.last_population == 3 and state.last_group_by == "api"
+    assert set(state.seen_groups) == {"api:api-1", "api:api-2"}
+    assert state.seen_groups["api:api-1"].fail == 1
+    assert "api-1" in out.result_text and "population" in out.result_text
+
+
+async def test_aggregate_runs_clamps_since_to_the_config_window(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    out = await ex.execute("aggregate_runs", {"group_by": "env", "since": "2000-01-01T00:00:00+00:00"})
+    assert not out.is_error
+    assert state.last_aggregate_since is not None
+    assert (datetime.now(UTC) - state.last_aggregate_since).days in (config.max_aggregate_window_days - 1, config.max_aggregate_window_days)
+
+
+async def test_aggregate_runs_rejects_an_api_id_not_seen_this_session(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    out = await ex.execute("aggregate_runs", {"group_by": "api", "api_id": "api-1"})
+    assert out.is_error and "search_apis" in out.result_text
+    await ex.execute("get_api", {"api_id": "api-1"})
+    out = await ex.execute("aggregate_runs", {"group_by": "api", "api_id": "api-1"})
+    assert not out.is_error and set(state.seen_groups) == {"api:api-1"}
+
+
+async def test_aggregate_runs_rejects_an_unknown_axis(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    out = await ex.execute("aggregate_runs", {"group_by": "moon"})
+    assert out.is_error and "group_by" in out.result_text
 
 
 async def test_absent_tools_are_reported_as_absent_even_when_question_form_is_open(backend, config, skills, session, state):
