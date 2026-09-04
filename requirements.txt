@@ -6,6 +6,7 @@
 -e atworks-agent/runtime
 -e host
 tzdata
+truststore
 
 annotated-doc==0.0.5
 annotated-types==0.8.0
