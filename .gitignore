@@ -12,3 +12,5 @@ host/atworks_host/reports_out/
 .ruff_cache/
 .claude/settings.local.json
 web/package-lock.json.bak
+web/atworks-web/AGENTS.md
+web/atworks-web/CLAUDE.md
