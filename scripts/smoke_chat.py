@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """python scripts/smoke_chat.py [--base http://127.0.0.1:8010] [--turns 1,2]  — 키 필요.
-발화 3개의 카드가 나오는지 본다."""
+발화 4개의 카드가 나오는지 본다."""
 import argparse
 import json
 import sys
@@ -11,6 +11,10 @@ TURNS = [
     ("이거 왜 실패했어", set()),
     (
         "지난 1주일간 새롭게 update된 api들을 모아서 오늘부터 3일간 매일 오전 9시에 전부 수행하고 리포트를 남겨줘",
+        {"job_preview", "question_form"},
+    ),
+    (
+        "오늘 업데이트한 API를 개발서버와 이관서버에서 동일한 테스트 데이터로 수행하고 결과를 비교해줘",
         {"job_preview", "question_form"},
     ),
 ]
@@ -81,8 +85,8 @@ def main():
     ap.add_argument("--base", default="http://127.0.0.1:8010")
     ap.add_argument(
         "--turns",
-        default="1,2,3",
-        help="comma list of which of the three utterances to run (default: all)",
+        default="1,2,3,4",
+        help="comma list of which of the four utterances to run (default: all)",
     )
     a = ap.parse_args()
     indices = [int(x) for x in a.turns.split(",") if x.strip()]

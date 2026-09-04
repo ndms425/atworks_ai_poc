@@ -43,3 +43,12 @@ def test_turn_ok_returns_bool():
     result = turn_ok(True, {"a"}, {"a"})
     assert isinstance(result, bool)
     assert result is True
+
+
+def test_turns_include_the_comparison_utterance():
+    """The fourth utterance is the one that could not be staged as one job before this
+    change; it must reach either a job preview or the slot-filling form."""
+    assert len(smoke_chat.TURNS) == 4
+    text, want = smoke_chat.TURNS[3]
+    assert "개발서버와 이관서버" in text and "비교" in text
+    assert want == {"job_preview", "question_form"}

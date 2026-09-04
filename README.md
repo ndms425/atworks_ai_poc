@@ -31,10 +31,10 @@ npm run dev --prefix web/atworks-web            # web — :3110
 
 ```bash
 ruff check . && pytest                 # 결정론 층: 게이트·guardrail·스코어러·스케줄러
-python scripts/smoke_chat.py           # host가 떠 있는 상태에서 — 발화 3개의 카드·게이트를 확인
+python scripts/smoke_chat.py           # host가 떠 있는 상태에서 — 발화 4개의 카드·게이트를 확인
 ```
 
-수동 시나리오 3개 (host + web을 띄운 채, `docs/sllm-seam.md`·`docs/safety.md` 참고):
+수동 시나리오 4개 (host + web을 띄운 채, `docs/sllm-seam.md`·`docs/safety.md` 참고):
 
 1. "최근 실패한 api 중 risk 있는 것 가져와" → `run_digest` 카드에 "N건 중 먼저 볼 k건" 헤더가 뜬다.
 2. Runs 뷰에서 실패 행을 "채팅에 첨부" → "이거 왜 실패했어" → 답변이 첨부한 그 run만 다룬다.
@@ -42,3 +42,7 @@ python scripts/smoke_chat.py           # host가 떠 있는 상태에서 — 발
    `job_preview`(대상 건에 ● 표시) → Jobs 뷰에서 승인 →
    `POST /api/atworks/scheduler/tick?now=<from_date>T09:00:00%2B09:00`
    (`+` must be URL-encoded as `%2B`) → 리포트 링크가 열린다.
+4. "오늘 업데이트한 API를 개발서버와 이관서버에서 동일한 테스트 데이터로 수행하고 결과를 비교해줘"
+   → `question_form` 또는 `job_preview` — 카드에 대상 계 2개(dev, stg), 테스트 데이터 세트,
+   "총 실행 N건 × M회 = K건"이 보인다(승인 한 번이 이 전부를 덮는다) → Jobs 뷰에서 승인 →
+   `POST /api/atworks/scheduler/tick` → 리포트 상단에 계 비교 표와 "차이 N건" 타일이 뜬다.
