@@ -1,0 +1,38 @@
+from datetime import datetime
+
+from commerce_common.skills import Skill, SkillRegistry
+
+from atworks_agent.config import AtworksAgentConfig
+from atworks_agent.prompt import build_dynamic_context, build_static_system
+from atworks_agent.types import AttachedItem
+
+SKILLS = SkillRegistry([Skill(name="failed-triage", description="실패 triage", body="...")])
+
+
+def test_static_prompt_is_byte_stable_and_leads_with_safety():
+    cfg = AtworksAgentConfig(model="m")
+    a, b = build_static_system(cfg, SKILLS), build_static_system(cfg, SKILLS)
+    assert a == b
+    assert a.index("# Hard lines") < a.index("# How you work") < a.index("# Skills")
+    assert "never decide pass or fail" in a
+    assert "population" in a
+    assert "failed-triage" in a
+
+
+def test_static_prompt_drops_job_rules_when_switched_off():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_jobs=False), SKILLS)
+    assert "stage_job" not in text and "apply_job" not in text and "does not run or schedule" in text
+
+
+def test_dynamic_context_carries_attachments_and_clock():
+    item = AttachedItem(order=1, kind="run", ref_id="run-17", label="POST /x", comment="왜 실패?")
+    text = build_dynamic_context(atworks_context={"project": "MES"}, attached_items=[item],
+                                 now=datetime(2026, 9, 3, 14, 27))
+    assert text.startswith("# aTworks context")
+    assert "<atworks_data>" in text and '"project": "MES"' in text
+    assert "<attached-result-items>" in text and "run-17" in text
+    assert "2026-09-03T14:00" in text  # 시 단위 시계 (캐시 안정)
+
+
+def test_dynamic_context_without_attachments_has_no_block():
+    assert "<attached-result-items>" not in build_dynamic_context(atworks_context=None, attached_items=[], now=None)
