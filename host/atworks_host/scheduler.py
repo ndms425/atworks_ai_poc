@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from atworks_agent import AtworksBackend, AtworksSessionContext, JobKind, JobSchedule, JobStatus
 
+from .briefing import Briefings
 from .reports import Reports
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,12 @@ def due_at(schedule: JobSchedule, index: int) -> datetime | None:
 
 
 class Scheduler:
-    def __init__(self, backend: AtworksBackend, reports: Reports, session: AtworksSessionContext | None):
+    def __init__(self, backend: AtworksBackend, reports: Reports, session: AtworksSessionContext | None,
+                 briefings: Briefings | None = None):
         self.backend = backend
         self.reports = reports
         self.session = session or AtworksSessionContext(session_id="scheduler", project_id="default", operator="scheduler")
+        self.briefings = briefings
         self._lock = asyncio.Lock()
 
     async def tick(self, now: datetime) -> list[str]:
@@ -62,6 +65,12 @@ class Scheduler:
                 for schedule_index in slots:
                     if await self._execute_one(job.job_id, schedule_index, job.report):
                         executed.append(job.job_id)
+            if self.briefings is not None:
+                try:
+                    await self.briefings.maybe_generate(self.backend, self.session, now)
+                except Exception:
+                    # The briefing is a convenience artifact; a failure must not stall job execution.
+                    logger.exception("daily briefing failed")
             return executed
 
     async def _execute_one(self, job_id: str, schedule_index: int | None, report: bool) -> bool:

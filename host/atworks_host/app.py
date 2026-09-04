@@ -21,6 +21,7 @@ from atworks_agent.aggregation import summarize_insights
 from atworks_agent.serialization import api_record, job_record, run_record
 from atworks_agent_runtime import AtworksAgent
 
+from .briefing import Briefings
 from .mock_backend import MockAtworks
 from .reports import Reports
 from .scheduler import Scheduler
@@ -55,7 +56,7 @@ class ChatRequest(BaseModel):
 
 
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
-               on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
+               briefings: Briefings, on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
     app = build_app("atworks-ai host", on_startup=on_startup)
     sessions: SessionStore[AtworksSessionState] = SessionStore(AtworksSessionState)
     CurrentSession = session_dependency(sessions, "/api/atworks/session")
@@ -160,6 +161,24 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             raise HTTPException(status_code=404, detail="no report yet") from error
         if html is None:
             raise HTTPException(status_code=404, detail="no report yet")
+        return html
+
+    @router.get("/briefings/latest")
+    async def briefing_latest(record: CurrentSession) -> dict:
+        del record
+        data = briefings.latest()
+        if data is None:
+            raise HTTPException(status_code=404, detail="no briefing yet")
+        return data
+
+    @router.get("/briefings/{date}", response_class=HTMLResponse)
+    async def briefing_page(date: str) -> str:
+        try:
+            html = briefings.read_html(date)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="no briefing") from error
+        if html is None:
+            raise HTTPException(status_code=404, detail="no briefing")
         return html
 
     @router.get("/health")

@@ -16,6 +16,7 @@ from atworks_agent import (
 )
 from atworks_agent_runtime import AtworksAgent
 from atworks_host.app import create_app
+from atworks_host.briefing import Briefings
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.reports import Reports
 from atworks_host.scheduler import Scheduler
@@ -30,7 +31,9 @@ async def client(tmp_path):
     backend = MockAtworks(config, FIXTURES)
     agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=FakeClient([text_message("ok")]))
     reports = Reports(tmp_path)
-    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
+    briefings = Briefings(tmp_path / "b", config)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None, briefings=briefings),
+                      reports=reports, briefings=briefings)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         c.backend = backend
         c.reports = reports
@@ -43,7 +46,9 @@ async def client_backend(tmp_path):
     backend = MockAtworks(config, FIXTURES)
     agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=FakeClient([text_message("ok")]))
     reports = Reports(tmp_path)
-    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
+    briefings = Briefings(tmp_path / "b", config)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None, briefings=briefings),
+                      reports=reports, briefings=briefings)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         yield c, backend
 
@@ -260,7 +265,9 @@ async def client_with_custom_executor(tmp_path):
     agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config,
                          client=FakeClient([text_message("ok")]), executor_class=_TaggingExecutor)
     reports = Reports(tmp_path)
-    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
+    briefings = Briefings(tmp_path / "b", config)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None, briefings=briefings),
+                      reports=reports, briefings=briefings)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         yield c, backend
 
@@ -276,3 +283,14 @@ async def test_job_action_route_uses_the_agents_executor_class(client_with_custo
     body = r.json()
     assert r.status_code == 200 and body["ok"] is False
     assert body["reason"] == CUSTOM_EXECUTOR_MARKER
+
+
+async def test_briefing_routes(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    assert (await client.get("/api/atworks/briefings/latest", headers={"X-Session-Id": sid})).status_code == 404
+    await client.post("/api/atworks/scheduler/tick?now=2026-09-03T09:01:00%2B09:00")
+    r = await client.get("/api/atworks/briefings/latest", headers={"X-Session-Id": sid})
+    assert r.status_code == 200 and r.json()["date"] == "2026-09-03"
+    page = await client.get("/api/atworks/briefings/2026-09-03")
+    assert page.status_code == 200 and "briefing-data" in page.text
+    assert (await client.get("/api/atworks/briefings/..%2F2026")).status_code in (404, 422)

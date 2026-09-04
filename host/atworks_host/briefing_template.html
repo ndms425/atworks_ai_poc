@@ -1,0 +1,33 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>aTworks 일일 브리핑</title>
+<style>
+body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#1b1f2a;background:#fafbfc}
+h1{font-size:18px;margin:0 0 4px} h2{font-size:14px;margin:18px 0 6px} .meta{color:#5a6072;font-size:12px;margin-bottom:16px}
+.tiles{display:flex;gap:10px;margin-bottom:16px}.tile{border:1px solid #e3e6ee;border-radius:10px;padding:10px 14px;min-width:90px;background:#fff}
+.tile b{display:block;font-size:20px}.fail b{color:#b42318}.error b{color:#b54708}.pass b{color:#067647}.diff b{color:#b54708}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;background:#fff}th,td{border-bottom:1px solid #e3e6ee;padding:6px 8px;text-align:left;font-size:13px}
+tr.fail td:nth-child(4){color:#b42318;font-weight:600}tr.error td:nth-child(4){color:#b54708;font-weight:600}
+tr.differs{background:#fff7ed}
+.prov{margin-top:14px;font-size:11px;color:#8a90a3}
+.hidden{display:none}
+</style></head><body>
+<h1 id="title"></h1><div class="meta" id="meta"></div>
+<div class="tiles"><div class="tile">전체<b id="t-total"></b></div><div class="tile fail">fail<b id="t-fail"></b></div><div class="tile error">error<b id="t-error"></b></div><div class="tile pass">pass<b id="t-pass"></b></div><div class="tile diff">불안정<b id="t-flaky"></b></div><div class="tile diff">회귀 의심<b id="t-reg"></b></div></div>
+<h2>실패 원인 상위</h2><div class="scroll"><table><thead><tr><th>규칙</th><th>건수</th><th>첫 실패</th><th>실행</th></tr></thead><tbody id="groups"></tbody></table></div>
+<h2>실행된 job</h2><ul id="executed"></ul>
+<h2>승인 대기</h2><div class="meta" id="stale"></div><ul id="pending"></ul>
+<div class="prov" id="prov"></div>
+<script id="briefing-data" type="application/json">__BRIEFING_DATA__</script>
+<script>
+const esc=(v)=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const d=JSON.parse(document.getElementById('briefing-data').textContent);
+document.getElementById('title').textContent=`일일 브리핑 ${d.date}`;
+document.getElementById('meta').textContent=`${d.window.from} → ${d.window.to}`;
+for(const k of ['total','fail','error','pass'])document.getElementById('t-'+k).textContent=d.counts[k];
+document.getElementById('t-flaky').textContent=d.insights.flaky;document.getElementById('t-reg').textContent=d.insights.regression_suspect;
+document.getElementById('groups').innerHTML=d.top_groups.map(g=>`<tr><td>${esc(g.label)}</td><td>${esc(g.count)}</td><td>${esc(g.first_non_pass_at??'—')}</td><td>${(g.run_ids||[]).slice(0,3).map(id=>`<a href="${esc(d.portal_origin)}/?attach=run:${encodeURIComponent(id)}" target="_blank" rel="noreferrer">${esc(id)}</a>`).join(' ')}</td></tr>`).join('')||'<tr><td colspan="4">없음</td></tr>';
+document.getElementById('executed').innerHTML=d.jobs.executed.map(j=>`<li>${esc(j.job_id)} · ${esc(j.summary)} · ${esc(j.runs)}건</li>`).join('')||'<li>없음</li>';
+document.getElementById('stale').textContent=d.jobs.stale_pending?`24시간 넘게 대기 중 ${d.jobs.stale_pending}건`:'';
+document.getElementById('pending').innerHTML=d.jobs.pending.map(j=>`<li>${esc(j.job_id)} · ${esc(j.summary)} · ${esc(j.created_at)}</li>`).join('')||'<li>없음</li>';
+document.getElementById('prov').textContent=`generated at ${d.generated_at} — ${d.note}`;
+</script></body></html>

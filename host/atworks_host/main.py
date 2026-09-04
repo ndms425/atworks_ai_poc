@@ -13,6 +13,7 @@ from atworks_agent import AtworksAgentConfig
 from atworks_agent_runtime import AtworksAgent
 
 from .app import create_app
+from .briefing import Briefings
 from .mock_backend import MockAtworks
 from .reports import Reports
 from .scheduler import Scheduler
@@ -44,8 +45,10 @@ def build() -> tuple:
     config = AtworksAgentConfig(model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"))
     backend = MockAtworks(config, HERE / "fixtures")
     agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
-    reports = Reports(HERE / "reports_out", portal_origin=os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110"))
-    scheduler = Scheduler(backend, reports, None)
+    portal_origin = os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110")
+    reports = Reports(HERE / "reports_out", portal_origin=portal_origin)
+    briefings = Briefings(HERE / "briefings_out", config, portal_origin=portal_origin)
+    scheduler = Scheduler(backend, reports, None, briefings=briefings)
 
     async def loop() -> None:
         while True:
@@ -62,7 +65,8 @@ def build() -> tuple:
         # loop itself only holds a weak one), so the loop is not dropped mid-flight.
         spawn_background(loop())
 
-    app = create_app(agent=agent, backend=backend, scheduler=scheduler, reports=reports, on_startup=[start_loop])
+    app = create_app(agent=agent, backend=backend, scheduler=scheduler, reports=reports, briefings=briefings,
+                      on_startup=[start_loop])
     return app, backend, scheduler
 
 
