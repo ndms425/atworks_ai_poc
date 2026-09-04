@@ -1,0 +1,8 @@
+{
+  "name": "atworks-ai-web",
+  "private": true,
+  "workspaces": ["web-shared", "atworks-web"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present"
+  }
+}
