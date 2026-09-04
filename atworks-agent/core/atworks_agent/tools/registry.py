@@ -10,7 +10,7 @@ from commerce_common.presentation import PresentationExtension
 
 from ..config import AtworksAgentConfig
 from ..question_form import QUESTION_FORM_INPUT_SCHEMA
-from .presentation import DIGEST_TOOL, PREVIEW_TOOL, QUESTION_TOOL
+from .presentation import DIGEST_TOOL, GROUPS_TOOL, PREVIEW_TOOL, QUESTION_TOOL
 
 _STATUS_READER = "the operator"
 _SESSION_API_ID = "api_id that search_apis or get_api returned this session."
@@ -182,6 +182,18 @@ def build_tools(
                     "why_it_matters": {"type": "string", "maxLength": 160}},
                     "required": ["kind", "headline"], "additionalProperties": False}}},
                 "required": ["items"], "additionalProperties": False},
+        },
+        {
+            "name": GROUPS_TOOL,
+            "description": ("Show the groups table for the last aggregate_runs call: pick the group keys it returned "
+                            "(in its order unless the operator asked otherwise); the card fills counts, first failure, "
+                            "last pass before it, flakiness, regression suspicion and p95 from the host's figures, plus the "
+                            "population. Your sentence before it introduces the card without restating any number."),
+            "input_schema": {"type": "object", "properties": {
+                "title": {"type": "string", "maxLength": 80},
+                "group_keys": {"type": "array", "minItems": 1, "maxItems": config.max_group_items, "items": {"type": "string", "maxLength": 200}},
+                "note": {"type": "string", "maxLength": 200}},
+                "required": ["group_keys"], "additionalProperties": False},
         },
         {
             "name": PREVIEW_TOOL,

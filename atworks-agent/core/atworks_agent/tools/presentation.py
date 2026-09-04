@@ -7,6 +7,7 @@ from commerce_common.presentation import PresentationPayload
 from pydantic import BaseModel, Field
 
 DIGEST_TOOL = "present_run_digest"
+GROUPS_TOOL = "present_run_groups"
 PREVIEW_TOOL = "present_job_preview"
 QUESTION_TOOL = "present_question_form"
 
@@ -21,6 +22,13 @@ class DigestItem(BaseModel):
 class PresentRunDigestPayload(PresentationPayload):
     title: str | None = Field(default=None, max_length=80)
     items: list[DigestItem] = Field(min_length=1, max_length=8)
+
+
+class PresentRunGroupsPayload(PresentationPayload):
+    """모델은 제목과 보여줄 그룹 키만 고른다; 숫자는 aggregate_runs가 세션에 남긴 RunGroup에서 온다."""
+    title: str | None = Field(default=None, max_length=80)
+    group_keys: list[str] = Field(min_length=1, max_length=50)
+    note: str | None = Field(default=None, max_length=200)
 
 
 class PresentJobPreviewPayload(PresentationPayload):

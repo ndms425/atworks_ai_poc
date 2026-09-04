@@ -5,7 +5,7 @@ from atworks_agent.tools.registry import build_tools
 
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
-            "present_run_digest", "present_job_preview", "present_question_form", "present_suggestions"]
+            "present_run_digest", "present_run_groups", "present_job_preview", "present_question_form", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():

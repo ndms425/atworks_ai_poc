@@ -11,6 +11,7 @@ from atworks_agent.types import (
     FailedRank,
     JobKind,
     JobSpec,
+    RunGroup,
     RunResult,
     RunStatus,
 )
@@ -194,3 +195,38 @@ async def test_job_preview_matrix_ceiling_for_frozen_binding_equals_the_staged_f
     matrix = outcome.events[0].data["payload"]["matrix"]
     assert matrix["max_runs_per_execution"] == matrix["runs_per_execution"]
     assert matrix["max_runs_total"] == matrix["runs_total"]
+
+
+def _state_with_groups():
+    state = AtworksSessionState()
+    g1 = RunGroup(key="amount <= limit", label="amount <= limit", count=3, fail=3, error=0, passed=0, run_ids=["run-1"])
+    g2 = RunGroup(key="(error) HTTP 503", label="(error) HTTP 503", count=1, fail=0, error=1, passed=0, run_ids=["run-5"])
+    state.remember_groups("failed_rule", [g1, g2], None)
+    state.last_population = 9
+    state.last_listed_filter = "non_pass"
+    return state
+
+
+async def test_run_groups_joins_session_groups_and_carries_population():
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"],
+                                     {"title": "원인별", "group_keys": ["amount <= limit", "(error) HTTP 503"]},
+                                     _ctx(_state_with_groups()), "Shown.")
+    payload = outcome.events[0].data["payload"]
+    assert payload["group_by"] == "failed_rule" and payload["population"] == 9 and payload["shown"] == 2
+    assert payload["items"][0]["fail"] == 3 and payload["items"][1]["error"] == 1
+
+
+async def test_run_groups_refuses_without_an_aggregate_call():
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"], {"group_keys": ["x"]},
+                                     _ctx(AtworksSessionState()), "Shown.")
+    assert outcome.is_error and "aggregate_runs" in outcome.result_text
+
+
+async def test_run_groups_unknown_keys_are_provenance_when_all_and_a_note_when_some():
+    state = _state_with_groups()
+    all_bad = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"], {"group_keys": ["nope"]}, _ctx(state), "Shown.")
+    assert all_bad.blocked == "provenance"
+    some = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"],
+                                  {"group_keys": ["amount <= limit", "nope"]}, _ctx(state), "Shown.")
+    assert not some.is_error and "Dropped nope" in some.result_text
+    assert some.events[0].data["payload"]["shown"] == 1

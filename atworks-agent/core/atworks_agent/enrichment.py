@@ -21,10 +21,12 @@ from .question_form import QuestionFormPayload
 from .serialization import job_record
 from .tools.presentation import (
     DIGEST_TOOL,
+    GROUPS_TOOL,
     PREVIEW_TOOL,
     QUESTION_TOOL,
     PresentJobPreviewPayload,
     PresentRunDigestPayload,
+    PresentRunGroupsPayload,
 )
 from .types import Binding, RunStatus
 
@@ -107,6 +109,33 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
     }
 
 
+async def enrich_run_groups(payload: PresentRunGroupsPayload, context: EnrichmentContext) -> dict[str, Any]:
+    state = context.state
+    if state.last_group_by is None or state.last_population is None:
+        raise ValueError("The groups card needs an aggregate_runs call first — it records the groups and their population.")
+    items: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for key in payload.group_keys[: context.config.max_group_items]:
+        group = state.seen_groups.get(f"{state.last_group_by}:{key}")
+        if group is None:
+            dropped.append(key)
+            continue
+        items.append(_record(group))
+    if not items:
+        raise PresentationRefused(
+            "None of those group keys came from aggregate_runs this session; use the keys it returned.",
+            gate=PROVENANCE_GATE,
+        )
+    if dropped:
+        context.notes.append(f"Dropped {', '.join(dropped)}: not a group aggregate_runs returned this session.")
+    return {
+        "title": payload.title, "note": payload.note, "group_by": state.last_group_by,
+        "population": state.last_population, "population_filter": state.last_listed_filter,
+        "since": state.last_aggregate_since.isoformat() if state.last_aggregate_since else None,
+        "shown": len(items), "items": items,
+    }
+
+
 async def enrich_job_preview(payload: PresentJobPreviewPayload, context: EnrichmentContext) -> dict[str, Any]:
     job = context.state.seen_jobs.get(payload.job_id)
     if job is None:
@@ -160,6 +189,7 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
     spec.name: spec
     for spec in (
         PresentationComponent(name=DIGEST_TOOL, component="run_digest", payload_model=PresentRunDigestPayload, enrich=enrich_run_digest),
+        PresentationComponent(name=GROUPS_TOOL, component="run_groups", payload_model=PresentRunGroupsPayload, enrich=enrich_run_groups),
         PresentationComponent(name=PREVIEW_TOOL, component="job_preview", payload_model=PresentJobPreviewPayload, enrich=enrich_job_preview),
         PresentationComponent(name=QUESTION_TOOL, component="question_form", payload_model=QuestionFormPayload, enrich=enrich_question_form),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),

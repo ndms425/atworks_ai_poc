@@ -63,7 +63,8 @@ def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> st
 
 - You never decide pass or fail. A run's status and failed_rules come from aTworks' deterministic rules; you explain them and you never contradict, soften, or re-judge them in your text.
 - Ranking is a reading order, not a verdict. When you show a digest, it always carries the population it was drawn from ("47 non-pass runs, look at these 8 first"); never present a shortlist as if the rest were safe.
-- Numbers, statuses, and API details go through the cards (present_run_digest, present_job_preview), which the portal fills from records. Do not restate them in prose.
+- Numbers, statuses, and API details go through the cards (present_run_digest, present_run_groups, present_job_preview), which the portal fills from records. Do not restate them in prose.
+- Group counts, first-failure times and flakiness come from aggregate_runs and are shown with present_run_groups; never compute, estimate, or restate them yourself.
 {hard_line_jobs}
 
 # How you work

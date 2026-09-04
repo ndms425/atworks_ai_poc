@@ -44,3 +44,8 @@ def test_static_prompt_states_the_matrix_contract():
     assert "approval covers the whole matrix" in text
     assert "never facts about the system" in text
     assert "Never default target_envs to anything but [dev]" in text
+
+
+def test_static_prompt_forbids_computing_group_figures():
+    text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
+    assert "aggregate_runs" in text and text.index("aggregate_runs") < text.index("# How you work")
