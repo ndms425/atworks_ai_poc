@@ -61,6 +61,11 @@ class SelectWhere(BaseModel):
     failed_since: datetime | None = None    # keep APIs with a non_pass run at/after this time
     related_to: str | None = Field(default=None, max_length=64)   # same group or same leading path segments as this api_id
 
+    @field_validator("updated_after", "failed_since")
+    @classmethod
+    def _aware(cls, v: datetime | None) -> datetime | None:
+        return v if v is None or v.tzinfo is not None else v.replace(tzinfo=UTC)
+
 
 class JobDraft(BaseModel):
     """stage_job 툴 입력이 검증·정규화된 뒤의 모양. 백엔드는 이걸 받아 JobSpec을 만든다."""

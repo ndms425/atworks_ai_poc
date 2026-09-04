@@ -50,8 +50,16 @@ async def resolve_select_where(
         failed = await backend.list_runs(session, since=where.failed_since, status="non_pass", api_id=None, limit=config.max_aggregate_runs)
         failed_ids = {r.api_id for r in failed}
         apis = {i: a for i, a in apis.items() if i in failed_ids}
-        basis.append(f"{where.failed_since.date().isoformat()} 이후 실패·에러가 있던 API")
-    ordered = sorted(apis.values(), key=lambda a: a.updated_at, reverse=True)
-    ids = [a.api_id for a in ordered]
+        sentence = f"{where.failed_since.date().isoformat()} 이후 실패·에러가 있던 API"
+        if len(failed) >= config.max_aggregate_runs:
+            # The scan was truncated at the cap — some earlier failures may be missing from the
+            # selection, so the basis says so rather than silently under-reporting.
+            sentence += " (표본 상한 도달)"
+        basis.append(sentence)
+    ordered = sorted(apis.values(), key=lambda a: (a.updated_at, a.api_id), reverse=True)
+    # Cap the returned selection so an oversized result still trips the job guardrail with a
+    # bounded list rather than the ledger holding (and provenance tracking) every match.
+    capped = ordered[: config.max_apis_per_job + 1]
+    ids = [a.api_id for a in capped]
     text = f"{' · '.join(basis)} — {len(ids)}개" if basis else None
-    return Resolution(api_ids=ids, apis={a.api_id: a for a in ordered}, basis=text[:160] if text else None)
+    return Resolution(api_ids=ids, apis={a.api_id: a for a in capped}, basis=text[:160] if text else None)

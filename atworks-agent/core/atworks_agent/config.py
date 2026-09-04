@@ -72,9 +72,8 @@ class AtworksAgentConfig(BaseAgentConfig):
     job_intent_cues: tuple[str, ...] = ("해줘", "해 줘", "줘", "please", "now", "every")
     apply_intent_phrases: tuple[str, ...] = ("승인", "적용", "approve", "apply", "go ahead")
     aggregate_grounding_gate: bool = True
-    aggregate_intent_terms: tuple[str, ...] = (
-        "묶어", "원인별", "언제부터", "왔다갔다", "불안정", "flaky", "패턴", "cluster", "since when", "flapping",
-    )
+    aggregate_intent_terms: tuple[str, ...] = ("원인별", "언제부터", "왔다갔다", "불안정", "since when", "flapping")
+    aggregate_intent_cue_terms: tuple[str, ...] = ("묶어", "패턴", "cluster", "flaky")
 
     @property
     def stages_jobs(self) -> bool:

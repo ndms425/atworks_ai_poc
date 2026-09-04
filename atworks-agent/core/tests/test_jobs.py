@@ -372,6 +372,15 @@ def test_select_where_accepts_failed_since_and_related_to_only_as_declared():
         SelectWhere(anything="x")
 
 
+def test_select_where_coerces_a_naive_datetime_to_utc():
+    naive = SelectWhere(failed_since=datetime(2026, 9, 1))
+    assert naive.failed_since.tzinfo == UTC
+    assert naive.failed_since == datetime(2026, 9, 1, tzinfo=UTC)
+
+    aware = datetime(2026, 9, 1, tzinfo=UTC)
+    assert SelectWhere(failed_since=aware).failed_since == aware
+
+
 def test_ledger_copies_selection_basis_onto_the_job():
     ledger = JobLedger(AtworksAgentConfig(model="m"))
     job = ledger.stage(JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["a"], target_envs=["dev"],

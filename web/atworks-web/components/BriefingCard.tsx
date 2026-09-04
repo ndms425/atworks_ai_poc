@@ -7,8 +7,8 @@ import { Panel, StatStrip, StatTile, useResource } from "web-shared";
 import { briefingUrl, fetchBriefing } from "@/lib/api";
 
 export default function BriefingCard({ refreshKey, onAskAssistant }: { refreshKey: number; onAskAssistant: (text: string) => void }) {
-  const { data, failed } = useResource(fetchBriefing, [refreshKey]);
-  if (failed || !data) {
+  const { data } = useResource(fetchBriefing, [refreshKey]);
+  if (!data) {
     return <p className="text-[13px] text-(--ink-soft)">오늘 브리핑은 09:00에 생성됩니다.</p>;
   }
   return (

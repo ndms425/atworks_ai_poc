@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.jobs import SelectWhere
 from atworks_agent.selection import resolve_select_where
 from atworks_agent.types import ApiSpec, AtworksSessionContext, RunResult, RunStatus
@@ -47,3 +48,41 @@ async def test_unknown_anchor_resolves_to_nothing(wide, config):
 async def test_plain_query_group_updated_after_still_work_with_no_basis(wide, config):
     res = await resolve_select_where(wide, SESSION, SelectWhere(group="payment"), config, now=T0)
     assert set(res.api_ids) == {"api-3", "api-4"} and res.basis is None
+
+
+async def test_failed_since_basis_flags_when_the_scan_hits_the_sample_cap():
+    # The non_pass scan is truncated at max_aggregate_runs; when it comes back at the cap the
+    # selection may be missing older failures, so the basis sentence must say so rather than
+    # silently under-reporting.
+    capped_config = AtworksAgentConfig(model="m", max_aggregate_runs=1)
+    b = InMemoryBackend(capped_config)  # run-1 (fail) and run-2 (error) both qualify, above the cap
+
+    res = await resolve_select_where(b, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), capped_config, now=T0)
+
+    assert res.basis is not None and "표본 상한" in res.basis
+
+
+async def test_ordering_breaks_updated_at_ties_by_api_id_for_determinism(config):
+    # Two APIs with the same updated_at must sort in a stable, deterministic order between
+    # stage-time and a LATE re-resolution — never dependent on dict/insertion order.
+    b = InMemoryBackend(config)
+    b.apis["api-1"] = b.apis["api-1"].model_copy(update={"updated_at": T0})
+    b.apis["api-2"] = b.apis["api-2"].model_copy(update={"updated_at": T0})
+
+    res = await resolve_select_where(b, SESSION, SelectWhere(), config, now=T0)
+
+    assert res.api_ids == ["api-2", "api-1"]  # same updated_at -> api_id descending
+
+
+async def test_resolution_is_capped_to_max_apis_per_job_plus_one():
+    # An oversized selection (here via related_to, which scans the whole catalogue) must still
+    # come back bounded so it trips the job guardrail with a short list rather than flushing
+    # every match into the provenance map.
+    cfg = AtworksAgentConfig(model="m", max_apis_per_job=1)
+    b = InMemoryBackend(cfg)
+    b.apis["api-3"] = ApiSpec(api_id="api-3", method="GET", path="/v1/contracts/history", name="이력",
+                              group="contract", updated_at=T0, has_rules=False)
+
+    res = await resolve_select_where(b, SESSION, SelectWhere(related_to="api-1"), cfg, now=T0)
+
+    assert len(res.api_ids) == cfg.max_apis_per_job + 1 == 2

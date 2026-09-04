@@ -53,13 +53,15 @@ async def test_scheduler_tick_generates_the_briefing_and_keeps_running_jobs(tmp_
 
 async def test_briefing_failure_does_not_stop_the_tick(tmp_path, monkeypatch):
     _, backend, briefings = _stack(tmp_path)
+    job = await backend.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="now", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
 
     async def boom(*a, **k):
         raise RuntimeError("disk")
 
     monkeypatch.setattr(briefings, "generate", boom)
     sched = Scheduler(backend, Reports(tmp_path / "r"), SESSION, briefings=briefings)
-    assert await sched.tick(datetime(2026, 9, 3, 9, 1, tzinfo=KST)) == []
+    assert await sched.tick(datetime(2026, 9, 3, 9, 1, tzinfo=KST)) == [job.job_id]
 
 
 def test_briefing_modules_import_no_model_client():

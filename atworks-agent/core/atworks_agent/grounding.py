@@ -1,6 +1,8 @@
-"""grounding 규칙(우선순위 순): 묶기/원인별/불안정 질문은 aggregate_runs에서 시작하고, 실패/에러/최근 질문은 list_runs에서
-시작하고, 이 세션에서 job을 본 적이 없는데 승인/적용을 말하면 get_pending_jobs에서 시작한다.
-merchant_agent/grounding.py 미러. 한국어는 조사가 붙어 단어경계가 없으므로 한글 needle은 substring으로 본다."""
+"""grounding 규칙(우선순위 순): 원인별/언제부터/불안정 같은 cue-free 어휘, 또는 묶어/패턴/cluster/flaky
+같은 모호한 어휘 + runs 질문 cue(가져/보여/...)가 함께 있으면 aggregate_runs에서 시작하고, 실패/에러/최근
+질문은 list_runs에서 시작하고, 이 세션에서 job을 본 적이 없는데 승인/적용을 말하면 get_pending_jobs에서
+시작한다. merchant_agent/grounding.py 미러. 한국어는 조사가 붙어 단어경계가 없으므로 한글 needle은
+substring으로 본다."""
 from __future__ import annotations
 
 import re
@@ -40,9 +42,15 @@ def job_requested(config: AtworksAgentConfig, text: str) -> bool:
 
 
 def _aggregate(config: AtworksAgentConfig, text: str, _: AtworksSessionState) -> dict[str, Any] | None:
-    # Terms only: "묶어/원인별/언제부터/왔다갔다/불안정" are specific enough that a request cue adds
-    # nothing, and the runs rule (which needs a cue) must not steal these.
-    fires = config.aggregate_grounding_gate and matches_any_ko(text, config.aggregate_intent_terms)
+    # Two-tier vocabulary: "원인별/언제부터/왔다갔다/불안정/since when/flapping" are specific enough
+    # that a request cue adds nothing. "묶어/패턴/cluster/flaky" are ambiguous on their own (e.g.
+    # "이 job들 묶어서 하나로 만들어줘" is not an aggregation request), so those only fire alongside a
+    # runs-style request cue (가져/보여/알려/뭐/...) — the runs rule must not steal a grouping ask
+    # that does carry one.
+    fires = config.aggregate_grounding_gate and (
+        matches_any_ko(text, config.aggregate_intent_terms)
+        or matches_terms_and_cues_ko(text, config.aggregate_intent_cue_terms, config.runs_intent_cues)
+    )
     return {} if fires else None
 
 

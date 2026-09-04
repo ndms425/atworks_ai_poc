@@ -63,7 +63,7 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   The report's run rows link back with `?attach=run:{run_id}` (`ATWORKS_PORTAL_ORIGIN`, default
   `http://localhost:3110`); the portal reads that query param on mount into `pendingAttachments`
   and strips it from the URL. Components are presentation tools filled server-side:
-  `run_digest`, `job_preview`, `question_form`, chips; job lifecycle rides `change_update` with a
+  `run_digest`, `job_preview`, `question_form`, `run_groups`, chips; job lifecycle rides `change_update` with a
   `change_id` alias. **The report is where environments are compared**: a template rendered once
   over a `data.json` the scheduler refreshes, no LLM in the path — `summary.by_env` plus an
   api × data grid, one column per env from the latest run per cell with differing rows flagged,

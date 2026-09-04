@@ -464,8 +464,8 @@ async def test_report_rows_link_back_to_the_portal_attach_url(tmp_path):
     await backend.apply_job(SESSION, job.job_id)
     produced = await backend.execute_job_once(SESSION, job.job_id)
     html = reports.write(backend.ledger.get(job.job_id), produced).read_text(encoding="utf-8")
-    assert '"portal_origin": "http://portal.local:3110"' in html.replace("\\u003c", "<") or "portal.local:3110" in html
     assert "?attach=run:" in html   # template builds the link from data.portal_origin
+    assert "portal.local:3110" in html.replace("\\u003c", "<")
 
 
 async def test_scheduler_uses_only_the_backend_abc(tmp_path):

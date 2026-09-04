@@ -29,7 +29,12 @@ class AtworksBackend(ABC):
         status: str | None = None, api_id: str | None = None, limit: int = 50,
     ) -> list[RunResult]:
         """실행 이력. status는 pass/fail/error/non_pass. 판정값은 aTworks DSL이 낸 그대로다.
-        non_pass는 fail과 error를 함께 묶는다(트리아지 모집단)."""
+        non_pass는 fail과 error를 함께 묶는다(트리아지 모집단).
+
+        A REST adapter must honor two obligations the Mock backend already does: results are
+        ordered newest ``executed_at`` first (callers truncate to ``limit`` on that assumption),
+        and every ``executed_at`` is timezone-aware (a naive value compared against an aware
+        ``since``/``updated_after``/``failed_since`` raises ``TypeError`` downstream)."""
 
     @abstractmethod
     async def get_run(self, session: AtworksSessionContext, run_id: str) -> RunResult | None: ...

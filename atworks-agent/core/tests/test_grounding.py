@@ -57,3 +57,20 @@ def test_plain_failure_question_still_starts_with_list_runs():
 def test_aggregate_gate_can_be_switched_off():
     cfg = AtworksAgentConfig(model="m", aggregate_grounding_gate=False)
     assert first_forced_tool(GROUNDING_RULES, cfg, "실패 원인별로 묶어서 보여줘", AtworksSessionState()) == "list_runs"
+
+
+def test_ambiguous_cue_term_alone_does_not_force_aggregate():
+    # "묶어" is an ambiguous cue-term — without a runs-style request cue (가져/보여/알려/...) it
+    # must not force aggregate_runs on a request that has nothing to do with run history.
+    tool = first_forced_tool(GROUNDING_RULES, CFG, "이 job들 묶어서 하나로 만들어줘", AtworksSessionState())
+    assert tool != "aggregate_runs"
+
+
+def test_ambiguous_cue_term_with_a_request_cue_forces_aggregate():
+    tool = first_forced_tool(GROUNDING_RULES, CFG, "실패 원인별로 묶어서 보여줘", AtworksSessionState())
+    assert tool == "aggregate_runs"
+
+
+def test_cue_free_term_alone_forces_aggregate():
+    tool = first_forced_tool(GROUNDING_RULES, CFG, "환불 API 언제부터 깨졌어?", AtworksSessionState())
+    assert tool == "aggregate_runs"
