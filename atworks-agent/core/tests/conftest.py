@@ -22,11 +22,11 @@ T0 = datetime(2026, 9, 1, 9, tzinfo=UTC)
 
 class InMemoryBackend(AtworksBackend):
     def __init__(self, config: AtworksAgentConfig):
-        self.ledger = JobLedger(config)
         self.apis = {
             "api-1": ApiSpec(api_id="api-1", method="POST", path="/v1/contracts", name="계약 생성", group="contract", updated_at=T0, has_rules=True, params=["contractNo", "amount"]),
             "api-2": ApiSpec(api_id="api-2", method="GET", path="/v1/contracts/{id}", name="계약 조회", group="contract", updated_at=T0 - timedelta(days=20), has_rules=False),
         }
+        self.ledger = JobLedger(config, self.apis)
         self.runs = [
             RunResult(run_id="run-1", api_id="api-1", executed_at=T0, target_env="dev", status=RunStatus.FAIL, failed_rules=["amount >= 0"], http_status=200),
             RunResult(run_id="run-2", api_id="api-2", executed_at=T0 + timedelta(minutes=5), target_env="dev", status=RunStatus.ERROR, http_status=503),

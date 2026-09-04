@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from atworks_agent.config import AtworksAgentConfig
@@ -8,7 +10,15 @@ from atworks_agent.jobs import (
     JobNotApplicable,
     check_job_guardrails,
 )
-from atworks_agent.types import ActorKind, Binding, JobKind, JobSchedule, JobStatus
+from atworks_agent.types import (
+    ActorKind,
+    ApiSpec,
+    Binding,
+    JobKind,
+    JobSchedule,
+    JobStatus,
+    TestDataSet,
+)
 
 CFG = AtworksAgentConfig(model="m", max_apis_per_job=3, allowed_target_envs=("dev", "stg"))
 
@@ -111,3 +121,62 @@ def test_record_execution_advances_only_the_schedule_it_consumed():
     assert [s.done for s in after.schedules] == [0, 1]
     after2 = ledger.record_execution(job.job_id, ["run-0033"], 0)
     assert after2.executions == 2 and [s.done for s in after2.schedules] == [1, 1]
+
+
+def _apis(**params: list[str]) -> dict[str, ApiSpec]:
+    return {
+        api_id: ApiSpec(api_id=api_id, method="POST", path=f"/v1/{api_id}", name=api_id,
+                        updated_at=datetime(2026, 9, 1, tzinfo=UTC), params=list(names))
+        for api_id, names in params.items()
+    }
+
+
+def test_guardrail_env_count_cap():
+    cfg = AtworksAgentConfig(model="m", allowed_target_envs=("dev", "stg", "qa"),
+                             max_target_envs_per_job=2)
+    v = check_job_guardrails(_draft(target_envs=["dev", "stg", "qa"]), cfg)
+    assert any("3 environments" in m and "limit is 2" in m for m in v)
+
+
+def test_guardrail_schedule_list_and_data_set_caps():
+    cfg = AtworksAgentConfig(model="m", max_schedules_per_job=2, max_test_data_sets=1,
+                             max_schedule_count=30)
+    scheds = [JobSchedule(kind="daily", at="09:00", from_date=f"2026-09-0{d}", count=1) for d in (4, 5, 6)]
+    data = [TestDataSet(label="S1", values={"amount": "1"}),
+            TestDataSet(label="S2", values={"amount": "2"})]
+    v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedules=scheds, test_data=data), cfg)
+    assert any("3 schedules" in m and "limit is 2" in m for m in v)
+    assert any("2 test data sets" in m and "limit is 1" in m for m in v)
+
+
+def test_guardrail_matrix_cap_when_each_dimension_is_within_its_own_limit():
+    cfg = AtworksAgentConfig(model="m", max_apis_per_job=100, max_target_envs_per_job=2,
+                             max_test_data_sets=5, max_matrix_size=20)
+    data = [TestDataSet(label=f"S{i}", values={"amount": "1"}) for i in range(3)]
+    v = check_job_guardrails(_draft(api_ids=[f"api-{i}" for i in range(5)],
+                                    target_envs=["dev", "stg"], test_data=data), cfg)
+    assert any("30 runs per execution" in m and "5 APIs × 2 envs × 3 data sets" in m
+               and "limit is 20" in m for m in v)
+
+
+def test_guardrail_duplicate_schedule():
+    s = JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=2)
+    v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedules=[s, s.model_copy()]), CFG)
+    assert any("duplicate schedule" in m for m in v)
+    v2 = check_job_guardrails(
+        _draft(kind=JobKind.SCHEDULED_RUN, schedules=[s, s.model_copy(update={"at": "18:00"})]), CFG)
+    assert not any("duplicate schedule" in m for m in v2)
+
+
+def test_guardrail_test_data_key_must_be_a_param_of_a_selected_api():
+    data = [TestDataSet(label="S1 정상", values={"amount": "1000"})]
+    ok = check_job_guardrails(_draft(test_data=data), CFG, _apis(a=["amount"], b=["id"]))
+    assert not any("test data set" in m for m in ok)
+
+    bad = check_job_guardrails(_draft(test_data=data), CFG, _apis(a=["id"], b=["id"]))
+    assert any("test data set 'S1 정상' binds parameters (amount)" in m for m in bad)
+
+
+def test_guardrail_skips_the_test_data_rule_without_a_catalogue():
+    data = [TestDataSet(label="S1 정상", values={"amount": "1000"})]
+    assert not any("test data set" in m for m in check_job_guardrails(_draft(test_data=data), CFG))

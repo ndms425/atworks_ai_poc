@@ -32,10 +32,10 @@ def stub_verdict(api: ApiSpec, sequence: int) -> tuple[RunStatus, list[str], int
 class MockAtworks(AtworksBackend):
     def __init__(self, config: AtworksAgentConfig, fixtures_dir: Path):
         self._config = config
-        self.ledger = JobLedger(config)
         self.apis: dict[str, ApiSpec] = {
             row["api_id"]: ApiSpec(**row) for row in json.loads((fixtures_dir / "apis.json").read_text(encoding="utf-8"))
         }
+        self.ledger = JobLedger(config, self.apis)
         self.runs: dict[str, RunResult] = {
             row["run_id"]: RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))
         }

@@ -83,7 +83,10 @@ def check_apply_job(state: AtworksSessionState, config: AtworksAgentConfig, job_
                      target_envs=known.target_envs, schedules=known.schedules,
                      test_data=known.test_data, select_where=known.select_where,
                      binding=known.binding, report=known.report)
-    if violations := check_job_guardrails(draft, config):
+    # apis stays None here on purpose: this session may know the job (the host remembered it
+    # for a card click) without ever having seen its APIs, and a missing catalogue must never
+    # become a test-data violation. The ledger re-checks rule 7 with the backend's catalogue.
+    if violations := check_job_guardrails(draft, config, None):
         return ToolOutcome.held(GUARDRAIL_GATE, apply_guardrail_message(violations))
     if config.require_host_approval and job_id not in state.approved_job_ids:
         return ToolOutcome.held(

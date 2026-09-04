@@ -25,3 +25,9 @@ def test_max_apis_per_job_default_is_below_the_provenance_cap():
     default = AtworksAgentConfig(model="m").max_apis_per_job
     assert default == 100
     assert default < PROVENANCE_CAP
+
+
+def test_matrix_caps_are_config_fields_with_defaults():
+    cfg = AtworksAgentConfig(model="m")
+    assert (cfg.max_target_envs_per_job, cfg.max_schedules_per_job,
+            cfg.max_test_data_sets, cfg.max_matrix_size) == (2, 3, 5, 400)

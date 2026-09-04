@@ -2,6 +2,7 @@
 guardrail은 stage 시점과 apply 시점에 두 번 돈다 — apply 때 config가 더 엄격해졌을 수 있다."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -9,7 +10,16 @@ from commerce_common.fencing import truncate_display
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .config import AtworksAgentConfig
-from .types import ActorKind, Binding, JobKind, JobSchedule, JobSpec, JobStatus, TestDataSet
+from .types import (
+    ActorKind,
+    ApiSpec,
+    Binding,
+    JobKind,
+    JobSchedule,
+    JobSpec,
+    JobStatus,
+    TestDataSet,
+)
 
 
 class GuardrailViolation(ValueError):
@@ -54,7 +64,19 @@ class JobDraft(BaseModel):
         return value
 
 
-def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[str]:
+def check_job_guardrails(
+    draft: JobDraft,
+    config: AtworksAgentConfig,
+    apis: Mapping[str, ApiSpec] | None = None,
+) -> list[str]:
+    """Every rule a staged job must satisfy, checked at stage time and again at apply time —
+    apply-time config may have tightened. Adding a rule here is the only way to add one:
+    both phases and both call sites (``JobLedger``, ``gates.check_apply_job``) read this list.
+
+    ``apis`` is the catalogue rule 7 (test-data keys must be parameters of a selected API)
+    needs. ``None`` skips that one rule, and a caller that cannot see the catalogue must pass
+    ``None`` rather than an empty mapping — a session that knows a job but not its APIs would
+    otherwise turn every binding into a violation."""
     violations: list[str] = []
     if len(draft.api_ids) > config.max_apis_per_job:
         violations.append(
@@ -71,6 +93,33 @@ def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[st
             f"target_envs {', '.join(bad_envs)} are not allowed targets "
             f"({', '.join(config.allowed_target_envs)}); the assistant may never target them"
         )
+    # Rule 2 — per-dimension counts.
+    if len(draft.target_envs) > config.max_target_envs_per_job:
+        violations.append(
+            f"job targets {len(draft.target_envs)} environments and the limit is "
+            f"{config.max_target_envs_per_job} per job; narrow the selection"
+        )
+    if len(draft.schedules) > config.max_schedules_per_job:
+        violations.append(
+            f"job carries {len(draft.schedules)} schedules and the limit is "
+            f"{config.max_schedules_per_job} per job; combine or drop some"
+        )
+    if len(draft.test_data) > config.max_test_data_sets:
+        violations.append(
+            f"job carries {len(draft.test_data)} test data sets and the limit is "
+            f"{config.max_test_data_sets} per job; drop some"
+        )
+    # Rule 3 — the product. The dimensions multiply rather than concatenate, so no
+    # per-dimension cap bounds the total work on its own (50 APIs × 2 envs × 5 data sets
+    # passes every cap above and is 500 runs an execution).
+    data_sets = max(1, len(draft.test_data))
+    matrix = len(draft.api_ids) * len(draft.target_envs) * data_sets
+    if matrix > config.max_matrix_size:
+        violations.append(
+            f"job expands to {matrix} runs per execution ({len(draft.api_ids)} APIs × "
+            f"{len(draft.target_envs)} envs × {data_sets} data sets) and the limit is "
+            f"{config.max_matrix_size}; narrow the selection"
+        )
     if draft.kind is JobKind.SCHEDULED_RUN:
         if not draft.schedules:
             violations.append("a scheduled_run needs at least one schedule")
@@ -83,6 +132,27 @@ def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[st
         violations.append(
             f"schedules total {scheduled_runs} runs and the limit is {config.max_schedule_count} per job; shorten them"
         )
+    # Rule 6 — a repeated schedule is a mistake, unlike a repeated api id (which the
+    # executor de-duplicates): two identical entries would double every occurrence silently.
+    seen_schedules: set[tuple[str, str, str, str]] = set()
+    for s in draft.schedules:
+        key = (s.kind, s.at, s.tz, s.from_date)
+        if key in seen_schedules:
+            violations.append(
+                f"duplicate schedule: two entries share kind={s.kind}, at={s.at}, tz={s.tz}, "
+                f"from_date={s.from_date} — a repeated schedule is a mistake; drop one or raise its count"
+            )
+        seen_schedules.add(key)
+    # Rule 7 — a data set may only bind parameters the selected APIs actually declare.
+    if apis is not None:
+        known = {p for i in draft.api_ids for p in (apis[i].params if i in apis else [])}
+        for data in draft.test_data:
+            unknown = sorted(k for k in data.values if k not in known)
+            if unknown:
+                violations.append(
+                    f"test data set '{data.label}' binds parameters ({', '.join(unknown)}) that "
+                    "none of the selected APIs declares"
+                )
     if draft.binding is Binding.LATE and not draft.select_where:
         violations.append(
             "LATE binding needs the select_where that produced the selection — pass the search_apis arguments"
@@ -93,13 +163,14 @@ def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[st
 class JobLedger:
     """백엔드가 얹어 쓸 수 있는 인메모리 생명주기. 적용·폐기된 job도 감사 이력으로 남는다."""
 
-    def __init__(self, config: AtworksAgentConfig):
+    def __init__(self, config: AtworksAgentConfig, apis: Mapping[str, ApiSpec] | None = None):
         self._config = config
+        self._apis = apis          # rule 7's catalogue; None (no catalogue) skips that rule
         self._jobs: dict[str, JobSpec] = {}
         self._sequence = 0
 
     def stage(self, draft: JobDraft, *, actor: str, actor_kind: ActorKind = ActorKind.OPERATOR) -> JobSpec:
-        violations = check_job_guardrails(draft, self._config)
+        violations = check_job_guardrails(draft, self._config, self._apis)
         if violations:
             raise GuardrailViolation(violations)
         self._sequence += 1
@@ -140,7 +211,7 @@ class JobLedger:
                          target_envs=job.target_envs, schedules=job.schedules,
                          test_data=job.test_data, select_where=job.select_where,
                          binding=job.binding, report=job.report)
-        violations = check_job_guardrails(draft, self._config)
+        violations = check_job_guardrails(draft, self._config, self._apis)
         if violations:
             raise GuardrailViolation(violations)
         updated = job.model_copy(update={"status": JobStatus.APPLIED,

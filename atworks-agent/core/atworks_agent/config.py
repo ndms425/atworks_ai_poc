@@ -27,7 +27,11 @@ class AtworksAgentConfig(BaseAgentConfig):
     # -- guardrail (stage·apply 2회 검사) ---------------------------------------------
     max_apis_per_job: int = Field(default=100, ge=1)
     allowed_target_envs: tuple[str, ...] = ("dev", "stg")
-    max_schedule_count: int = Field(default=14, ge=1)
+    max_target_envs_per_job: int = Field(default=2, ge=1)      # 한 job이 겨냥할 수 있는 계 수
+    max_schedules_per_job: int = Field(default=3, ge=1)        # 스케줄 항목 수 (회차 수가 아니다)
+    max_test_data_sets: int = Field(default=5, ge=1)           # 테스트 데이터 세트 수
+    max_matrix_size: int = Field(default=400, ge=1)            # apis × envs × data 곱의 상한
+    max_schedule_count: int = Field(default=14, ge=1)          # 전체 스케줄의 회차 합
     max_concurrency: int = Field(default=4, ge=1, le=32)
 
     # -- 승인 --------------------------------------------------------------------------
