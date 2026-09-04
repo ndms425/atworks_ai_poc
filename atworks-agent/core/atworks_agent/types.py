@@ -1,0 +1,155 @@
+"""aTworks 도메인 타입. merchant_agent/types.py의 구조를 따른다: 레코드(ApiSpec·RunResult),
+스코어 결과(FailedRank), 스테이징 레코드(JobSpec), 세션 컨텍스트/상태. 상태의 seen_* 맵은
+provenance 기록이다: 쓰기 게이트는 여기 있는 id만 받고, presentation은 여기서 값을 조인한다."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Any, Literal
+
+from commerce_common.types import ClockContext, remember
+from pydantic import BaseModel, Field
+
+# -- 레코드 ---------------------------------------------------------------------------
+
+class ApiSpec(BaseModel):
+    api_id: str
+    method: str
+    path: str
+    name: str
+    group: str | None = None
+    updated_at: datetime
+    has_rules: bool = False
+    params: list[str] = Field(default_factory=list)
+
+
+class RunStatus(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"
+    ERROR = "error"
+
+
+class RunResult(BaseModel):
+    """실행 1건. status는 결정론 DSL(Mock에선 스텁)이 낸 값이고 LLM은 이 값을 바꾸지 못한다."""
+    run_id: str
+    api_id: str
+    executed_at: datetime
+    target_env: str
+    status: RunStatus
+    failed_rules: list[str] = Field(default_factory=list)
+    http_status: int | None = None
+    duration_ms: int | None = None
+    job_id: str | None = None
+
+
+class FailedRank(BaseModel):
+    """스코어러 출력 1건. score와 reasons는 scoring.py의 결정론 함수가 만든다."""
+    run_id: str
+    api_id: str
+    scorer: str
+    score: float
+    reasons: list[str] = Field(default_factory=list)
+
+
+# -- 실행 계획(JobSpec) ---------------------------------------------------------------
+
+class JobKind(StrEnum):
+    RUN_NOW = "run_now"
+    SCHEDULED_RUN = "scheduled_run"
+
+
+class JobStatus(StrEnum):
+    STAGED = "staged"
+    APPLIED = "applied"
+    DISCARDED = "discarded"
+
+
+class ActorKind(StrEnum):
+    OPERATOR = "operator"
+    AGENT = "agent"
+
+
+class Binding(StrEnum):
+    FROZEN = "FROZEN"   # stage 시점에 풀린 api_ids를 그대로 쓴다
+    LATE = "LATE"       # 실행 때마다 select_where를 다시 평가한다
+
+
+class JobSchedule(BaseModel):
+    kind: Literal["once", "daily"]
+    at: str = Field(pattern=r"^\d{2}:\d{2}$")   # "09:00"
+    tz: str = "Asia/Seoul"
+    from_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    count: int = Field(ge=1, le=30)
+
+
+class JobSpec(BaseModel):
+    """LLM이 초안을 잡고 사람이 승인하는 실행 계획. StagedChange 미러.
+    ``confidence``는 슬롯별 확신도(0~1)로 승인 카드가 낮은 항목을 강조하는 데 쓴다.
+    ``assumptions``는 LLM이 기본값으로 채운 슬롯의 설명이다."""
+    job_id: str
+    kind: JobKind
+    status: JobStatus = JobStatus.STAGED
+    summary: str = Field(max_length=200)
+    api_ids: list[str] = Field(default_factory=list)
+    select_where: dict[str, Any] | None = None
+    binding: Binding = Binding.FROZEN
+    target_env: str
+    schedule: JobSchedule | None = None
+    report: bool = True
+    confidence: dict[str, float] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+    guardrail_notes: list[str] = Field(default_factory=list)
+    created_at: datetime
+    created_by: str
+    created_by_kind: ActorKind = ActorKind.OPERATOR
+    applied_at: datetime | None = None
+    applied_by: str | None = None
+    discarded_at: datetime | None = None
+    discarded_by: str | None = None
+    run_ids: list[str] = Field(default_factory=list)
+    runs_remaining: int | None = None
+
+
+# -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------
+
+class AttachedItem(BaseModel):
+    order: int
+    kind: Literal["run", "api", "job"]
+    ref_id: str
+    label: str = Field(max_length=120)
+    field: str | None = Field(default=None, max_length=80)
+    actual: str | None = Field(default=None, max_length=200)
+    expected: str | None = Field(default=None, max_length=200)
+    comment: str | None = Field(default=None, max_length=300)
+
+
+# -- 세션 ------------------------------------------------------------------------------
+
+class AtworksSessionContext(ClockContext):
+    session_id: str
+    project_id: str
+    operator: str
+
+
+class AtworksSessionState(BaseModel):
+    seen_apis: dict[str, ApiSpec] = Field(default_factory=dict)
+    seen_runs: dict[str, RunResult] = Field(default_factory=dict)
+    seen_ranks: dict[str, FailedRank] = Field(default_factory=dict)
+    seen_jobs: dict[str, JobSpec] = Field(default_factory=dict)
+    last_population: int | None = None
+    approved_job_ids: set[str] = Field(default_factory=set)
+    host_action_job_ids: set[str] = Field(default_factory=set)
+    attached_items: list[AttachedItem] = Field(default_factory=list)
+
+    def remember_api(self, api: ApiSpec) -> None:
+        remember(self.seen_apis, api.api_id, api)
+
+    def remember_run(self, run: RunResult) -> None:
+        remember(self.seen_runs, run.run_id, run)
+
+    def remember_rank(self, rank: FailedRank) -> None:
+        remember(self.seen_ranks, rank.run_id, rank)
+
+    def remember_job(self, job: JobSpec) -> None:
+        remember(self.seen_jobs, job.job_id, job)
