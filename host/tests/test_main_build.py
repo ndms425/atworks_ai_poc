@@ -123,3 +123,37 @@ def test_build_deletes_empty_credential_env_vars(monkeypatch, tmp_path):
     # ANTHROPIC_AUTH_TOKEN (Bearer) must still be set
     assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "tok_valid_bearer", \
         f"ANTHROPIC_AUTH_TOKEN should still be set, but got: {os.environ.get('ANTHROPIC_AUTH_TOKEN')!r}"
+
+
+def test_build_env_overrides_inherited_shell_variables(monkeypatch, tmp_path):
+    """Proves .env values take precedence over inherited shell variables (R39).
+    Developer shells often export ANTHROPIC_BASE_URL for other tools; this test
+    verifies the repo's .env file overrides those inherited values."""
+    import os
+
+    # Set shell environment variable (simulating inherited shell export)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://shell.invalid")
+    monkeypatch.setenv("ATWORKS_TRUST_OS_CA", "0")
+
+    # Create .env with different values
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_BASE_URL=https://file.invalid\nATWORKS_TRUST_OS_CA=0")
+
+    # Import atworks_host.main
+    import atworks_host.main as main
+
+    # Point main.ROOT to tmp_path so load_dotenv finds our .env
+    monkeypatch.setattr("atworks_host.main.ROOT", tmp_path)
+
+    # Mock out the dependencies that try to access the filesystem
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: None)
+    monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
+    monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
+    monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
+
+    # Call build() - .env should override inherited ANTHROPIC_BASE_URL
+    app, backend, scheduler = main.build()
+
+    # After build(), ANTHROPIC_BASE_URL must be the .env value, not the shell value
+    assert os.environ["ANTHROPIC_BASE_URL"] == "https://file.invalid", \
+        f"Expected .env value 'https://file.invalid', but got: {os.environ.get('ANTHROPIC_BASE_URL')!r}"

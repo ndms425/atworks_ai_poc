@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 def build() -> tuple:
-    load_dotenv(ROOT / ".env")
+    # This deployment's .env takes precedence over inherited shell variables.
+    load_dotenv(ROOT / ".env", override=True)
     # Empty credentials break auth fallback: the SDK treats "" as a present key and sends it.
     # Unset them so the SDK tries the next auth method.
     for cred in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):

@@ -4,6 +4,7 @@
 Anthropic 호환 엔드포인트(`ANTHROPIC_BASE_URL=https://openrouter.ai/api`)에 Qwen 슬러그를, 폐쇄망은
 vLLM/TGI 앞에 LiteLLM 프록시(`/v1/messages`)를 두고 같은 두 환경변수만 바꾼다. 코드 변경 0.
 정확히 하나의 인증 변수를 설정: `ANTHROPIC_AUTH_TOKEN`(Bearer, OpenRouter/LiteLLM용) 또는 `ANTHROPIC_API_KEY`(x-api-key); 빈 `ANTHROPIC_API_KEY=` 줄은 Bearer 인증을 망가뜨리므로 `main.py`가 빈 값을 제거한다.
+`.env` overrides inherited shell variables, so a shell that exports `ANTHROPIC_BASE_URL` for another tool does not redirect the host.
 
 Anthropic 전용 요청 필드는 보내지 않는다: `send_thinking_fields=False`(config), presentation 컴포넌트에
 `enrich_partial`이 없어 `eager_input_streaming` 플래그도 붙지 않는다. `cache_control` 마커는 그대로 보낸다 —
