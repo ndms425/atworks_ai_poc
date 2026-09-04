@@ -253,6 +253,90 @@ async def test_two_schedules_due_in_the_same_tick_run_twice(tmp_path):
     assert len(after.run_ids) == 2                  # one api × one env × no data, twice
 
 
+async def _matrix_report(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="dev/stg 비교", api_ids=["api-001", "api-007"],
+        target_envs=["dev", "stg"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+    return backend, reports, job
+
+
+async def test_report_matrix_rows_flag_env_differences(tmp_path):
+    _, _, job = await _matrix_report(tmp_path)
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+
+    assert data["matrix"]["envs"] == ["dev", "stg"]
+    assert data["matrix"]["differs_count"] == 1
+    rows = {r["api_id"]: r for r in data["matrix"]["rows"]}
+    assert rows["api-007"]["differs"] is True
+    assert rows["api-007"]["cells"]["dev"]["status"] == "pass"
+    assert rows["api-007"]["cells"]["stg"]["status"] == "error"
+    assert rows["api-007"]["cells"]["stg"]["run_id"].startswith("run-")
+    assert rows["api-001"]["differs"] is False
+    assert rows["api-001"]["test_data_label"] is None
+    assert data["summary"]["total"] == 4
+    assert data["summary"]["by_env"]["dev"] == {"total": 2, "pass": 2, "fail": 0, "error": 0}
+    assert data["summary"]["by_env"]["stg"] == {"total": 2, "pass": 1, "fail": 0, "error": 1}
+
+
+async def test_report_matrix_uses_the_latest_run_per_cell(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="dev/stg 비교 반복", api_ids=["api-001", "api-007"],
+        target_envs=["dev", "stg"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-05", count=2)]),
+        ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+    first = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    first_stg_run_id = {r["api_id"]: r for r in first["matrix"]["rows"]}["api-007"]["cells"]["stg"]["run_id"]
+
+    assert await sched.tick(datetime(2026, 9, 6, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    second = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    rows = {r["api_id"]: r for r in second["matrix"]["rows"]}
+    # Latest-run semantics: the matrix reflects the second execution, not a merge of both.
+    assert len(second["runs"]) == 8
+    assert rows["api-007"]["cells"]["stg"]["run_id"] != first_stg_run_id
+    assert rows["api-007"]["differs"] is True
+
+
+async def test_report_template_renders_the_comparison_table(tmp_path):
+    _, reports, job = await _matrix_report(tmp_path)
+    html = reports.read_html(job.job_id)
+
+    assert '"envs": ["dev", "stg"]' in html and '"differs_count": 1' in html
+    template_source = TEMPLATE.read_text(encoding="utf-8")
+    assert "compare-rows" in template_source and "차이" in template_source
+    assert "d.job.target_envs.join" in template_source
+    assert "esc(" in template_source
+
+
+async def test_report_single_env_job_has_no_comparison_table_data(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="dev only", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    assert data["matrix"]["envs"] == ["dev"]
+    assert data["matrix"]["differs_count"] == 0
+    assert all(r["differs"] is False for r in data["matrix"]["rows"])
+
+    template_source = TEMPLATE.read_text(encoding="utf-8")
+    assert "envs.length>1" in template_source or "envs.length > 1" in template_source
+
+
 async def test_scheduler_uses_only_the_backend_abc(tmp_path):
     now = datetime.now(UTC)
     job = JobSpec(job_id="job-01", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED, summary="s",

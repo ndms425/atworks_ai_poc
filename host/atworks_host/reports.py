@@ -16,6 +16,37 @@ TEMPLATE = Path(__file__).with_name("report_template.html")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def _matrix(job: JobSpec, runs: list[RunResult]) -> dict:
+    """The api × data grid, one column per environment, built from the LATEST run per
+    (api_id, test_data_label, env). A row `differs` when its cells do not agree — that, and
+    the count of such rows, is the whole comparison the operator asked for. No model output
+    reaches this: every status here is a run record's own verdict."""
+    envs = list(job.target_envs)
+    latest: dict[tuple[str, str | None, str], RunResult] = {}
+    order: list[tuple[str, str | None]] = []
+    for run in runs:
+        key = (run.api_id, run.test_data_label, run.target_env)
+        current = latest.get(key)
+        if current is None or run.executed_at >= current.executed_at:
+            latest[key] = run
+        if (run.api_id, run.test_data_label) not in order:
+            order.append((run.api_id, run.test_data_label))
+    rows: list[dict] = []
+    for api_id, label in sorted(order, key=lambda pair: (pair[0], pair[1] or "")):
+        cells = {
+            env: {"status": latest[(api_id, label, env)].status.value,
+                  "run_id": latest[(api_id, label, env)].run_id}
+            for env in envs if (api_id, label, env) in latest
+        }
+        rows.append({
+            "api_id": api_id,
+            "test_data_label": label,
+            "cells": cells,
+            "differs": len({c["status"] for c in cells.values()}) > 1,
+        })
+    return {"envs": envs, "rows": rows, "differs_count": sum(1 for r in rows if r["differs"])}
+
+
 class Reports:
     def __init__(self, out_dir: Path):
         self.out_dir = out_dir
@@ -33,12 +64,20 @@ class Reports:
     def write(self, job: JobSpec, runs: list[RunResult], *, generator: str = "refresh_runner") -> Path:
         folder = self._folder(job.job_id)
         folder.mkdir(parents=True, exist_ok=True)
-        counts = {"total": len(runs), "pass": 0, "fail": 0, "error": 0}
+        counts: dict = {"total": len(runs), "pass": 0, "fail": 0, "error": 0}
+        by_env: dict[str, dict[str, int]] = {
+            env: {"total": 0, "pass": 0, "fail": 0, "error": 0} for env in job.target_envs
+        }
         for r in runs:
             counts[r.status.value] += 1
+            bucket = by_env.setdefault(r.target_env, {"total": 0, "pass": 0, "fail": 0, "error": 0})
+            bucket["total"] += 1
+            bucket[r.status.value] += 1
+        counts["by_env"] = by_env
         data = {
             "job": job.model_dump(mode="json", exclude_none=True),
             "summary": counts,
+            "matrix": _matrix(job, runs),
             "runs": [r.model_dump(mode="json", exclude_none=True) for r in runs],
             "provenance": {"generator": generator, "generated_at": datetime.now(UTC).isoformat()},
         }
