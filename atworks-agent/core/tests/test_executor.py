@@ -64,8 +64,8 @@ async def test_rank_uses_last_listed_window(backend, config, skills, session, st
 
 async def test_stage_job_holds_unknown_api_then_stages_with_preview(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
-    draft = {"kind": "run_now", "summary": "run contracts", "api_ids": ["api-1"], "target_env": "dev",
-             "confidence": {"target_env": 0.3}, "assumptions": ["target_env defaulted to dev"]}
+    draft = {"kind": "run_now", "summary": "run contracts", "api_ids": ["api-1"], "target_envs": ["dev"],
+             "confidence": {"target_envs": 0.3}, "assumptions": ["target_env defaulted to dev"]}
     held = await ex.execute("stage_job", draft)
     assert held.blocked == "provenance"
     await ex.execute("search_apis", {"query": ""})
@@ -74,31 +74,31 @@ async def test_stage_job_holds_unknown_api_then_stages_with_preview(backend, con
     kinds = [(e.type, e.data.get("component")) for e in out.events]
     assert kinds == [("change_update", None), ("ui", "job_preview")]
     job_id = next(iter(state.seen_jobs))
-    assert out.events[1].data["payload"]["low_confidence"] == ["target_env"]
+    assert out.events[1].data["payload"]["low_confidence"] == ["target_envs"]
     assert "Staged, and shown" in out.result_text and job_id == "job-0001"
 
 
-async def test_stage_job_rejects_an_oversized_target_env(backend, config, skills, session, state):
+async def test_stage_job_truncates_an_oversized_target_env_then_the_guardrail_blocks_it(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
     out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
-                                          "target_env": "x" * 200})
-    assert out.is_error
-    assert "target_env" in out.result_text
-    assert "unavailable" not in out.result_text
+                                          "target_envs": ["x" * 200]})
+    assert out.blocked == "guardrail"
+    assert "not allowed targets" in out.result_text
+    assert "x" * 33 not in out.result_text   # sanitized to 32 chars before the message is built
 
 
 async def test_stage_job_guardrail_prod(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
-    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "prod"})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["prod"]})
     assert out.blocked == "guardrail" and "prod" in out.result_text
 
 
 async def test_apply_requires_host_mark(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
-    await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "dev"})
+    await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"]})
     held = await ex.execute("apply_job", {"job_id": "job-0001"})
     assert held.blocked == "approval"
     state.approved_job_ids.add("job-0001")
@@ -153,21 +153,21 @@ async def test_stage_job_guardrail_checked_before_backend_call(backend, config, 
             from atworks_agent.types import ActorKind as AK
             from atworks_agent.types import JobSpec
             return JobSpec(job_id="job-bypass", kind=draft.kind, summary=draft.summary,
-                           api_ids=draft.api_ids, target_env=draft.target_env,
+                           api_ids=draft.api_ids, target_envs=draft.target_envs,
                            created_at=datetime.now(UTC), created_by=session.operator,
                            created_by_kind=AK.AGENT)
 
     permissive = PermissiveBackend(config)
     ex = _exec(permissive, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
-    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "prod"})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["prod"]})
     assert out.blocked == "guardrail"
 
 
 async def test_stage_job_dedupes_api_ids(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
-    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1", "api-1"], "target_env": "dev"})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1", "api-1"], "target_envs": ["dev"]})
     assert not out.refused
     job_id = next(iter(state.seen_jobs))
     assert state.seen_jobs[job_id].api_ids == ["api-1"]
@@ -176,7 +176,7 @@ async def test_stage_job_dedupes_api_ids(backend, config, skills, session, state
 async def test_stage_job_rejects_select_where_with_unknown_field(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
-    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "dev",
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"],
                                           "binding": "LATE", "select_where": {"query": "x", "evil": 1}})
     assert out.is_error
     assert "unavailable" not in out.result_text
@@ -212,7 +212,7 @@ async def test_get_run_of_a_pass_run_does_not_grow_a_non_pass_population(backend
 async def test_stage_job_accepts_select_where_group_only(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
-    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "dev",
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"],
                                           "binding": "LATE", "select_where": {"group": "contract"}})
     assert not out.refused
     job_id = next(iter(state.seen_jobs))

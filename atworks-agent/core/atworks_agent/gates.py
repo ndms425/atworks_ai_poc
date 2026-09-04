@@ -80,8 +80,9 @@ def check_apply_job(state: AtworksSessionState, config: AtworksAgentConfig, job_
             "get_pending_jobs) first, preview it, and apply it only after the operator approves it.",
         )
     draft = JobDraft(kind=known.kind, summary=known.summary, api_ids=known.api_ids,
-                     target_env=known.target_env, schedule=known.schedule,
-                     select_where=known.select_where, binding=known.binding, report=known.report)
+                     target_envs=known.target_envs, schedules=known.schedules,
+                     test_data=known.test_data, select_where=known.select_where,
+                     binding=known.binding, report=known.report)
     if violations := check_job_guardrails(draft, config):
         return ToolOutcome.held(GUARDRAIL_GATE, apply_guardrail_message(violations))
     if config.require_host_approval and job_id not in state.approved_job_ids:

@@ -17,7 +17,7 @@ tr.fail td:nth-child(3){color:#b42318;font-weight:600}tr.error td:nth-child(3){c
 const esc=(v)=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const d=JSON.parse(document.getElementById('report-data').textContent);
 document.getElementById('title').textContent=d.job.summary;
-document.getElementById('meta').textContent=`${d.job.job_id} · target ${d.job.target_env} · ${d.job.api_ids.length} APIs · runs so far ${d.job.run_ids.length}`;
+document.getElementById('meta').textContent=`${d.job.job_id} · target ${d.job.target_envs.join(', ')} · ${d.job.api_ids.length} APIs · runs so far ${d.job.run_ids.length}`;
 for(const k of ['total','fail','error','pass'])document.getElementById('t-'+k).textContent=d.summary[k];
 const order={fail:0,error:1,pass:2};
 document.getElementById('rows').innerHTML=[...d.runs].sort((a,b)=>order[a.status]-order[b.status]).map(r=>`<tr class="${esc(r.status)}"><td>${esc(r.run_id)}</td><td>${esc(r.api_id)}</td><td>${esc(r.status)}</td><td>${esc((r.failed_rules||[]).join(', '))}</td><td>${esc(r.http_status)}</td><td>${esc(r.executed_at)}</td></tr>`).join('');

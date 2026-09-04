@@ -24,6 +24,7 @@ from .types import (
     JobStatus,
     RunResult,
     RunStatus,
+    TestDataSet,
 )
 
 __all__ = [n for n in dir() if not n.startswith("_")]

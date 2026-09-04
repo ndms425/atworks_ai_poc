@@ -59,9 +59,9 @@ async def test_stage_turn_shows_preview_and_change_update(make_agent, session, s
     closing.content.insert(0, text_block("Jobs 페이지에서 승인하면 실행됩니다."))
     agent = make_agent([
         tool_use_message("search_apis", {"query": "", "updated_after": "2026-08-27T00:00:00+09:00"}),
-        tool_calls_message(("stage_job", {"kind": "scheduled_run", "summary": "1주일 업데이트분 3일간 09시", "api_ids": ["api-1"], "target_env": "dev",
-                                          "schedule": {"kind": "daily", "at": "09:00", "from_date": "2026-09-04", "count": 3},
-                                          "confidence": {"target_env": 0.3}, "assumptions": ["target_env defaulted to dev"]}, "tu-stage")),
+        tool_calls_message(("stage_job", {"kind": "scheduled_run", "summary": "1주일 업데이트분 3일간 09시", "api_ids": ["api-1"], "target_envs": ["dev"],
+                                          "schedules": [{"kind": "daily", "at": "09:00", "from_date": "2026-09-04", "count": 3}],
+                                          "confidence": {"target_envs": 0.3}, "assumptions": ["target_envs defaulted to [dev]"]}, "tu-stage")),
         closing,
     ])
     events, _ = await run_turn(agent, "지난 1주일 업데이트된 api 오늘부터 3일간 매일 9시에 실행해줘", session, state)

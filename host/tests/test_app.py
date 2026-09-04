@@ -75,7 +75,7 @@ async def test_host_click_applies_job_staged_outside_the_session(client_backend)
     client, backend = client_backend
     session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
     job = await backend.stage_job(
-        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers={"X-Session-Id": sid})
@@ -98,7 +98,7 @@ async def test_report_opens_without_session_header(client):
     reports = client.reports
     session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
     job = await backend.stage_job(
-        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     await backend.apply_job(session, job.job_id)
     runs = await backend.execute_job_once(session, job.job_id)
@@ -172,7 +172,7 @@ async def test_apply_click_consumes_the_mark(client_backend):
     client, backend = client_backend
     session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
     job = await backend.stage_job(
-        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers={"X-Session-Id": sid})
@@ -190,7 +190,7 @@ async def test_route_discard_records_operator(client_backend):
     client, backend = client_backend
     session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
     job = await backend.stage_job(
-        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/changes/{job.job_id}/discard", headers={"X-Session-Id": sid})
@@ -223,7 +223,7 @@ async def test_job_action_route_uses_the_agents_executor_class(client_with_custo
     client, backend = client_with_custom_executor
     session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
     job = await backend.stage_job(
-        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/changes/{job.job_id}/discard", headers={"X-Session-Id": sid})

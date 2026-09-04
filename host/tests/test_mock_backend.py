@@ -27,7 +27,7 @@ async def test_count_runs_is_population_not_limit():
 
 async def test_execute_job_once_is_deterministic_and_records_runs():
     b = _backend()
-    job = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001", "api-003"], target_env="dev"), ActorKind.AGENT)
+    job = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001", "api-003"], target_envs=["dev"]), ActorKind.AGENT)
     await b.apply_job(SESSION, job.job_id)
     first = await b.execute_job_once(SESSION, job.job_id)
     statuses = {r.api_id: r.status.value for r in first}
@@ -42,22 +42,22 @@ async def test_late_binding_over_limit_skips_execution_and_notes_guardrail():
     job = await b.stage_job(
         SESSION,
         JobDraft(kind=JobKind.RUN_NOW, summary="late", api_ids=["api-001", "api-002", "api-003"],
-                 target_env="dev", binding="LATE", select_where={"query": ""}),
+                 target_envs=["dev"], binding="LATE", select_where={"query": ""}),
         ActorKind.AGENT,
     )
     await b.apply_job(SESSION, job.job_id)
-    before = b.ledger.get(job.job_id).runs_remaining
+    before = b.ledger.get(job.job_id).remaining_executions
     produced = await b.execute_job_once(SESSION, job.job_id)
     assert produced == []
     updated = b.ledger.get(job.job_id)
     assert len(updated.guardrail_notes) == 1
     assert "LATE" in updated.guardrail_notes[0]
     # the slot is consumed even though nothing ran, so the schedule does not spin forever
-    assert updated.runs_remaining == before - 1
+    assert updated.remaining_executions == before - 1
 
     # no slots remain: execute_job_once must not add a second note or consume another slot
     again = await b.execute_job_once(SESSION, job.job_id)
     assert again == []
     final = b.ledger.get(job.job_id)
     assert len(final.guardrail_notes) == 1
-    assert final.runs_remaining == 0
+    assert final.remaining_executions == 0

@@ -109,13 +109,13 @@ async def test_run_digest_refused_without_population():
 
 async def test_job_preview_joins_staged_record():
     state = AtworksSessionState()
-    state.remember_job(JobSpec(job_id="job-0001", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"], target_env="dev",
-                               confidence={"target_env": 0.3}, assumptions=["target_env defaulted to dev"],
+    state.remember_job(JobSpec(job_id="job-0001", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"], target_envs=["dev"],
+                               confidence={"target_envs": 0.3}, assumptions=["target_env defaulted to dev"],
                                created_at=datetime.now(UTC), created_by="op"))
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_job_preview"], {"job_id": "job-0001", "headline": "h"}, _ctx(state), "Shown.")
     payload = outcome.events[0].data["payload"]
-    assert payload["job"]["job_id"] == "job-0001" and payload["job"]["confidence"]["target_env"] == 0.3
-    assert payload["low_confidence"] == ["target_env"]
+    assert payload["job"]["job_id"] == "job-0001" and payload["job"]["confidence"]["target_envs"] == 0.3
+    assert payload["low_confidence"] == ["target_envs"]
 
 
 async def test_job_preview_refuses_unknown_job():

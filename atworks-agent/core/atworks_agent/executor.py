@@ -253,15 +253,37 @@ class AtworksToolExecutor(BaseToolExecutor):
         select_where = tool_input.get("select_where")
         if select_where is not None:
             select_where = parse_argument(SelectWhere, select_where).model_dump(mode="json", exclude_none=True)
+        # Envs are sanitized to the per-item cap and de-duplicated the way api_ids are: a
+        # repeated env is a harmless restatement, and an over-long one is trimmed here so the
+        # guardrail message names a readable value instead of a wall of text. The trimmed
+        # value still has to be on the allow-list, so nothing slips through by being long.
+        target_envs = list(dict.fromkeys(
+            self._sanitize(e, 32) for e in (_coerce_list(tool_input.get("target_envs")) or [])
+        ))
+        # Test-data labels, keys and values are model-authored strings that end up on a card
+        # and in a report: sanitize each through the fence before pydantic validates them.
+        # A label that had to be truncated or scrubbed carries the fence's "...[truncated]" /
+        # "[removed]" marker, whose brackets TestDataSet.label's pattern rejects — an
+        # over-long or hostile label surfaces as a named invalid-arguments error rather than
+        # being quietly mangled into something the operator then approves.
+        test_data = [
+            {
+                "label": self._sanitize(item.get("label"), 40),
+                "values": {
+                    self._sanitize(key, 60): self._sanitize(value, 200)
+                    for key, value in (item.get("values") or {}).items()
+                },
+            }
+            for item in (_coerce_list(tool_input.get("test_data")) or [])
+            if isinstance(item, dict)
+        ]
         draft = parse_argument(JobDraft, {
             "kind": tool_input.get("kind"), "summary": self._sanitize(tool_input.get("summary"), 200),
             "api_ids": api_ids,
-            # Not truncated here: JobDraft.target_env caps at 32 chars, and an oversized
-            # value should surface as a clear invalid-arguments error naming the field
-            # rather than being silently mangled and then possibly rejected later by the
-            # guardrail check with a truncated value in the message (R47/Minor 4).
-            "target_env": self._sanitize(tool_input.get("target_env"), None),
-            "schedule": tool_input.get("schedule"), "select_where": select_where,
+            "target_envs": target_envs,
+            "schedules": _coerce_list(tool_input.get("schedules")) or [],
+            "test_data": test_data,
+            "select_where": select_where,
             "binding": tool_input.get("binding") or "FROZEN", "report": tool_input.get("report", True),
             "confidence": tool_input.get("confidence") or {},
             "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],

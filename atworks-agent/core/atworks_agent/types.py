@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from commerce_common.types import ClockContext, remember
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # -- 레코드 ---------------------------------------------------------------------------
 
@@ -36,6 +36,7 @@ class RunResult(BaseModel):
     api_id: str
     executed_at: datetime
     target_env: str
+    test_data_label: str | None = None   # which TestDataSet was bound; None = no binding
     status: RunStatus
     failed_rules: list[str] = Field(default_factory=list)
     http_status: int | None = None
@@ -81,6 +82,7 @@ class JobSchedule(BaseModel):
     tz: str = "Asia/Seoul"
     from_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     count: int = Field(ge=1, le=30)
+    done: int = Field(default=0, ge=0)   # occurrences already executed; the ledger owns it
 
     @field_validator("at")
     @classmethod
@@ -106,10 +108,30 @@ class JobSchedule(BaseModel):
         return self
 
 
+class TestDataSet(BaseModel):
+    """One named parameter binding, applied identically to every environment in the job's
+    matrix. These values are inputs the operator approves on the preview card — never facts
+    about the system. The model may propose a set, but every invented value belongs in
+    ``JobSpec.assumptions`` with a low confidence."""
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_.\-가-힣 ]+$")
+    values: dict[str, str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _keys_and_values_are_bounded(self) -> TestDataSet:
+        for key, value in self.values.items():
+            if not 1 <= len(key) <= 60:
+                raise ValueError(f"test data key must be 1-60 chars, got {len(key)} for {key[:20]!r}")
+            if len(value) > 200:
+                raise ValueError(f"test data value for {key!r} must be at most 200 chars, got {len(value)}")
+        return self
+
+
 class JobSpec(BaseModel):
     """LLM이 초안을 잡고 사람이 승인하는 실행 계획. StagedChange 미러.
     ``confidence``는 슬롯별 확신도(0~1)로 승인 카드가 낮은 항목을 강조하는 데 쓴다.
-    ``assumptions``는 LLM이 기본값으로 채운 슬롯의 설명이다."""
+    ``assumptions``는 LLM이 기본값으로 채운 슬롯의 설명이다.
+    한 job은 매트릭스다: 스케줄 1회마다 ``api_ids × target_envs × test_data`` 전체를 실행한다."""
     job_id: str
     kind: JobKind
     status: JobStatus = JobStatus.STAGED
@@ -117,8 +139,9 @@ class JobSpec(BaseModel):
     api_ids: list[str] = Field(default_factory=list)
     select_where: dict[str, Any] | None = None
     binding: Binding = Binding.FROZEN
-    target_env: str
-    schedule: JobSchedule | None = None
+    target_envs: list[str] = Field(min_length=1)
+    schedules: list[JobSchedule] = Field(default_factory=list)   # empty ⇒ run_now, one execution
+    test_data: list[TestDataSet] = Field(default_factory=list)   # empty ⇒ no binding
     report: bool = True
     confidence: dict[str, float] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
@@ -132,7 +155,27 @@ class JobSpec(BaseModel):
     discarded_by: str | None = None
     discarded_by_kind: ActorKind | None = None
     run_ids: list[str] = Field(default_factory=list)
-    runs_remaining: int | None = None
+    executions: int = Field(default=0, ge=0)   # executions performed; run_now completes at 1
+
+    # -- derived: pure functions of the stored fields, never persisted -------------------
+
+    @property
+    def matrix_size(self) -> int:
+        """Runs one execution produces."""
+        return len(self.api_ids) * len(self.target_envs) * max(1, len(self.test_data))
+
+    @property
+    def total_executions(self) -> int:
+        """Executions the job is approved for; a job with no schedules runs its matrix once."""
+        return sum(s.count for s in self.schedules) if self.schedules else 1
+
+    @property
+    def remaining_executions(self) -> int:
+        return max(self.total_executions - self.executions, 0)
+
+    @property
+    def runs_total(self) -> int:
+        return self.matrix_size * self.total_executions
 
 
 # -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------

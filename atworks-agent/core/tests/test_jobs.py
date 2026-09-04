@@ -14,8 +14,8 @@ CFG = AtworksAgentConfig(model="m", max_apis_per_job=3, allowed_target_envs=("de
 
 
 def _draft(**over):
-    base = dict(kind=JobKind.RUN_NOW, summary="run", api_ids=["a", "b"], target_env="dev",
-                schedule=None, report=True)
+    base = dict(kind=JobKind.RUN_NOW, summary="run", api_ids=["a", "b"], target_envs=["dev"],
+                schedules=[], test_data=[], report=True)
     base.update(over)
     return JobDraft(**base)
 
@@ -26,14 +26,19 @@ def test_guardrail_api_count():
 
 
 def test_guardrail_target_env_protected():
-    v = check_job_guardrails(_draft(target_env="prod"), CFG)
-    assert any("prod" in m and "not an allowed target" in m for m in v)
+    v = check_job_guardrails(_draft(target_envs=["prod"]), CFG)
+    assert any("prod" in m and "not allowed targets" in m for m in v)
+
+
+def test_guardrail_flags_every_bad_env_not_just_the_first():
+    v = check_job_guardrails(_draft(target_envs=["dev", "prod", "qa"]), CFG)
+    assert any("prod" in m and "qa" in m and "not allowed targets" in m for m in v)
 
 
 def test_guardrail_schedule_count():
     cfg = AtworksAgentConfig(model="m", max_schedule_count=3)
     sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=5)
-    v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedule=sched), cfg)
+    v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedules=[sched]), cfg)
     assert any("5 runs" in m and "limit is 3" in m for m in v)
 
 
@@ -56,7 +61,7 @@ def test_ledger_stage_apply_discard():
 
 def test_ledger_rejects_guardrail_at_stage():
     with pytest.raises(GuardrailViolation):
-        JobLedger(CFG).stage(_draft(target_env="prod"), actor="op")
+        JobLedger(CFG).stage(_draft(target_envs=["prod"]), actor="op")
 
 
 def test_discard_records_actor_kind():
@@ -83,10 +88,26 @@ def test_record_execution_counts_executions_not_runs():
     cfg = AtworksAgentConfig(model="m", max_schedule_count=3)
     ledger = JobLedger(cfg)
     sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=3)
-    job = ledger.stage(_draft(kind=JobKind.SCHEDULED_RUN, schedule=sched), actor="op")
-    assert job.runs_remaining == 3
+    job = ledger.stage(_draft(kind=JobKind.SCHEDULED_RUN, schedules=[sched]), actor="op")
+    assert job.remaining_executions == 3
     ledger.apply(job.job_id, actor="op")
-    after_first = ledger.record_execution(job.job_id, ["run-0031", "run-0032"])
-    assert after_first.run_ids == ["run-0031", "run-0032"] and after_first.runs_remaining == 2
-    after_second = ledger.record_execution(job.job_id, ["run-0033", "run-0034"])
-    assert len(after_second.run_ids) == 4 and after_second.runs_remaining == 1
+    after_first = ledger.record_execution(job.job_id, ["run-0031", "run-0032"], 0)
+    assert after_first.run_ids == ["run-0031", "run-0032"] and after_first.remaining_executions == 2
+    after_second = ledger.record_execution(job.job_id, ["run-0033", "run-0034"], 0)
+    assert len(after_second.run_ids) == 4 and after_second.remaining_executions == 1
+
+
+def test_record_execution_advances_only_the_schedule_it_consumed():
+    ledger = JobLedger(CFG)
+    # `done=2` on the draft is the model's invention; the ledger owns that counter and resets it.
+    daily = JobSchedule(kind="daily", at="09:00", from_date="2026-09-05", count=3, done=2)
+    once = JobSchedule(kind="once", at="09:00", from_date="2026-09-08", count=1)
+    job = ledger.stage(_draft(kind=JobKind.SCHEDULED_RUN, schedules=[daily, once]), actor="op")
+    assert job.executions == 0 and [s.done for s in job.schedules] == [0, 0]
+    assert job.total_executions == 4
+    ledger.apply(job.job_id, actor="op")
+    after = ledger.record_execution(job.job_id, ["run-0031", "run-0032"], 1)
+    assert after.executions == 1 and after.remaining_executions == 3
+    assert [s.done for s in after.schedules] == [0, 1]
+    after2 = ledger.record_execution(job.job_id, ["run-0033"], 0)
+    assert after2.executions == 2 and [s.done for s in after2.schedules] == [1, 1]

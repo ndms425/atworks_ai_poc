@@ -6,10 +6,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from commerce_common.fencing import truncate_display
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .config import AtworksAgentConfig
-from .types import ActorKind, Binding, JobKind, JobSchedule, JobSpec, JobStatus
+from .types import ActorKind, Binding, JobKind, JobSchedule, JobSpec, JobStatus, TestDataSet
 
 
 class GuardrailViolation(ValueError):
@@ -36,13 +36,22 @@ class JobDraft(BaseModel):
     kind: JobKind
     summary: str = Field(max_length=200)
     api_ids: list[str]
-    target_env: str = Field(max_length=32)
-    schedule: JobSchedule | None = None
+    target_envs: list[str] = Field(min_length=1)
+    schedules: list[JobSchedule] = Field(default_factory=list)
+    test_data: list[TestDataSet] = Field(default_factory=list)
     select_where: dict[str, Any] | None = None
     binding: Binding = Binding.FROZEN
     report: bool = True
     confidence: dict[str, float] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
+
+    @field_validator("target_envs")
+    @classmethod
+    def _each_env_is_short(cls, value: list[str]) -> list[str]:
+        for env in value:
+            if len(env) > 32:
+                raise ValueError(f"each target env is at most 32 chars, got {len(env)}")
+        return value
 
 
 def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[str]:
@@ -54,22 +63,26 @@ def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[st
         )
     if not draft.api_ids:
         violations.append("job selects no APIs — resolve the selection with search_apis first")
-    if draft.target_env not in config.allowed_target_envs:
+    # Rule 1 — every offending env is named. Never all(...) and never a check of one element:
+    # a single prod anywhere in the list must block the whole job.
+    bad_envs = [e for e in draft.target_envs if e not in config.allowed_target_envs]
+    if bad_envs:
         violations.append(
-            f"target_env '{draft.target_env}' is not an allowed target "
-            f"({', '.join(config.allowed_target_envs)}); the assistant may never target it"
+            f"target_envs {', '.join(bad_envs)} are not allowed targets "
+            f"({', '.join(config.allowed_target_envs)}); the assistant may never target them"
         )
     if draft.kind is JobKind.SCHEDULED_RUN:
-        if draft.schedule is None:
-            violations.append("a scheduled_run needs a schedule")
-        elif draft.schedule.count > config.max_schedule_count:
-            violations.append(
-                f"schedule has {draft.schedule.count} runs and the limit is {config.max_schedule_count} per job; shorten it"
-            )
+        if not draft.schedules:
+            violations.append("a scheduled_run needs at least one schedule")
         if not config.enable_scheduling:
             violations.append("scheduling is switched off for this deployment")
-    if draft.kind is JobKind.RUN_NOW and draft.schedule is not None:
-        violations.append("run_now must not carry a schedule — use scheduled_run")
+    if draft.kind is JobKind.RUN_NOW and draft.schedules:
+        violations.append("run_now must not carry schedules — use scheduled_run")
+    scheduled_runs = sum(s.count for s in draft.schedules)
+    if scheduled_runs > config.max_schedule_count:
+        violations.append(
+            f"schedules total {scheduled_runs} runs and the limit is {config.max_schedule_count} per job; shorten them"
+        )
     if draft.binding is Binding.LATE and not draft.select_where:
         violations.append(
             "LATE binding needs the select_where that produced the selection — pass the search_apis arguments"
@@ -97,15 +110,17 @@ class JobLedger:
             api_ids=list(draft.api_ids),
             select_where=draft.select_where,
             binding=draft.binding,
-            target_env=draft.target_env,
-            schedule=draft.schedule,
+            target_envs=list(draft.target_envs),
+            # A draft may carry a `done` the model invented; the ledger owns that counter.
+            schedules=[s.model_copy(update={"done": 0}) for s in draft.schedules],
+            test_data=[d.model_copy() for d in draft.test_data],
             report=draft.report,
             confidence=dict(draft.confidence),
             assumptions=list(draft.assumptions),
             created_at=datetime.now(UTC),
             created_by=actor,
             created_by_kind=actor_kind,
-            runs_remaining=draft.schedule.count if draft.schedule else 1,
+            executions=0,
         )
         self._jobs[job.job_id] = job
         return job
@@ -122,8 +137,9 @@ class JobLedger:
     def apply(self, job_id: str, *, actor: str) -> JobSpec:
         job = self._require_staged(job_id, "apply")
         draft = JobDraft(kind=job.kind, summary=job.summary, api_ids=job.api_ids,
-                         target_env=job.target_env, schedule=job.schedule,
-                         select_where=job.select_where, binding=job.binding, report=job.report)
+                         target_envs=job.target_envs, schedules=job.schedules,
+                         test_data=job.test_data, select_where=job.select_where,
+                         binding=job.binding, report=job.report)
         violations = check_job_guardrails(draft, self._config)
         if violations:
             raise GuardrailViolation(violations)
@@ -146,14 +162,23 @@ class JobLedger:
         self._jobs[job_id] = updated
         return updated
 
-    def record_execution(self, job_id: str, run_ids: list[str]) -> JobSpec:
-        """One execution of the job happened and produced these runs. runs_remaining counts
-        executions (schedule.count of them, or 1 for run_now), not individual runs."""
+    def record_execution(self, job_id: str, run_ids: list[str], schedule_index: int | None) -> JobSpec:
+        """One execution of the job's matrix happened and produced these runs. ``executions``
+        counts executions (the schedules' counts summed, or 1 for run_now), never individual
+        runs; ``schedule_index`` names which schedule occurrence was consumed — without it
+        several schedules on one job could not advance independently. Exactly one call per
+        execution, even when the execution produced nothing."""
         job = self._jobs[job_id]
-        remaining = (job.runs_remaining or 0) - 1
-        updated = job.model_copy(
-            update={"run_ids": [*job.run_ids, *run_ids], "runs_remaining": max(remaining, 0)}
-        )
+        update: dict[str, Any] = {
+            "run_ids": [*job.run_ids, *run_ids],
+            "executions": job.executions + 1,
+        }
+        if schedule_index is not None and 0 <= schedule_index < len(job.schedules):
+            schedules = list(job.schedules)
+            consumed = schedules[schedule_index]
+            schedules[schedule_index] = consumed.model_copy(update={"done": consumed.done + 1})
+            update["schedules"] = schedules
+        updated = job.model_copy(update=update)
         self._jobs[job_id] = updated
         return updated
 

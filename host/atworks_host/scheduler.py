@@ -18,7 +18,7 @@ def due_at(job: JobSpec, index: int) -> datetime | None:
     """index번째(0부터) 회차의 예정 시각. run_now는 시각이 없다(승인 즉시, tick이 따로 본다)."""
     if job.kind is JobKind.RUN_NOW:
         return None
-    s = job.schedule
+    s = job.schedules[0] if job.schedules else None
     if s is None or index >= s.count:
         return None
     hh, mm = (int(x) for x in s.at.split(":"))
@@ -37,9 +37,9 @@ class Scheduler:
         async with self._lock:
             executed: list[str] = []
             for job in list(await self.backend.applied_jobs(self.session)):
-                if job.status is not JobStatus.APPLIED or (job.runs_remaining or 0) <= 0:
+                if job.status is not JobStatus.APPLIED or job.remaining_executions <= 0:
                     continue
-                index = (job.schedule.count if job.schedule else 1) - (job.runs_remaining or 0)
+                index = job.executions
                 if job.kind is JobKind.RUN_NOW:
                     due = index == 0
                 else:

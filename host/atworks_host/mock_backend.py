@@ -95,7 +95,7 @@ class MockAtworks(AtworksBackend):
         return [self.runs[i] for i in run_ids if i in self.runs]
 
     async def record_execution(self, session, job_id, run_ids):
-        return self.ledger.record_execution(job_id, run_ids)
+        return self.ledger.record_execution(job_id, run_ids, None)
 
     async def add_guardrail_note(self, session, job_id, note):
         return self.ledger.add_guardrail_note(job_id, note)
@@ -104,7 +104,7 @@ class MockAtworks(AtworksBackend):
         job = self.ledger.get(job_id)
         if job is None:
             return []
-        if (job.runs_remaining or 0) <= 0:
+        if job.remaining_executions <= 0:
             return []
         api_ids = job.api_ids
         if job.binding is Binding.LATE and job.select_where:
@@ -121,21 +121,22 @@ class MockAtworks(AtworksBackend):
                 )
                 # the slot is spent even though nothing ran, so a scheduled job does not
                 # retry the same over-limit selection forever
-                self.ledger.record_execution(job_id, [])
+                self.ledger.record_execution(job_id, [], None)
                 return []
         produced: list[RunResult] = []
-        for api_id in api_ids:
-            api = self.apis.get(api_id)
-            if api is None:
-                continue
-            self._run_seq += 1
-            status, rules, http = stub_verdict(api, self._run_seq)
-            run = RunResult(run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
-                            target_env=job.target_env, status=status, failed_rules=rules, http_status=http,
-                            duration_ms=100 + self._run_seq % 50, job_id=job_id)
-            self.runs[run.run_id] = run
-            produced.append(run)
-        self.ledger.record_execution(job_id, [r.run_id for r in produced])
+        for env in job.target_envs:
+            for api_id in api_ids:
+                api = self.apis.get(api_id)
+                if api is None:
+                    continue
+                self._run_seq += 1
+                status, rules, http = stub_verdict(api, self._run_seq)
+                run = RunResult(run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
+                                target_env=env, status=status, failed_rules=rules, http_status=http,
+                                duration_ms=100 + self._run_seq % 50, job_id=job_id)
+                self.runs[run.run_id] = run
+                produced.append(run)
+        self.ledger.record_execution(job_id, [r.run_id for r in produced], None)
         return produced
 
     async def get_context(self, session):

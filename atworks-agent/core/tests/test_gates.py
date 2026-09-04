@@ -16,7 +16,7 @@ CFG = AtworksAgentConfig(model="m")
 
 def _job(job_id="job-0001", env="dev"):
     return JobSpec(job_id=job_id, kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"],
-                   target_env=env, created_at=datetime.now(UTC), created_by="op")
+                   target_envs=[env], created_at=datetime.now(UTC), created_by="op")
 
 
 def test_unknown_api_id_is_held_by_provenance():

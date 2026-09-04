@@ -31,15 +31,15 @@ async def test_tick_runs_due_jobs_only_and_writes_report(tmp_path):
     reports = Reports(tmp_path)
     sched = Scheduler(backend, reports, SESSION)
     job = await backend.stage_job(SESSION, JobDraft(
-        kind=JobKind.SCHEDULED_RUN, summary="3일 09시", api_ids=["api-001", "api-003"], target_env="dev",
-        schedule=JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=3)), ActorKind.AGENT)
+        kind=JobKind.SCHEDULED_RUN, summary="3일 09시", api_ids=["api-001", "api-003"], target_envs=["dev"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=3)]), ActorKind.AGENT)
     await backend.apply_job(SESSION, job.job_id)
 
     assert await sched.tick(datetime(2026, 9, 4, 8, 59, tzinfo=KST)) == []
     assert await sched.tick(datetime(2026, 9, 4, 9, 0, tzinfo=KST)) == [job.job_id]
     assert await sched.tick(datetime(2026, 9, 4, 9, 30, tzinfo=KST)) == []          # 같은 날 두 번 안 돈다
     assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
-    assert backend.ledger.get(job.job_id).runs_remaining == 1
+    assert backend.ledger.get(job.job_id).remaining_executions == 1
 
     data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
     assert data["provenance"]["generator"] == "refresh_runner"
@@ -51,7 +51,7 @@ async def test_tick_runs_due_jobs_only_and_writes_report(tmp_path):
 async def test_run_now_is_due_immediately(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
     sched = Scheduler(backend, Reports(tmp_path), SESSION)
-    job = await backend.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="now", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT)
+    job = await backend.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="now", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
     await backend.apply_job(SESSION, job.job_id)
     assert await sched.tick(datetime(2026, 9, 3, 14, tzinfo=KST)) == [job.job_id]
     assert await sched.tick(datetime(2026, 9, 3, 15, tzinfo=KST)) == []
@@ -63,14 +63,14 @@ async def test_report_html_escapes_json_and_uses_client_side_escaping(tmp_path):
     job = await backend.stage_job(
         SESSION,
         JobDraft(kind=JobKind.RUN_NOW, summary="</script><img src=x onerror=alert(1)>",
-                 api_ids=["api-001"], target_env="dev"),
+                 api_ids=["api-001"], target_envs=["dev"]),
         ActorKind.AGENT,
     )
     await backend.apply_job(SESSION, job.job_id)
     run = RunResult(run_id="run-9001", api_id="api-001", executed_at=datetime.now(UTC), target_env="dev",
                     status=RunStatus.FAIL, failed_rules=["<b>x</b>"], http_status=200, job_id=job.job_id)
     backend.runs[run.run_id] = run
-    applied = backend.ledger.record_execution(job.job_id, [run.run_id])
+    applied = backend.ledger.record_execution(job.job_id, [run.run_id], None)
 
     path = reports.write(applied, [run])
     html = path.read_text(encoding="utf-8")
@@ -96,10 +96,10 @@ async def test_tick_survives_one_jobs_execution_error(tmp_path):
     reports = Reports(tmp_path)
     sched = Scheduler(backend, reports, SESSION)
     bad = await backend.stage_job(
-        SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="bad", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+        SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="bad", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     good = await backend.stage_job(
-        SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="good", api_ids=["api-002"], target_env="dev"), ActorKind.AGENT
+        SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="good", api_ids=["api-002"], target_envs=["dev"]), ActorKind.AGENT
     )
     backend.bad_job_id = bad.job_id
     await backend.apply_job(SESSION, bad.job_id)
@@ -109,7 +109,7 @@ async def test_tick_survives_one_jobs_execution_error(tmp_path):
 
     assert executed == [good.job_id]
     bad_job = backend.ledger.get(bad.job_id)
-    assert bad_job.runs_remaining == 0
+    assert bad_job.remaining_executions == 0
     assert len(bad_job.guardrail_notes) == 1 and "execution failed" in bad_job.guardrail_notes[0]
 
 
@@ -122,12 +122,12 @@ async def test_report_failure_does_not_consume_a_second_slot(tmp_path):
 
     sched = Scheduler(backend, BrokenReports(tmp_path), SESSION)
     job = await backend.stage_job(SESSION, JobDraft(
-        kind=JobKind.SCHEDULED_RUN, summary="3일 09시", api_ids=["api-001"], target_env="dev",
-        schedule=JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=3)), ActorKind.AGENT)
+        kind=JobKind.SCHEDULED_RUN, summary="3일 09시", api_ids=["api-001"], target_envs=["dev"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=3)]), ActorKind.AGENT)
     await backend.apply_job(SESSION, job.job_id)
     assert await sched.tick(datetime(2026, 9, 4, 9, 0, tzinfo=KST)) == [job.job_id]
     after = backend.ledger.get(job.job_id)
-    assert after.runs_remaining == 2                      # exactly one slot consumed
+    assert after.remaining_executions == 2                      # exactly one slot consumed
     assert len(after.run_ids) == 1                        # the run was produced
     assert any(n.startswith("report failed") for n in after.guardrail_notes)
     assert not any(n.startswith("execution failed") for n in after.guardrail_notes)
@@ -184,7 +184,7 @@ class RecordingBackend(AtworksBackend):
 
     async def execute_job_once(self, session, job_id):
         self.calls.append("execute_job_once")
-        self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "runs_remaining": 0})
+        self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "executions": 1})
         return [self.run]
 
     async def get_job(self, session, job_id):
@@ -215,8 +215,8 @@ class RecordingBackend(AtworksBackend):
 async def test_scheduler_uses_only_the_backend_abc(tmp_path):
     now = datetime.now(UTC)
     job = JobSpec(job_id="job-01", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED, summary="s",
-                 api_ids=["api-1"], target_env="dev", report=True, created_at=now, created_by="op",
-                 runs_remaining=1)
+                 api_ids=["api-1"], target_envs=["dev"], report=True, created_at=now, created_by="op",
+                 executions=0)
     run = RunResult(run_id="run-x", api_id="api-1", executed_at=now, target_env="dev",
                     status=RunStatus.PASS, job_id="job-01")
     backend = RecordingBackend(job, run)

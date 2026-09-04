@@ -79,7 +79,7 @@ class InMemoryBackend(AtworksBackend):
         return [r for r in self.runs if r.run_id in run_ids]
 
     async def record_execution(self, session, job_id, run_ids):
-        return self.ledger.record_execution(job_id, run_ids)
+        return self.ledger.record_execution(job_id, run_ids, None)
 
     async def add_guardrail_note(self, session, job_id, note):
         return self.ledger.add_guardrail_note(job_id, note)
