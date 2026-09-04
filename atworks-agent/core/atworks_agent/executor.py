@@ -306,14 +306,17 @@ class AtworksToolExecutor(BaseToolExecutor):
                 if api is not None:
                     self._state.remember_api(api)
         groups = aggregate(runs, self._state.seen_apis, group_by, flaky_min_transitions=self._config.flaky_min_transitions)
-        self._state.last_population = len(runs)
+        population = len(runs) if api_id is not None else await self._backend.count_runs(self._session, since, status)
+        self._state.last_population = population
+        self._state.last_listed_run_ids = [r.run_id for r in runs]
         self._state.last_listed_filter = status or "all"
         self._state.remember_groups(group_by, groups, since)
         shown = groups[: self._config.max_group_items * 2]
         return self._fenced({
-            "group_by": group_by, "since": since.isoformat(), "population": len(runs),
+            "group_by": group_by, "since": since.isoformat(), "population": population,
             "groups": [g.model_dump(mode="json", exclude_none=True, exclude={"run_ids"}) | {"run_ids": g.run_ids[:3]} for g in shown],
             "more": max(0, len(groups) - len(shown)),
+            "truncated": len(runs) >= self._config.max_aggregate_runs,
             "note": "Figures are host-computed; show them with present_run_groups (group keys above), never in prose.",
         })
 

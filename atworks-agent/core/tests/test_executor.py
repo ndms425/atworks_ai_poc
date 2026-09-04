@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime
 
+from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.executor import AtworksToolExecutor
 
 
@@ -382,6 +383,25 @@ async def test_aggregate_runs_rejects_an_unknown_axis(backend, config, skills, s
     ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
     out = await ex.execute("aggregate_runs", {"group_by": "moon"})
     assert out.is_error and "group_by" in out.result_text
+
+
+async def test_aggregate_runs_keeps_the_listed_window_coherent(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    await ex.execute("list_runs", {"filters": {"status": "non_pass"}})
+    out = await ex.execute("aggregate_runs", {"group_by": "api"})
+    assert not out.is_error
+    assert state.last_listed_run_ids == ["run-3", "run-2", "run-1"]
+    assert state.last_population == 3
+
+
+async def test_aggregate_runs_population_counts_the_true_total_and_flags_truncation(backend, skills, session, state):
+    small_config = AtworksAgentConfig(model="m", max_aggregate_runs=2)
+    ex = AtworksToolExecutor(backend=backend, config=small_config, skills=skills, session=session, state=state)
+    out = await ex.execute("aggregate_runs", {"group_by": "api"})
+    assert not out.is_error
+    assert state.last_population == 3
+    assert '"truncated": true' in out.result_text
+    assert len(state.last_listed_run_ids) == 2
 
 
 async def test_absent_tools_are_reported_as_absent_even_when_question_form_is_open(backend, config, skills, session, state):
