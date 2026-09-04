@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "atworks-host",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "atworks_host.main"],
+      "port": 8010
+    },
+    {
+      "name": "atworks-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "web/atworks-web"],
+      "port": 3110
+    }
+  ]
+}
