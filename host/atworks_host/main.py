@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def build() -> tuple:
+    load_dotenv(ROOT / ".env")
     if os.environ.get("ATWORKS_TRUST_OS_CA", "1") != "0":
         # The closed network's intercepting proxy presents a CA that the Windows/OS
         # certificate store trusts but Python's bundled certifi does not — every model
@@ -34,7 +35,6 @@ def build() -> tuple:
         import truststore
 
         truststore.inject_into_ssl()
-    load_dotenv(ROOT / ".env")
     config = AtworksAgentConfig(model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"))
     backend = MockAtworks(config, HERE / "fixtures")
     agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
