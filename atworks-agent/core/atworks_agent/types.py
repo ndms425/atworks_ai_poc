@@ -228,6 +228,12 @@ class AttachedItem(BaseModel):
     actual: str | None = Field(default=None, max_length=200)
     expected: str | None = Field(default=None, max_length=200)
     comment: str | None = Field(default=None, max_length=300)
+    details: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("details")
+    @classmethod
+    def _details_bounded(cls, value: dict[str, str]) -> dict[str, str]:
+        return {str(k)[:40]: str(v)[:120] for k, v in list(value.items())[:8]}
 
 
 # -- 세션 ------------------------------------------------------------------------------

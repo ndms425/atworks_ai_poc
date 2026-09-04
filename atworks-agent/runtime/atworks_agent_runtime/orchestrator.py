@@ -62,6 +62,7 @@ from commerce_common.turn import (
 )
 from commerce_common.types import MemoryFact
 
+from atworks_agent.attachments import enrich_attached_items
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.enrichment import PRESENTATION_COMPONENTS
@@ -140,6 +141,10 @@ class AtworksAgent:
         turn_started = time.monotonic()
         usage = usage_totals()
         atworks_context = await fetched(self.backend.get_context(session))
+        try:
+            attached_items = await enrich_attached_items(self.backend, session, state, list(attached_items))
+        except Exception:
+            logger.exception("attachment enrichment failed; falling back to the raw attached items")
         # The second system block, built once per turn: the same bytes across the turn's
         # rounds, and across turns until the state in it moves (prompt_assembly).
         context = build_dynamic_context(
