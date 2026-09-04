@@ -50,18 +50,23 @@ class Scheduler:
                     continue
                 try:
                     produced = await self.backend.execute_job_once(self.session, job.job_id)
-                    if not produced:
-                        continue
-                    if job.report:
-                        all_ids = self.backend.ledger.get(job.job_id).run_ids
-                        every = [self.backend.runs[i] for i in all_ids if i in self.backend.runs]
-                        self.reports.write(self.backend.ledger.get(job.job_id), every)
-                    executed.append(job.job_id)
                 except Exception as error:
-                    # One job's failure must not stop the rest of the tick, and must not
-                    # leave the job spinning on the same due slot forever.
+                    # Execution failure: record as such and move on.
                     logger.exception("job %s failed during scheduled execution", job.job_id)
                     self.backend.ledger.add_guardrail_note(job.job_id, f"execution failed: {type(error).__name__}")
                     self.backend.ledger.record_execution(job.job_id, [])
                     continue
+                if not produced:
+                    continue
+                if job.report:
+                    try:
+                        all_ids = self.backend.ledger.get(job.job_id).run_ids
+                        every = [self.backend.runs[i] for i in all_ids if i in self.backend.runs]
+                        self.reports.write(self.backend.ledger.get(job.job_id), every)
+                    except Exception as error:
+                        # Report failure: log and note it, but do NOT record a second execution.
+                        # The execution already happened.
+                        logger.exception("job %s report failed", job.job_id)
+                        self.backend.ledger.add_guardrail_note(job.job_id, f"report failed: {type(error).__name__}")
+                executed.append(job.job_id)
             return executed

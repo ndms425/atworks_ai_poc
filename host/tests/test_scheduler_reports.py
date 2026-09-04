@@ -106,3 +106,23 @@ async def test_tick_survives_one_jobs_execution_error(tmp_path):
     bad_job = backend.ledger.get(bad.job_id)
     assert bad_job.runs_remaining == 0
     assert len(bad_job.guardrail_notes) == 1 and "execution failed" in bad_job.guardrail_notes[0]
+
+
+async def test_report_failure_does_not_consume_a_second_slot(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+
+    class BrokenReports(Reports):
+        def write(self, job, runs, *, generator="refresh_runner"):
+            raise OSError("disk full")
+
+    sched = Scheduler(backend, BrokenReports(tmp_path), SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="3일 09시", api_ids=["api-001"], target_env="dev",
+        schedule=JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=3)), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    assert await sched.tick(datetime(2026, 9, 4, 9, 0, tzinfo=KST)) == [job.job_id]
+    after = backend.ledger.get(job.job_id)
+    assert after.runs_remaining == 2                      # exactly one slot consumed
+    assert len(after.run_ids) == 1                        # the run was produced
+    assert any(n.startswith("report failed") for n in after.guardrail_notes)
+    assert not any(n.startswith("execution failed") for n in after.guardrail_notes)
