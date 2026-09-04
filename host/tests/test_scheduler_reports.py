@@ -457,6 +457,17 @@ async def test_tick_survives_a_scheduling_failure_and_still_runs_the_good_job(tm
     assert "record_execution" in backend.calls
 
 
+async def test_report_rows_link_back_to_the_portal_attach_url(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path, portal_origin="http://portal.local:3110")
+    job = await backend.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="now", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    produced = await backend.execute_job_once(SESSION, job.job_id)
+    html = reports.write(backend.ledger.get(job.job_id), produced).read_text(encoding="utf-8")
+    assert '"portal_origin": "http://portal.local:3110"' in html.replace("\\u003c", "<") or "portal.local:3110" in html
+    assert "?attach=run:" in html   # template builds the link from data.portal_origin
+
+
 async def test_scheduler_uses_only_the_backend_abc(tmp_path):
     now = datetime.now(UTC)
     job = JobSpec(job_id="job-01", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED, summary="s",

@@ -48,8 +48,9 @@ def _matrix(job: JobSpec, runs: list[RunResult]) -> dict:
 
 
 class Reports:
-    def __init__(self, out_dir: Path):
+    def __init__(self, out_dir: Path, portal_origin: str = "http://localhost:3110"):
         self.out_dir = out_dir
+        self.portal_origin = portal_origin
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
     def _folder(self, job_id: str) -> Path:
@@ -80,6 +81,7 @@ class Reports:
             "matrix": _matrix(job, runs),
             "runs": [r.model_dump(mode="json", exclude_none=True) for r in runs],
             "provenance": {"generator": generator, "generated_at": datetime.now(UTC).isoformat()},
+            "portal_origin": self.portal_origin,
         }
         (folder / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         # A model-authored summary or test-data value can carry `<!--<script` — inside the

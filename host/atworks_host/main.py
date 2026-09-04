@@ -44,7 +44,7 @@ def build() -> tuple:
     config = AtworksAgentConfig(model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"))
     backend = MockAtworks(config, HERE / "fixtures")
     agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
-    reports = Reports(HERE / "reports_out")
+    reports = Reports(HERE / "reports_out", portal_origin=os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110"))
     scheduler = Scheduler(backend, reports, None)
 
     async def loop() -> None:

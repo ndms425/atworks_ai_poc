@@ -5,6 +5,7 @@
 
 import {
   ApproveBar,
+  AskButton,
   type ChangeAction,
   ChangeStatusPill,
   formatDate,
@@ -18,9 +19,17 @@ import {
   useResource,
 } from "web-shared";
 import { fetchJobs, reportUrl } from "@/lib/api";
-import type { JobSpec } from "@/lib/types";
+import type { AttachedItem, JobSpec } from "@/lib/types";
 
-function JobRow({ job, onAct }: { job: JobSpec; onAct: (id: string, action: ChangeAction) => Promise<JobSpec | null> }) {
+function JobRow({
+  job,
+  onAct,
+  onAttach,
+}: {
+  job: JobSpec;
+  onAct: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
+  onAttach: (item: Omit<AttachedItem, "order">) => void;
+}) {
   const { change, busy, error, act, canAct } = useChangeActions(job, onAct);
   return (
     <li className="px-[18px] py-3">
@@ -35,7 +44,10 @@ function JobRow({ job, onAct }: { job: JobSpec; onAct: (id: string, action: Chan
             {change.binding === "LATE" ? " · 최대 (배포 상한)" : ""} · {formatDate(change.created_at)}
           </div>
         </div>
-        <ChangeStatusPill status={change.status} />
+        <div className="flex items-center gap-2">
+          <AskButton label="채팅에 첨부" onClick={() => onAttach({ kind: "job", ref_id: change.job_id, label: change.summary })} />
+          <ChangeStatusPill status={change.status} />
+        </div>
       </div>
       <GuardrailNotes notes={change.guardrail_notes} />
       {change.selection_basis ? <div className="mt-0.5 text-[12px] text-(--ink-soft)">선택 근거: {change.selection_basis}</div> : null}
@@ -49,7 +61,15 @@ function JobRow({ job, onAct }: { job: JobSpec; onAct: (id: string, action: Chan
   );
 }
 
-export default function JobsView({ refreshKey, onAct }: { refreshKey: number; onAct: (id: string, action: ChangeAction) => Promise<JobSpec | null> }) {
+export default function JobsView({
+  refreshKey,
+  onAct,
+  onAttach,
+}: {
+  refreshKey: number;
+  onAct: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
+  onAttach: (item: Omit<AttachedItem, "order">) => void;
+}) {
   const { data, failed } = useResource(fetchJobs, [refreshKey]);
   const jobs = data?.jobs ?? [];
 
@@ -66,7 +86,7 @@ export default function JobsView({ refreshKey, onAct }: { refreshKey: number; on
         <Panel>
           <ul className="divide-y divide-(--line)">
             {jobs.map((job) => (
-              <JobRow key={job.job_id} job={job} onAct={onAct} />
+              <JobRow key={job.job_id} job={job} onAct={onAct} onAttach={onAttach} />
             ))}
           </ul>
         </Panel>

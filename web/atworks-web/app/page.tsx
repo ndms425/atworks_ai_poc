@@ -77,6 +77,20 @@ export default function PortalPage() {
     });
   }, []);
 
+  // A report page links back here with ?attach=run:<id>; take it once, then clean the URL.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("attach");
+    if (!raw) return;
+    const [kind, ref] = raw.split(":", 2);
+    if ((kind === "run" || kind === "api" || kind === "job") && ref) {
+      onAttach({ kind, ref_id: ref, label: ref });
+    }
+    params.delete("attach");
+    const clean = `${window.location.pathname}${params.toString() ? `?${params}` : ""}`;
+    window.history.replaceState(null, "", clean);
+  }, [onAttach]);
+
   // The attachments ride the next chatStream call and are consumed there; once a reply
   // finishes, drop only the items that actually went out with that send (sentRef, set by
   // `send` above) so an item attached while the previous turn was still streaming survives.
@@ -137,9 +151,9 @@ export default function PortalPage() {
         {session.sessionId ? (
           <>
             {view === "home" ? <HomeView refreshKey={refreshKey} onAskAssistant={askAssistant} /> : null}
-            {view === "apis" ? <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} /> : null}
+            {view === "apis" ? <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} onAttach={onAttach} /> : null}
             {view === "runs" ? <RunsView refreshKey={refreshKey} attachedCount={attached.length} onAttach={onAttach} /> : null}
-            {view === "jobs" ? <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} /> : null}
+            {view === "jobs" ? <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} onAttach={onAttach} /> : null}
           </>
         ) : null}
       </PortalShell>

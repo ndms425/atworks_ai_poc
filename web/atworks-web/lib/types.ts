@@ -165,6 +165,7 @@ export interface AttachedItem {
   actual?: string;
   expected?: string;
   comment?: string;
+  details?: Record<string, string>;
 }
 
 export type GroupBy = "api" | "failed_rule" | "http_status" | "env" | "api_env_data";
