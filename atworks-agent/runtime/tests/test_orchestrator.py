@@ -38,7 +38,7 @@ async def run_turn(agent, text, session, state, attached=()):
 async def test_failure_question_forces_list_runs_first(make_agent, session, state):
     chips = ("present_suggestions", {"suggestions": ["다음 항목", "전체 목록"]})
     closing = tool_calls_message(("present_run_digest", {"items": [{"kind": "fail", "ref_id": "run-1", "headline": "amount 규칙 위반"}]}), chips)
-    closing.content.insert(0, text_block("실패 1건 중 먼저 볼 1건."))
+    closing.content.insert(0, text_block("먼저 살펴볼 항목을 정리했습니다."))
     agent = make_agent([
         tool_use_message("list_runs", {"filters": {"status": "fail"}}),
         tool_use_message("rank_failed_runs", {"scorer": "risk_v1"}),
@@ -108,6 +108,36 @@ async def test_prose_without_figures_is_not_reminded(make_agent, session, state)
         and m["content"][0].get("text") == FIGURES_IN_PROSE_REMINDER
         for m in messages
     )
+
+
+async def test_prose_restating_figures_in_closing_round_is_reminded_once(make_agent, session, state):
+    chips = ("present_suggestions", {"suggestions": ["상세 보기"]})
+    closing = tool_calls_message(chips)
+    closing.content.insert(0, text_block("이번 주 실패율은 100% 입니다."))
+    agent = make_agent([
+        closing,
+        text_message("환불 API는 refundAmount >= 0 규칙 위반으로 실패했습니다."),
+    ])
+    events, messages = await run_turn(agent, "고마워", session, state)
+    reminders = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), list)
+                 and m["content"][0].get("text") == FIGURES_IN_PROSE_REMINDER]
+    assert len(reminders) == 1 and len(agent.client.calls) == 2
+    assert events[-1].type == "turn_complete"
+
+
+async def test_prose_without_figures_in_closing_round_is_not_reminded(make_agent, session, state):
+    chips = ("present_suggestions", {"suggestions": ["상세 보기"]})
+    closing = tool_calls_message(chips)
+    closing.content.insert(0, text_block("환불 API는 규칙 위반으로 실패했습니다."))
+    agent = make_agent([closing])
+    events, messages = await run_turn(agent, "고마워", session, state)
+    assert len(agent.client.calls) == 1
+    assert not any(
+        m.get("role") == "user" and isinstance(m.get("content"), list)
+        and m["content"][0].get("text") == FIGURES_IN_PROSE_REMINDER
+        for m in messages
+    )
+    assert events[-1].type == "turn_complete"
 
 
 async def test_attached_items_reach_the_system_prompt(make_agent, session, state):

@@ -178,6 +178,12 @@ class AtworksAgent:
                 "content": [{"type": "text", "text": STAGING_FOLLOWTHROUGH_REMINDER}],
             }
 
+        def figures_reminder() -> dict[str, Any]:
+            return {
+                "role": "user",
+                "content": [{"type": "text", "text": FIGURES_IN_PROSE_REMINDER}],
+            }
+
         # A turn the host abandons at a yield, or a round that raises, must not leave the
         # stored conversation on a tool_use with no result: the next request would be
         # rejected. The finally pairs any open call with its result, or an error.
@@ -267,10 +273,7 @@ class AtworksAgent:
                         )
                         if not force_text and not figures_reminded and prose_restates_figures(text):
                             figures_reminded = True
-                            messages.append({
-                                "role": "user",
-                                "content": [{"type": "text", "text": FIGURES_IN_PROSE_REMINDER}],
-                            })
+                            messages.append(figures_reminder())
                             continue
                         if remind and not force_text:
                             remind = False
@@ -326,6 +329,18 @@ class AtworksAgent:
                 if self.config.close_on_presentation and round_closes_turn(
                     ((block.name, outcome) for block, outcome in calls), executor.ends_clean
                 ):
+                    # The model can write the prose and call present_suggestions in the
+                    # same round, so this closing round never reaches the text-only check
+                    # above; catch the same figures-in-prose case here too.
+                    text = "".join(
+                        getattr(block, "text", "")
+                        for block in (final.content if final else [])
+                        if getattr(block, "type", "") == "text"
+                    )
+                    if not figures_reminded and prose_restates_figures(text):
+                        figures_reminded = True
+                        messages.append(figures_reminder())
+                        continue
                     # A change request that reaches its chips with nothing staged gets the
                     # reminder before the turn may close; the reminded round can close.
                     if remind:
