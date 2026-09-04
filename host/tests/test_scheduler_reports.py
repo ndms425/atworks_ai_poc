@@ -212,6 +212,47 @@ class RecordingBackend(AtworksBackend):
         return self.job
 
 
+async def test_two_schedules_on_one_job_run_independently(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    sched = Scheduler(backend, Reports(tmp_path), SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="daily 3 + once", api_ids=["api-001"], target_envs=["dev"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-05", count=3),
+                   JobSchedule(kind="once", at="14:00", tz="Asia/Seoul", from_date="2026-09-08", count=1)]),
+        ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+
+    assert await sched.tick(datetime(2026, 9, 5, 8, 59, tzinfo=KST)) == []
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+    assert await sched.tick(datetime(2026, 9, 5, 9, 30, tzinfo=KST)) == []   # 같은 회차는 두 번 안 돈다
+    assert await sched.tick(datetime(2026, 9, 6, 9, 0, tzinfo=KST)) == [job.job_id]
+    assert await sched.tick(datetime(2026, 9, 7, 9, 0, tzinfo=KST)) == [job.job_id]
+    assert await sched.tick(datetime(2026, 9, 8, 14, 0, tzinfo=KST)) == [job.job_id]
+
+    after = backend.ledger.get(job.job_id)
+    assert [s.done for s in after.schedules] == [3, 1]
+    assert after.executions == 4 and after.remaining_executions == 0
+    assert await sched.tick(datetime(2026, 9, 9, 9, 0, tzinfo=KST)) == []
+
+
+async def test_two_schedules_due_in_the_same_tick_run_twice(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    sched = Scheduler(backend, Reports(tmp_path), SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="morning + evening", api_ids=["api-001"], target_envs=["dev"],
+        schedules=[JobSchedule(kind="once", at="09:00", tz="Asia/Seoul", from_date="2026-09-05", count=1),
+                   JobSchedule(kind="once", at="18:00", tz="Asia/Seoul", from_date="2026-09-05", count=1)]),
+        ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+
+    executed = await sched.tick(datetime(2026, 9, 5, 20, 0, tzinfo=KST))
+
+    assert executed == [job.job_id, job.job_id]     # two schedules due, two executions
+    after = backend.ledger.get(job.job_id)
+    assert after.executions == 2 and [s.done for s in after.schedules] == [1, 1]
+    assert len(after.run_ids) == 2                  # one api × one env × no data, twice
+
+
 async def test_scheduler_uses_only_the_backend_abc(tmp_path):
     now = datetime.now(UTC)
     job = JobSpec(job_id="job-01", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED, summary="s",
