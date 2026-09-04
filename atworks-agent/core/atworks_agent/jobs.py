@@ -131,6 +131,12 @@ class JobLedger:
         self._jobs[job_id] = updated
         return updated
 
+    def add_guardrail_note(self, job_id: str, note: str) -> JobSpec:
+        job = self._jobs[job_id]
+        updated = job.model_copy(update={"guardrail_notes": [*job.guardrail_notes, note]})
+        self._jobs[job_id] = updated
+        return updated
+
     def record_execution(self, job_id: str, run_ids: list[str]) -> JobSpec:
         """One execution of the job happened and produced these runs. runs_remaining counts
         executions (schedule.count of them, or 1 for run_now), not individual runs."""

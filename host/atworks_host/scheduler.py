@@ -1,0 +1,53 @@
+"""승인(applied)된 job을 예정 시각에 실행한다. LLM 호출 없음. tick(now)는 멱등적이다: 같은 회차는
+두 번 돌지 않는다(회차 = 지금까지 실행된 횟수)."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from atworks_agent import AtworksSessionContext, JobKind, JobSpec, JobStatus
+
+from .mock_backend import MockAtworks
+from .reports import Reports
+
+
+def due_at(job: JobSpec, index: int) -> datetime | None:
+    """index번째(0부터) 회차의 예정 시각. run_now는 시각이 없다(승인 즉시, tick이 따로 본다)."""
+    if job.kind is JobKind.RUN_NOW:
+        return None
+    s = job.schedule
+    if s is None or index >= s.count:
+        return None
+    hh, mm = (int(x) for x in s.at.split(":"))
+    first = datetime.fromisoformat(s.from_date).replace(hour=hh, minute=mm, tzinfo=ZoneInfo(s.tz))
+    return first + timedelta(days=index) if s.kind == "daily" else (first if index == 0 else None)
+
+
+class Scheduler:
+    def __init__(self, backend: MockAtworks, reports: Reports, session: AtworksSessionContext | None):
+        self.backend = backend
+        self.reports = reports
+        self.session = session or AtworksSessionContext(session_id="scheduler", project_id="default", operator="scheduler")
+
+    async def tick(self, now: datetime) -> list[str]:
+        executed: list[str] = []
+        for job in list(self.backend.ledger.applied()):
+            if job.status is not JobStatus.APPLIED or (job.runs_remaining or 0) <= 0:
+                continue
+            index = (job.schedule.count if job.schedule else 1) - (job.runs_remaining or 0)
+            if job.kind is JobKind.RUN_NOW:
+                due = index == 0
+            else:
+                when = due_at(job, index)
+                due = when is not None and when <= now
+            if not due:
+                continue
+            produced = await self.backend.execute_job_once(self.session, job.job_id)
+            if not produced:
+                continue
+            if job.report:
+                all_ids = self.backend.ledger.get(job.job_id).run_ids
+                every = [self.backend.runs[i] for i in all_ids if i in self.backend.runs]
+                self.reports.write(self.backend.ledger.get(job.job_id), every)
+            executed.append(job.job_id)
+        return executed

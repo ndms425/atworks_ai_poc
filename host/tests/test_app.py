@@ -1,0 +1,55 @@
+from pathlib import Path
+
+import pytest
+from commerce_common.testing import FakeClient, text_message
+from httpx import ASGITransport, AsyncClient
+
+from atworks_agent import AtworksAgentConfig
+from atworks_agent_runtime import AtworksAgent
+from atworks_host.app import create_app
+from atworks_host.mock_backend import MockAtworks
+from atworks_host.reports import Reports
+from atworks_host.scheduler import Scheduler
+
+FIXTURES = Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures"
+SKILLS = Path(__file__).resolve().parents[2] / "atworks-agent" / "skills"
+
+
+@pytest.fixture
+async def client(tmp_path):
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=FakeClient([text_message("ok")]))
+    reports = Reports(tmp_path)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        yield c
+
+
+async def test_session_and_reads(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    assert len((await client.get("/api/atworks/apis", headers=h)).json()["apis"]) == 12
+    runs = (await client.get("/api/atworks/runs?status=fail", headers=h)).json()
+    assert runs["population"] >= len(runs["runs"]) > 0
+    assert (await client.get("/api/atworks/jobs", headers=h)).json()["jobs"] == []
+
+
+async def test_chat_streams_sse_with_attachments(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post("/api/atworks/chat", headers={"X-Session-Id": sid},
+                          json={"message": "이거 왜 실패했어", "attached_items": [{"order": 1, "kind": "run", "ref_id": "run-0001", "label": "환불", "comment": "왜"}]})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert "event: text_delta" in r.text and "event: turn_complete" in r.text
+
+
+async def test_apply_route_marks_then_consumes_approval(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post("/api/atworks/changes/job-9999/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is False and "not staged" in body["reason"]
+
+
+async def test_report_404_before_run(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    assert (await client.get("/api/atworks/reports/job-0001", headers={"X-Session-Id": sid})).status_code == 404

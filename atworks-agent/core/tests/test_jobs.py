@@ -67,6 +67,18 @@ def test_discard_records_actor_kind():
     assert discarded.discarded_by == "assistant"
 
 
+def test_add_guardrail_note_appends():
+    ledger = JobLedger(CFG)
+    job = ledger.stage(_draft(), actor="op")
+    updated = ledger.add_guardrail_note(job.job_id, "execution skipped: LATE selection resolved to 5 APIs, above the limit of 3")
+    assert updated.guardrail_notes == ["execution skipped: LATE selection resolved to 5 APIs, above the limit of 3"]
+    updated2 = ledger.add_guardrail_note(job.job_id, "second note")
+    assert updated2.guardrail_notes == [
+        "execution skipped: LATE selection resolved to 5 APIs, above the limit of 3",
+        "second note",
+    ]
+
+
 def test_record_execution_counts_executions_not_runs():
     cfg = AtworksAgentConfig(model="m", max_schedule_count=3)
     ledger = JobLedger(cfg)

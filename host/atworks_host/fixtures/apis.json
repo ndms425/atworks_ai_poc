@@ -1,0 +1,14 @@
+[
+  {"api_id": "api-001", "method": "POST", "path": "/v1/contracts", "name": "계약 생성", "group": "contract", "updated_at": "2026-09-01T10:00:00+09:00", "has_rules": true, "params": ["contractNo", "amount", "customerId"]},
+  {"api_id": "api-002", "method": "GET", "path": "/v1/contracts/{id}", "name": "계약 조회", "group": "contract", "updated_at": "2026-08-12T10:00:00+09:00", "has_rules": false, "params": ["id"]},
+  {"api_id": "api-003", "method": "POST", "path": "/v1/payments/refund", "name": "환불 요청", "group": "payment", "updated_at": "2026-08-30T10:00:00+09:00", "has_rules": true, "params": ["paymentId", "refundAmount"]},
+  {"api_id": "api-004", "method": "POST", "path": "/v1/payments/approve", "name": "결제 승인", "group": "payment", "updated_at": "2026-09-02T09:30:00+09:00", "has_rules": true, "params": ["paymentId", "amount"]},
+  {"api_id": "api-005", "method": "GET", "path": "/v1/payments/{id}", "name": "결제 조회", "group": "payment", "updated_at": "2026-08-05T09:00:00+09:00", "has_rules": false, "params": ["id"]},
+  {"api_id": "api-006", "method": "PUT", "path": "/v1/contracts/{id}", "name": "계약 수정", "group": "contract", "updated_at": "2026-08-29T14:00:00+09:00", "has_rules": true, "params": ["id", "amount"]},
+  {"api_id": "api-007", "method": "GET", "path": "/v1/users/{id}/status", "name": "사용자 상태 조회", "group": "user", "updated_at": "2026-08-01T11:00:00+09:00", "has_rules": false, "params": ["id"]},
+  {"api_id": "api-008", "method": "POST", "path": "/v1/users", "name": "사용자 생성", "group": "user", "updated_at": "2026-08-15T13:00:00+09:00", "has_rules": false, "params": ["name", "email"]},
+  {"api_id": "api-009", "method": "DELETE", "path": "/v1/contracts/{id}", "name": "계약 해지", "group": "contract", "updated_at": "2026-08-25T10:00:00+09:00", "has_rules": true, "params": ["id", "reason"]},
+  {"api_id": "api-010", "method": "POST", "path": "/v1/payments/cancel", "name": "결제 취소", "group": "payment", "updated_at": "2026-08-18T10:00:00+09:00", "has_rules": false, "params": ["paymentId"]},
+  {"api_id": "api-011", "method": "PUT", "path": "/v1/users/{id}", "name": "사용자 정보 수정", "group": "user", "updated_at": "2026-08-10T10:00:00+09:00", "has_rules": false, "params": ["id", "email"]},
+  {"api_id": "api-012", "method": "GET", "path": "/v1/users", "name": "사용자 목록 조회", "group": "user", "updated_at": "2026-08-22T10:00:00+09:00", "has_rules": true, "params": ["page", "size"]}
+]
