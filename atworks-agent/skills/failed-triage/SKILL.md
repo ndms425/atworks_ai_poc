@@ -17,7 +17,7 @@ You give the operator a reading order over runs that aTworks already judged non-
 - Ranking covers only the runs the last `list_runs` returned; list again before ranking a different window.
 
 ## Present
-- `present_run_digest`: one entry per ranked run, `kind` from the run's status, `headline` from the failed rule or HTTP status, `why_it_matters` from the scorer's reasons. The card shows the population; your one sentence before it states it too ("실패 47건 중 먼저 볼 8건").
+- `present_run_digest`: one entry per ranked run, `kind` from the run's status, `headline` from the failed rule or HTTP status, `why_it_matters` from the scorer's reasons. The card carries the population; your sentence before it introduces the card without restating counts or verdicts.
 - Close with a `note` entry when the population exceeds what is shown, offering to expand.
 - Chips: open the next item, re-run one API as a job, show the full list.
 
