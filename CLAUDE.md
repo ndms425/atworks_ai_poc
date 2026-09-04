@@ -10,6 +10,17 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
 
 - **Role:** merchant-side (operator-facing). The operator is a developer or QA engineer; the
   records are `ApiSpec` and `RunResult`; the staged write is a `JobSpec` execution plan.
+- **Staged-write shape: a matrix.** One `JobSpec` runs `api_ids × target_envs × test_data` once per
+  schedule occurrence (`docs/superpowers/specs/2026-09-04-multi-dimension-jobs-design.md`):
+  `target_envs: list[str]`, `schedules: list[JobSchedule]` (empty ⇒ once), `test_data:
+  list[TestDataSet]`. `JobLedger` owns `executions` and each schedule's `done`; `matrix_size` /
+  `total_executions` / `remaining_executions` / `runs_total` are derived. Every cap is an
+  `AtworksAgentConfig` field checked inside `check_job_guardrails` (`.../jobs.py`) so stage and
+  apply both get it, and is the tool schema's `maxItems` so the tool bytes stay a pure function of
+  config: `max_apis_per_job=100`, `max_target_envs_per_job=2`, `max_schedules_per_job=3`,
+  `max_test_data_sets=5`, `max_matrix_size=400` (apis × envs × data), `max_schedule_count=14` (the
+  **sum** of every schedule's `count`), `allowed_target_envs=("dev","stg")` — every offending env
+  named, never `all()`, never just the first. Test-data keys must be `params` of a selected API.
 - **Language / path / shell:** Python 3.11+, pydantic v2, FastAPI + SSE. Role package
   `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (4), turn loop
   `atworks-agent/runtime/atworks_agent_runtime/orchestrator.py`, host `host/atworks_host/`,
@@ -55,13 +66,18 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   call and comes off immediately after, whatever the outcome, so no chat turn can spend it.
   `apply_job` is held without it; approval typed in chat approves nothing. Discards take the same
   path through `host_action_job_ids`, which stamps the job `discarded_by_kind = OPERATOR`.
-  `job_review_policy = "always"`.
+  `job_review_policy = "always"`. One click covers the **whole** matrix (no partial approval —
+  narrow it by staging a smaller job), so the preview card carries a server-computed `matrix` block
+  — envs, data-set labels, executions, runs per execution, runs total — from `JobSpec` properties,
+  never a number the model wrote.
 - **Checkout handoff:** not applicable (merchant role).
 - **Flows covered:** four skills, loaded on demand over the prompt's index. (1) `failed-triage` —
   `list_runs {filters:{status:non_pass}}` → `rank_failed_runs` (deterministic `risk_v1`, no
   analysis delegate) → `present_run_digest`, population and items bound to one list window;
-  (2) `schedule-run` — resolve the selection, fill or ask the missing slots, `stage_job` → preview
-  card → host approval → `apply_job`, then the scheduler executes with no LLM in the path;
+  (2) `schedule-run` — resolve the selection, fill or ask the missing slots (environments,
+  schedules, test data), `stage_job` → preview card → host approval → `apply_job`, then the
+  scheduler executes the matrix with no LLM in the path; cross-environment comparison appears in
+  the job's report only, never as chat prose;
   (3) `job-approval` — pending queue, apply an already-approved job, discard; (4) `api-lookup` —
   specs, params, rules. Screen attachments (`<attached-result-items>`) scope any turn to the
   ref_ids the operator attached.
