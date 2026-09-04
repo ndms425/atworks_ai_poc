@@ -8,6 +8,7 @@ from atworks_agent.jobs import (
     JobDraft,
     JobLedger,
     JobNotApplicable,
+    SelectWhere,
     check_job_guardrails,
     enforce_execution_matrix,
 )
@@ -362,3 +363,17 @@ def test_enforce_execution_matrix_rechecks_target_envs():
     violations = enforce_execution_matrix(cfg, job, ["a"])
 
     assert any("prod" in v and "not allowed targets" in v for v in violations)
+
+
+def test_select_where_accepts_failed_since_and_related_to_only_as_declared():
+    where = SelectWhere(related_to="api-1", failed_since=datetime(2026, 9, 1, tzinfo=UTC))
+    assert where.related_to == "api-1"
+    with pytest.raises(ValueError):
+        SelectWhere(anything="x")
+
+
+def test_ledger_copies_selection_basis_onto_the_job():
+    ledger = JobLedger(AtworksAgentConfig(model="m"))
+    job = ledger.stage(JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["a"], target_envs=["dev"],
+                                selection_basis="api-1과 같은 group(contract) — 2개"), actor="op")
+    assert job.selection_basis == "api-1과 같은 group(contract) — 2개"

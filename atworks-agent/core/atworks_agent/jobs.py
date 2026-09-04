@@ -58,6 +58,8 @@ class SelectWhere(BaseModel):
     query: str = Field(default="", max_length=120)
     group: str | None = Field(default=None, max_length=60)
     updated_after: datetime | None = None
+    failed_since: datetime | None = None    # keep APIs with a non_pass run at/after this time
+    related_to: str | None = Field(default=None, max_length=64)   # same group or same leading path segments as this api_id
 
 
 class JobDraft(BaseModel):
@@ -73,6 +75,7 @@ class JobDraft(BaseModel):
     report: bool = True
     confidence: dict[str, float] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
+    selection_basis: str | None = Field(default=None, max_length=160)
 
     @field_validator("target_envs")
     @classmethod
@@ -247,6 +250,7 @@ class JobLedger:
             api_ids=list(draft.api_ids),
             select_where=draft.select_where,
             binding=draft.binding,
+            selection_basis=draft.selection_basis,
             target_envs=list(draft.target_envs),
             # A draft may carry a `done` the model invented; the ledger owns that counter.
             schedules=[s.model_copy(update={"done": 0}) for s in draft.schedules],

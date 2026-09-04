@@ -177,6 +177,7 @@ class JobSpec(BaseModel):
     api_ids: list[str] = Field(default_factory=list)
     select_where: dict[str, Any] | None = None
     binding: Binding = Binding.FROZEN
+    selection_basis: str | None = Field(default=None, max_length=160)
     target_envs: list[str] = Field(min_length=1)
     schedules: list[JobSchedule] = Field(default_factory=list)   # empty ⇒ run_now, one execution
     test_data: list[TestDataSet] = Field(default_factory=list)   # empty ⇒ no binding

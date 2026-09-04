@@ -16,8 +16,10 @@ from atworks_agent import (
     JobSpec,
     RunResult,
     RunStatus,
+    SelectWhere,
     TestDataSet,
     enforce_execution_matrix,
+    resolve_select_where,
 )
 from atworks_agent.types import Binding
 
@@ -130,12 +132,12 @@ class MockAtworks(AtworksBackend):
         if job.binding is Binding.LATE and job.select_where:
             # LATE re-resolves once per execution, not once per environment: the selection is
             # a property of the job, and re-running it per env would let two envs disagree
-            # about what the job even is.
-            w = job.select_where
-            api_ids = [a.api_id for a in await self.search_apis(
-                session, query=w.get("query", ""), group=w.get("group"),
-                updated_after=datetime.fromisoformat(w["updated_after"]) if w.get("updated_after") else None,
-                limit=self._config.max_apis_per_job + 1)]
+            # about what the job even is. Stage-time and LATE re-resolution share the same
+            # resolve_select_where — the backend passed here is this MockAtworks itself, which
+            # implements search_apis/get_api/list_runs.
+            where = SelectWhere.model_validate(job.select_where)
+            resolution = await resolve_select_where(self, session, where, self._config, now=datetime.now(UTC))
+            api_ids = resolution.api_ids
         # The size caps are re-derived here (not just relied on from staging): a LATE
         # selection may have grown since then, and a FROZEN job may run under a config that
         # has since tightened (M11).

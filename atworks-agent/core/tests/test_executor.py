@@ -3,6 +3,9 @@ from datetime import UTC, datetime
 
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.executor import AtworksToolExecutor
+from atworks_agent.types import ApiSpec
+
+from .conftest import T0
 
 
 def _exec(backend, config, skills, session, state):
@@ -182,6 +185,34 @@ async def test_stage_job_rejects_select_where_with_unknown_field(backend, config
                                           "binding": "LATE", "select_where": {"query": "x", "evil": 1}})
     assert out.is_error
     assert "unavailable" not in out.result_text
+
+
+async def test_stage_job_related_to_resolves_the_selection_server_side(backend, config, skills, session, state):
+    backend.apis["api-3"] = ApiSpec(api_id="api-3", method="GET", path="/v1/contracts/{id}/history", name="이력", group="contract", updated_at=T0, has_rules=False)
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    await ex.execute("get_api", {"api_id": "api-1"})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "관련 재실행", "api_ids": ["api-1"],
+                                         "target_envs": ["dev"], "select_where": {"related_to": "api-1"}})
+    assert not out.is_error, out.result_text
+    job = next(iter(state.seen_jobs.values()))
+    assert set(job.api_ids) == {"api-1", "api-2", "api-3"}
+    assert job.selection_basis and "api-1" in job.selection_basis
+    assert {"api-2", "api-3"} <= set(state.seen_apis)             # resolved specs are remembered
+
+
+async def test_stage_job_related_to_must_be_a_seen_api(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "x", "api_ids": ["api-1"],
+                                         "target_envs": ["dev"], "select_where": {"related_to": "api-1"}})
+    assert out.blocked == "provenance"
+
+
+async def test_stage_job_failed_since_with_no_match_is_a_named_argument_error(backend, config, skills, session, state):
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session, state=state)
+    await ex.execute("get_api", {"api_id": "api-1"})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "x", "api_ids": ["api-1"], "target_envs": ["dev"],
+                                         "select_where": {"failed_since": "2030-01-01T00:00:00+00:00"}})
+    assert out.is_error and "select_where" in out.result_text and "no API" in out.result_text
 
 
 async def test_get_run_on_fresh_state_seeds_attached_population(backend, config, skills, session, state):

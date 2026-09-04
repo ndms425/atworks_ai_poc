@@ -5,6 +5,7 @@ from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
     AtworksSessionContext,
+    Binding,
     JobDraft,
     JobKind,
     RunStatus,
@@ -93,6 +94,15 @@ async def test_late_binding_resolving_to_no_apis_skips_execution_and_notes_guard
     assert "no APIs" in updated.guardrail_notes[0]
     # the slot is consumed even though nothing ran
     assert updated.remaining_executions == before - 1
+
+
+async def test_late_binding_re_resolves_related_to_at_execution():
+    backend = MockAtworks(AtworksAgentConfig(model="m"), Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures")
+    job = await backend.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="late", api_ids=["api-003"], target_envs=["dev"],
+                                                    binding=Binding.LATE, select_where={"related_to": "api-003"}), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    produced = await backend.execute_job_once(SESSION, job.job_id)
+    assert {r.api_id for r in produced} == {"api-003", "api-004", "api-005", "api-010"}   # payment group / /v1/payments/*
 
 
 async def test_execute_job_once_produces_the_whole_matrix():

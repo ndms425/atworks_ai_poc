@@ -64,7 +64,7 @@ def test_stage_job_select_where_schema_forbids_extra_properties():
     stage = next(t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "stage_job")
     select_where = stage["input_schema"]["properties"]["select_where"]
     assert select_where["additionalProperties"] is False
-    assert set(select_where["properties"]) == {"query", "group", "updated_after"}
+    assert set(select_where["properties"]) == {"query", "group", "updated_after", "failed_since", "related_to"}
 
 
 def test_aggregate_runs_schema_lists_the_axes():

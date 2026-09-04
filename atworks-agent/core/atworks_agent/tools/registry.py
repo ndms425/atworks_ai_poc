@@ -146,9 +146,11 @@ def build_tools(
                 "select_where": {"type": "object", "properties": {
                     "query": {"type": "string", "maxLength": 120},
                     "group": {"type": "string", "maxLength": 60},
-                    "updated_after": {"type": "string", "description": _ISO_DATETIME}},
+                    "updated_after": {"type": "string", "description": _ISO_DATETIME},
+                    "failed_since": {"type": "string", "description": _ISO_DATETIME + " Server-resolved: keep only APIs with a fail/error run at or after this time ('실패한 것만 다시'). Default 24h ago when the operator gives no window."},
+                    "related_to": {"type": "string", "description": _SESSION_API_ID + " Server-resolved: APIs in the same group or under the same leading path as this one ('X 고쳤는데 뭘 다시 돌려야 해')."}},
                     "additionalProperties": False,
-                    "description": "The search that produced api_ids (query/group/updated_after), kept for LATE binding and for the preview's provenance."},
+                    "description": "The search that produced api_ids (query/group/updated_after), kept for LATE binding and for the preview's provenance. When failed_since or related_to is set the host resolves api_ids itself and replaces the list you sent; the card shows the selection basis."},
                 "report": {"type": "boolean"},
                 "confidence": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "Per-slot confidence: target_envs, schedules, test_data, binding, api_ids, report."},
                 "assumptions": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 160}}},

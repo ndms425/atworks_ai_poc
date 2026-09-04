@@ -11,6 +11,7 @@ from .jobs import (
     check_job_guardrails,
     enforce_execution_matrix,
 )
+from .selection import Resolution, resolve_select_where
 from .types import (
     ActorKind,
     ApiSpec,

@@ -21,6 +21,7 @@ from .enrichment import PRESENTATION_COMPONENTS
 from .fencing import ATWORKS_FENCE
 from .gates import (
     GUARDRAIL_GATE,
+    PROVENANCE_GATE,
     QUESTION_FORM_GATE,
     STAGED_AND_SHOWN_NOTE,
     STAGED_NOTE,
@@ -42,6 +43,7 @@ from .jobs import (
 )
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .scoring import UnknownScorer, rank_runs
+from .selection import resolve_select_where
 from .serialization import api_record, job_record, rank_record, run_record
 from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL
 from .types import (
@@ -153,6 +155,8 @@ class AtworksToolExecutor(BaseToolExecutor):
                 return ToolOutcome.error(f"{error.field} must be one of {', '.join(GROUP_BY)}; adjust and call again.")
             if error.kind == "provenance":
                 return ToolOutcome.error(f"{error.field} must be an api_id that search_apis or get_api returned this session; call search_apis first.")
+            if error.kind == "selection":
+                return ToolOutcome.error("select_where matched no API; widen failed_since, pick another related_to, or name api_ids.")
             if error.kind == "object":
                 if error.field == "test_data.values":
                     return ToolOutcome.error(
@@ -339,8 +343,26 @@ class AtworksToolExecutor(BaseToolExecutor):
         if held := check_api_provenance(self._state, api_ids):
             return held
         select_where = tool_input.get("select_where")
+        selection_basis: str | None = None
+        where_model: SelectWhere | None = None
         if select_where is not None:
-            select_where = parse_argument(SelectWhere, select_where).model_dump(mode="json", exclude_none=True)
+            where_model = parse_argument(SelectWhere, select_where)
+            select_where = where_model.model_dump(mode="json", exclude_none=True)
+        if where_model is not None and (where_model.related_to or where_model.failed_since):
+            # Server-resolved selections: the anchor must be a seen api (provenance), and the
+            # resolved ids replace whatever the model listed — the backend is the source.
+            if where_model.related_to and where_model.related_to not in self._state.seen_apis:
+                return ToolOutcome.held(
+                    PROVENANCE_GATE,
+                    f"select_where.related_to {where_model.related_to!r} was not returned by search_apis/get_api this session; look it up first.",
+                )
+            resolution = await resolve_select_where(self._backend, self._session, where_model, self._config, now=datetime.now(UTC))
+            if not resolution.api_ids:
+                raise InvalidToolArgument("select_where", kind="selection")
+            for api in resolution.apis.values():
+                self._state.remember_api(api)
+            api_ids = resolution.api_ids
+            selection_basis = resolution.basis
         # Envs are sanitized to the per-item cap and de-duplicated the way api_ids are: a
         # repeated env is a harmless restatement, and an over-long one is trimmed here so the
         # guardrail message names a readable value instead of a wall of text. The trimmed
@@ -378,6 +400,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "schedules": _coerce_list(tool_input.get("schedules")) or [],
             "test_data": test_data,
             "select_where": select_where,
+            "selection_basis": selection_basis,
             "binding": tool_input.get("binding") or "FROZEN", "report": tool_input.get("report", True),
             "confidence": {
                 k: float(v) for k, v in (confidence_input or {}).items()
