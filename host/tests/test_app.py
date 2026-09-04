@@ -4,7 +4,13 @@ import pytest
 from commerce_common.testing import FakeClient, text_message
 from httpx import ASGITransport, AsyncClient
 
-from atworks_agent import ActorKind, AtworksAgentConfig, AtworksSessionContext, JobDraft, JobKind
+from atworks_agent import (
+    ActorKind,
+    AtworksAgentConfig,
+    AtworksSessionContext,
+    JobDraft,
+    JobKind,
+)
 from atworks_agent_runtime import AtworksAgent
 from atworks_host.app import create_app
 from atworks_host.mock_backend import MockAtworks
@@ -23,6 +29,8 @@ async def client(tmp_path):
     reports = Reports(tmp_path)
     app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        c.backend = backend
+        c.reports = reports
         yield c
 
 
@@ -80,8 +88,23 @@ async def test_host_click_applies_job_staged_outside_the_session(client_backend)
 
 
 async def test_report_404_before_run(client):
-    sid = (await client.post("/api/atworks/session")).json()["session_id"]
-    assert (await client.get("/api/atworks/reports/job-0001", headers={"X-Session-Id": sid})).status_code == 404
+    assert (await client.get("/api/atworks/reports/job-0001")).status_code == 404
+
+
+async def test_report_opens_without_session_header(client):
+    backend = client.backend
+    reports = client.reports
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+    )
+    await backend.apply_job(session, job.job_id)
+    runs = await backend.execute_job_once(session, job.job_id)
+    reports.write(job, runs)
+    r = await client.get(f"/api/atworks/reports/{job.job_id}")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "text/html; charset=utf-8"
+    assert "report-data" in r.text
 
 
 async def test_runs_since_naive_date_does_not_500(client):

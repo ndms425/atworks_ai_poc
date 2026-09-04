@@ -139,8 +139,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return {"executed": await scheduler.tick(at)}
 
     @router.get("/reports/{job_id}", response_class=HTMLResponse)
-    async def report(job_id: str, record: CurrentSession) -> str:
-        del record
+    async def report(job_id: str) -> str:
         html = reports.read_html(job_id)
         if html is None:
             raise HTTPException(status_code=404, detail="no report yet")
