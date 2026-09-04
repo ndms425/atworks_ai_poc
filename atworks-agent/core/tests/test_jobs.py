@@ -1,0 +1,65 @@
+import pytest
+
+from atworks_agent.config import AtworksAgentConfig
+from atworks_agent.jobs import (
+    GuardrailViolation,
+    JobDraft,
+    JobLedger,
+    JobNotApplicable,
+    check_job_guardrails,
+)
+from atworks_agent.types import JobKind, JobSchedule, JobStatus
+
+CFG = AtworksAgentConfig(model="m", max_apis_per_job=3, allowed_target_envs=("dev", "stg"))
+
+
+def _draft(**over):
+    base = dict(kind=JobKind.RUN_NOW, summary="run", api_ids=["a", "b"], target_env="dev",
+                schedule=None, report=True)
+    base.update(over)
+    return JobDraft(**base)
+
+
+def test_guardrail_api_count():
+    v = check_job_guardrails(_draft(api_ids=["a", "b", "c", "d"]), CFG)
+    assert any("4 APIs" in m and "limit is 3" in m for m in v)
+
+
+def test_guardrail_target_env_protected():
+    v = check_job_guardrails(_draft(target_env="prod"), CFG)
+    assert any("prod" in m and "not an allowed target" in m for m in v)
+
+
+def test_guardrail_schedule_count():
+    cfg = AtworksAgentConfig(model="m", max_schedule_count=3)
+    sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=5)
+    v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedule=sched), cfg)
+    assert any("5 runs" in m and "limit is 3" in m for m in v)
+
+
+def test_ledger_stage_apply_discard():
+    ledger = JobLedger(CFG)
+    job = ledger.stage(_draft(), actor="op")
+    assert job.job_id == "job-0001" and job.status is JobStatus.STAGED
+    applied = ledger.apply(job.job_id, actor="op")
+    assert applied.status is JobStatus.APPLIED and applied.applied_by == "op"
+    with pytest.raises(JobNotApplicable):
+        ledger.discard(job.job_id, actor="op")
+
+
+def test_ledger_rejects_guardrail_at_stage():
+    with pytest.raises(GuardrailViolation):
+        JobLedger(CFG).stage(_draft(target_env="prod"), actor="op")
+
+
+def test_record_execution_counts_executions_not_runs():
+    cfg = AtworksAgentConfig(model="m", max_schedule_count=3)
+    ledger = JobLedger(cfg)
+    sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=3)
+    job = ledger.stage(_draft(kind=JobKind.SCHEDULED_RUN, schedule=sched), actor="op")
+    assert job.runs_remaining == 3
+    ledger.apply(job.job_id, actor="op")
+    after_first = ledger.record_execution(job.job_id, ["run-0031", "run-0032"])
+    assert after_first.run_ids == ["run-0031", "run-0032"] and after_first.runs_remaining == 2
+    after_second = ledger.record_execution(job.job_id, ["run-0033", "run-0034"])
+    assert len(after_second.run_ids) == 4 and after_second.runs_remaining == 1
