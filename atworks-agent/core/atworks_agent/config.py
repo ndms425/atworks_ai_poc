@@ -44,6 +44,18 @@ class AtworksAgentConfig(BaseAgentConfig):
     default_scorer: str = "risk_v1"
     max_rank_items: int = Field(default=8, ge=1, le=20)
 
+    # -- 집계 (aggregate_runs · /runs/insights · 브리핑) --------------------------------
+    max_aggregate_runs: int = Field(default=2000, ge=1)           # list_runs limit for aggregation
+    max_aggregate_window_days: int = Field(default=30, ge=1)      # since is clamped to now - N days
+    flaky_min_transitions: int = Field(default=2, ge=1)           # flaky_v1 threshold
+    max_group_items: int = Field(default=12, ge=1, le=50)         # groups on one card (schema maxItems)
+    impact_path_segments: int = Field(default=2, ge=1)            # related_to: shared leading path segments
+
+    # -- 브리핑 (스케줄러가 생성, LLM 0회) ---------------------------------------------
+    briefing_enabled: bool = True
+    briefing_at: str = Field(default="09:00", pattern=r"^\d{2}:\d{2}$")
+    briefing_tz: str = "Asia/Seoul"
+
     # -- grounding 어휘 (한/영). 한글 항목은 substring, 영문은 whole-word로 매칭된다 --------
     runs_grounding_gate: bool = True
     runs_intent_terms: tuple[str, ...] = (
@@ -59,6 +71,10 @@ class AtworksAgentConfig(BaseAgentConfig):
     )
     job_intent_cues: tuple[str, ...] = ("해줘", "해 줘", "줘", "please", "now", "every")
     apply_intent_phrases: tuple[str, ...] = ("승인", "적용", "approve", "apply", "go ahead")
+    aggregate_grounding_gate: bool = True
+    aggregate_intent_terms: tuple[str, ...] = (
+        "묶어", "원인별", "언제부터", "왔다갔다", "불안정", "flaky", "패턴", "cluster", "since when", "flapping",
+    )
 
     @property
     def stages_jobs(self) -> bool:

@@ -54,6 +54,31 @@ class FailedRank(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class RunGroup(BaseModel):
+    """One bucket of aggregate_runs. Every figure is computed by the host (aggregation.py); the
+    model only chooses which groups a card shows."""
+    key: str
+    label: str
+    count: int
+    fail: int
+    error: int
+    passed: int
+    run_ids: list[str] = Field(default_factory=list)          # newest first, at most 50
+    first_non_pass_at: datetime | None = None
+    last_pass_before: datetime | None = None
+    latest_status: RunStatus | None = None
+    transitions: int = 0
+    flaky: bool = False
+    p95_duration_ms: int | None = None
+    regression_suspect: bool = False
+    api_updated_at: datetime | None = None
+
+
+class Insights(BaseModel):
+    flaky: int = 0
+    regression_suspect: int = 0
+
+
 # -- 실행 계획(JobSpec) ---------------------------------------------------------------
 
 class JobKind(StrEnum):
@@ -220,6 +245,9 @@ class AtworksSessionState(BaseModel):
     last_population: int | None = None
     last_listed_run_ids: list[str] = Field(default_factory=list)
     last_listed_filter: str = "all"
+    seen_groups: dict[str, RunGroup] = Field(default_factory=dict)   # key f"{group_by}:{group.key}"
+    last_group_by: str | None = None
+    last_aggregate_since: datetime | None = None
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
 
@@ -234,3 +262,9 @@ class AtworksSessionState(BaseModel):
 
     def remember_job(self, job: JobSpec) -> None:
         remember(self.seen_jobs, job.job_id, job)
+
+    def remember_groups(self, group_by: str, groups: list[RunGroup], since: datetime | None) -> None:
+        for group in groups:
+            remember(self.seen_groups, f"{group_by}:{group.key}", group)
+        self.last_group_by = group_by
+        self.last_aggregate_since = since
