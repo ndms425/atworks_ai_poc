@@ -1,0 +1,11 @@
+# Repo-wide lint policy; packaging is per-package (one pyproject.toml per package).
+line-length = 100
+target-version = "py311"
+# Markdown code blocks are written for reading (aligned comments); ruff 0.16+ would reformat them.
+exclude = ["*.md"]
+src = ["atworks-agent/core", "atworks-agent/runtime", "host", "scripts"]
+extend-exclude = ["refs", "web"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "W291", "W293"]
+ignore = ["E501"]

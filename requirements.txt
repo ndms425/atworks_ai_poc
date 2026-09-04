@@ -1,0 +1,5 @@
+-r refs/commerce-agents/requirements.txt
+-e atworks-agent/core
+-e atworks-agent/runtime
+-e host
+tzdata

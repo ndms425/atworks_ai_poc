@@ -1,0 +1,14 @@
+.env
+refs/
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+.next/
+out/
+*.egg-info/
+host/atworks_host/reports_out/
+.pytest_cache/
+.ruff_cache/
+.claude/settings.local.json
+web/package-lock.json.bak

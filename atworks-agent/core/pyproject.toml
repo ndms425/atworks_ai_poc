@@ -1,0 +1,12 @@
+[project]
+name = "atworks-agent-core"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["commerce-common", "pydantic>=2", "anthropic", "pyyaml"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["atworks_agent*"]
