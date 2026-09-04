@@ -4,10 +4,11 @@
 /** One entry per aTworks presentation tool. */
 
 import { type ChangeAction, type GenerativeBlockProps, UnknownBlock } from "web-shared";
-import type { AttachedItem, JobPreviewPayload, JobSpec, QuestionFormPayload, RunDigestPayload } from "@/lib/types";
+import type { AttachedItem, JobPreviewPayload, JobSpec, QuestionFormPayload, RunDigestPayload, RunGroupsPayload } from "@/lib/types";
 import JobPreviewCard from "./JobPreviewCard";
 import QuestionFormCard from "./QuestionFormCard";
 import RunDigestCard from "./RunDigestCard";
+import RunGroupsCard from "./RunGroupsCard";
 
 export default function GenerativeBlock({
   block,
@@ -25,6 +26,8 @@ export default function GenerativeBlock({
   switch (block.component) {
     case "run_digest":
       return <RunDigestCard payload={block.payload as RunDigestPayload} onPrefill={onPrefill} onAttach={onAttach} />;
+    case "run_groups":
+      return <RunGroupsCard payload={block.payload as RunGroupsPayload} onPrefill={onPrefill} onAttach={onAttach} />;
     case "job_preview":
       return <JobPreviewCard payload={block.payload as JobPreviewPayload} onAct={onChangeAction} />;
     case "question_form":

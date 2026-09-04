@@ -165,3 +165,34 @@ export interface AttachedItem {
   expected?: string;
   comment?: string;
 }
+
+export type GroupBy = "api" | "failed_rule" | "http_status" | "env" | "api_env_data";
+
+export interface RunGroup {
+  key: string;
+  label: string;
+  count: number;
+  fail: number;
+  error: number;
+  passed: number;
+  run_ids?: string[];
+  first_non_pass_at?: string | null;
+  last_pass_before?: string | null;
+  latest_status?: RunStatus | null;
+  transitions: number;
+  flaky: boolean;
+  p95_duration_ms?: number | null;
+  regression_suspect: boolean;
+  api_updated_at?: string | null;
+}
+
+export interface RunGroupsPayload {
+  title?: string | null;
+  note?: string | null;
+  group_by: GroupBy;
+  population: number;
+  population_filter: PopulationFilter;
+  since?: string | null;
+  shown: number;
+  items: RunGroup[];
+}
