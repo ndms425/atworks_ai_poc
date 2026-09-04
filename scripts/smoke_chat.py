@@ -26,6 +26,21 @@ def post(base, path, body=None, sid=None):
     return urllib.request.urlopen(req, timeout=180)
 
 
+def turn_ok(complete: bool, seen: set[str], want: set[str]) -> bool:
+    """Determine if a turn's result is acceptable.
+
+    Args:
+        complete: Whether the turn completed successfully.
+        seen: Components that were observed in the response.
+        want: Components that should be present (if empty, no components required).
+
+    Returns:
+        True if the turn passed: it completed and either no components are wanted
+        or all wanted components were seen.
+    """
+    return bool(complete and (not want or (seen & want)))
+
+
 def run_turn(base, sid, i, text, want):
     body = {"message": text}
     if i == 2:
@@ -55,7 +70,7 @@ def run_turn(base, sid, i, text, want):
             d = json.loads(line[6:])
             if d.get("status") == "blocked":
                 print(f"  [gate] {d['tool']} held by {d.get('reason')}")
-    good = complete and (not want or seen & want)
+    good = turn_ok(complete, seen, want)
     print(f"turn {i}: {'OK ' if good else 'FAIL'} components={sorted(seen)}")
     print(f"  tool_calls={tools}")
     return good
@@ -77,7 +92,7 @@ def main():
     for i, (text, want) in enumerate(TURNS, 1):
         if i not in indices:
             continue
-        ok &= run_turn(a.base, sid, i, text, want)
+        ok = ok and run_turn(a.base, sid, i, text, want)
     sys.exit(0 if ok else 1)
 
 
