@@ -114,6 +114,7 @@ class TestDataSet(BaseModel):
     about the system. The model may propose a set, but every invented value belongs in
     ``JobSpec.assumptions`` with a low confidence."""
     model_config = ConfigDict(extra="forbid")
+    __test__ = False  # pytest: a domain type, not a test class
     label: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_.\-가-힣 ]+$")
     values: dict[str, str] = Field(min_length=1)
 
