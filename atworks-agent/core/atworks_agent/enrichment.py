@@ -25,7 +25,7 @@ from .tools.presentation import (
     PresentJobPreviewPayload,
     PresentRunDigestPayload,
 )
-from .types import RunStatus
+from .types import Binding, RunStatus
 
 LOW_CONFIDENCE = 0.5
 
@@ -121,6 +121,15 @@ async def enrich_job_preview(payload: PresentJobPreviewPayload, context: Enrichm
     enriched["apis"] = [_record(a) for a in (context.state.seen_apis.get(i) for i in job.api_ids) if a is not None]
     # Server-computed so the one approval click is informed consent over the whole matrix:
     # every env, every data set, and the totals the operator is actually authorizing.
+    # LATE re-evaluates select_where at every execution (mock_backend.py), so the staged
+    # api_ids count is only a lower bound — the true per-execution ceiling this deployment
+    # can ever run is config.max_matrix_size, never the figure resolved at staging (C1).
+    if job.binding is Binding.LATE:
+        max_runs_per_execution = context.config.max_matrix_size
+        max_runs_total = context.config.max_matrix_size * job.total_executions
+    else:
+        max_runs_per_execution = job.matrix_size
+        max_runs_total = job.runs_total
     enriched["matrix"] = {
         "apis": len(job.api_ids),
         "envs": list(job.target_envs),
@@ -128,6 +137,8 @@ async def enrich_job_preview(payload: PresentJobPreviewPayload, context: Enrichm
         "executions": job.total_executions,
         "runs_per_execution": job.matrix_size,
         "runs_total": job.runs_total,
+        "max_runs_per_execution": max_runs_per_execution,
+        "max_runs_total": max_runs_total,
     }
     return enriched
 

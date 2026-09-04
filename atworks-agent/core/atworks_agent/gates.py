@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from commerce_common.streaming import ToolOutcome
 
 from .config import AtworksAgentConfig
-from .jobs import JobDraft, check_job_guardrails
+from .jobs import JobDraft, _listed, check_job_guardrails
 from .types import ActorKind, AtworksSessionState
 
 PROVENANCE_GATE = "provenance"
@@ -66,7 +66,7 @@ def check_api_provenance(state: AtworksSessionState, api_ids: list[str]) -> Tool
         return None
     return ToolOutcome.held(
         PROVENANCE_GATE,
-        f"api ids {', '.join(unknown)} were not returned by search_apis or get_api in this "
+        f"api ids {_listed(unknown)} were not returned by search_apis or get_api in this "
         "session. Search or look the APIs up first and use ids from the results.",
     )
 

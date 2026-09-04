@@ -2,7 +2,7 @@
 name = "atworks-agent-core"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["commerce-common", "pydantic>=2", "anthropic", "pyyaml"]
+dependencies = ["commerce-common", "pydantic>=2", "anthropic", "pyyaml", "tzdata"]
 
 [build-system]
 requires = ["setuptools>=68"]

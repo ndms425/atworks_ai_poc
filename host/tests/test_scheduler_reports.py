@@ -76,12 +76,34 @@ async def test_report_html_escapes_json_and_uses_client_side_escaping(tmp_path):
     path = reports.write(applied, [run])
     html = path.read_text(encoding="utf-8")
 
-    assert "<\\/script>" in html
+    assert "\\u003c" in html
     assert "</script><img" not in html
     assert html.count("</script>") == 2
 
     template_source = TEMPLATE.read_text(encoding="utf-8")
     assert "esc(" in template_source
+
+
+async def test_report_html_escapes_the_script_data_double_escape_sequence(tmp_path):
+    # `<!--<script` inside the data script tag walks the HTML tokenizer into
+    # script-data-double-escape, where a lone `</script>` does not close the block and
+    # everything to EOF is swallowed — the `</` -only escape (the prior implementation)
+    # did not cover this. Escaping every `<` removes the character from the markup
+    # entirely, so this sequence can no longer reach the tokenizer at all.
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    job = await backend.stage_job(
+        SESSION,
+        JobDraft(kind=JobKind.RUN_NOW, summary="<!--<script>alert(1)</script>",
+                 api_ids=["api-001"], target_envs=["dev"]),
+        ActorKind.AGENT,
+    )
+    path = reports.write(job, [])
+    html = path.read_text(encoding="utf-8")
+
+    assert "<!--<script" not in html
+    assert "</script>alert" not in html
+    assert "\\u003c" in html
 
 
 async def test_tick_survives_one_jobs_execution_error(tmp_path):

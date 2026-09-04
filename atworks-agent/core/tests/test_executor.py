@@ -245,6 +245,7 @@ async def test_stage_job_binds_test_data_and_previews_the_matrix(backend, config
     assert payload["matrix"] == {
         "apis": 1, "envs": ["dev", "stg"], "data_sets": ["S1 정상", "S2 음수 금액"],
         "executions": 3, "runs_per_execution": 4, "runs_total": 12,
+        "max_runs_per_execution": 4, "max_runs_total": 12,
     }
     assert payload["low_confidence"] == ["target_envs", "test_data"]
 
@@ -289,3 +290,24 @@ async def test_stage_job_drops_unknown_confidence_keys(backend, config, skills, 
     assert not out.refused
     job_id = next(iter(state.seen_jobs))
     assert state.seen_jobs[job_id].confidence == {"target_envs": 0.3}
+
+
+async def test_stage_job_names_a_non_dict_test_data_values_shape(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
+                                          "target_envs": ["dev"],
+                                          "test_data": [{"label": "S1", "values": "amount=1000"}]})
+    assert out.is_error
+    assert "test_data.values" in out.result_text
+    assert "unavailable" not in out.result_text
+
+
+async def test_stage_job_names_a_non_dict_confidence_shape(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
+                                          "target_envs": ["dev"], "confidence": "high"})
+    assert out.is_error
+    assert "confidence" in out.result_text
+    assert "unavailable" not in out.result_text

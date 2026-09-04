@@ -29,8 +29,13 @@ export default function JobPreviewCard({ payload, onAct }: { payload: JobPreview
   const { change: job, busy, error, act, canAct } = useChangeActions(payload.change ?? payload.job, onAct);
   const low = new Set(payload.low_confidence);
   const m = payload.matrix;
-  // LATE는 실행마다 select_where를 재평가하므로 스테이징 시점의 api_ids 개수는 상한일 뿐이다.
-  const ceiling = job.binding === "LATE" ? "최대 " : "";
+  // LATE는 실행마다 select_where를 재평가하므로 스테이징 시점의 api_ids 개수는 하한일 뿐이다 —
+  // 이 배포가 실제로 허용하는 실행당 상한은 서버가 보낸 max_runs_per_execution/max_runs_total
+  // (config.max_matrix_size 기반)이다. job.matrix_size 등 클라이언트에서 다시 계산한 값은 쓰지 않는다.
+  const isLate = job.binding === "LATE";
+  const ceiling = isLate ? "최대 " : "";
+  const perExecution = isLate ? m.max_runs_per_execution : m.runs_per_execution;
+  const total = isLate ? m.max_runs_total : m.runs_total;
   const rows: Array<[string, ReactNode]> = [
     [
       "target_envs",
@@ -75,7 +80,7 @@ export default function JobPreviewCard({ payload, onAct }: { payload: JobPreview
         </ul>
       ),
     ],
-    ["runs_total", `${ceiling}${m.runs_per_execution}건 × ${m.executions}회 = ${ceiling}${m.runs_total}건`],
+    ["runs_total", `${ceiling}${perExecution}건 × ${m.executions}회 = ${ceiling}${total}건`],
     ["report", job.report ? "남김" : "안 남김"],
   ];
   return (

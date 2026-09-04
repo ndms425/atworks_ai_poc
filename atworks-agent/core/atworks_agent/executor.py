@@ -143,6 +143,12 @@ class AtworksToolExecutor(BaseToolExecutor):
                 return ToolOutcome.error(f"{error.field} must be an integer; adjust and call again.")
             if error.kind == "status":
                 return ToolOutcome.error(f"{error.field} must be one of pass, fail, error, non_pass; adjust and call again.")
+            if error.kind == "object":
+                if error.field == "test_data.values":
+                    return ToolOutcome.error(
+                        "test_data.values must be an object of parameter → value strings; adjust and call again."
+                    )
+                return ToolOutcome.error(f"{error.field} must be an object; adjust and call again.")
             return ToolOutcome.error(
                 f"{error.field} must be an ISO 8601 datetime with offset, e.g. "
                 "2026-08-27T00:00:00+09:00; adjust and call again."
@@ -273,17 +279,23 @@ class AtworksToolExecutor(BaseToolExecutor):
         # "[removed]" marker, whose brackets TestDataSet.label's pattern rejects — an
         # over-long or hostile label surfaces as a named invalid-arguments error rather than
         # being quietly mangled into something the operator then approves.
-        test_data = [
-            {
+        test_data: list[dict[str, Any]] = []
+        for item in (_coerce_list(tool_input.get("test_data")) or []):
+            if not isinstance(item, dict):
+                continue
+            values = item.get("values")
+            if values is not None and not isinstance(values, dict):
+                raise InvalidToolArgument("test_data.values", kind="object")
+            test_data.append({
                 "label": self._sanitize(item.get("label"), 40),
                 "values": {
                     self._sanitize(key, 60): self._sanitize(value, 200)
-                    for key, value in (item.get("values") or {}).items()
+                    for key, value in (values or {}).items()
                 },
-            }
-            for item in (_coerce_list(tool_input.get("test_data")) or [])
-            if isinstance(item, dict)
-        ]
+            })
+        confidence_input = tool_input.get("confidence")
+        if confidence_input is not None and not isinstance(confidence_input, dict):
+            raise InvalidToolArgument("confidence", kind="object")
         draft = parse_argument(JobDraft, {
             "kind": tool_input.get("kind"), "summary": self._sanitize(tool_input.get("summary"), 200),
             "api_ids": api_ids,
@@ -293,7 +305,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "select_where": select_where,
             "binding": tool_input.get("binding") or "FROZEN", "report": tool_input.get("report", True),
             "confidence": {
-                k: float(v) for k, v in (tool_input.get("confidence") or {}).items()
+                k: float(v) for k, v in (confidence_input or {}).items()
                 if k in CONFIDENCE_KEYS and isinstance(v, (int, float))
             },
             "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],

@@ -28,9 +28,11 @@ function JobRow({ job, onAct }: { job: JobSpec; onAct: (id: string, action: Chan
         <div className="min-w-0 flex-1">
           <div className="text-[13.5px] font-medium leading-snug text-(--ink)">{change.summary}</div>
           <div className="mt-0.5 text-[12px] tabular-nums text-(--ink-soft)">
-            {change.kind} · {change.target_envs.join(", ")} ·{" "}
-            {change.binding === "LATE" ? "최대 " : ""}
-            {change.executions}/{change.total_executions}회 · {formatDate(change.created_at)}
+            {/* 실행 횟수(executions/total_executions)는 두 binding 모두 정확한 값이라 "최대"를
+                붙이지 않는다 — 불확실한 쪽은 실행당 건수이고, LATE는 그 상한을 배포 설정이 정한다.
+                job_record만으로는 그 숫자(config.max_matrix_size)를 알 수 없으니 문구로만 알린다. */}
+            {change.kind} · {change.target_envs.join(", ")} · {change.executions}/{change.total_executions}회
+            {change.binding === "LATE" ? " · 최대 (배포 상한)" : ""} · {formatDate(change.created_at)}
           </div>
         </div>
         <ChangeStatusPill status={change.status} />

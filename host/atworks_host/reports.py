@@ -82,9 +82,14 @@ class Reports:
             "provenance": {"generator": generator, "generated_at": datetime.now(UTC).isoformat()},
         }
         (folder / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        # </script> inside a job summary or a failed rule must not close the data script
-        # block early; escaping the slash keeps the JSON valid while breaking that tag.
-        embedded = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+        # A model-authored summary or test-data value can carry `<!--<script` — inside the
+        # data script tag that sequence walks the HTML tokenizer into script-data-double-escape,
+        # where a lone `</script>` does not close the block, and everything to EOF is
+        # swallowed (confirmed against the tokenizer spec; JSON.parse then never runs and the
+        # report renders as an empty skeleton). Escaping every `<` to its JSON unicode escape
+        # removes the character from the markup entirely — `</script>` handling comes free —
+        # while leaving the JSON valid; JSON.parse decodes `<` back to `<` in the template.
+        embedded = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
         html = TEMPLATE.read_text(encoding="utf-8").replace("__REPORT_DATA__", embedded)
         (folder / "index.html").write_text(html, encoding="utf-8")
         return folder / "index.html"

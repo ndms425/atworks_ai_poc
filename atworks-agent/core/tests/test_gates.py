@@ -33,6 +33,15 @@ def test_seen_api_passes():
     assert check_api_provenance(state, ["api-1"]) is None
 
 
+def test_provenance_message_stays_bounded_for_an_oversized_api_id_list():
+    state = AtworksSessionState()
+    unknown = [f"api-{i}" for i in range(200)]
+    held = check_api_provenance(state, unknown)
+    assert held is not None and held.blocked == PROVENANCE_GATE
+    assert len(held.result_text) < 400
+    assert "… and 195 more" in held.result_text
+
+
 def test_apply_requires_seen_then_approval():
     state = AtworksSessionState()
     assert check_apply_job(state, CFG, "job-0001").blocked == PROVENANCE_GATE

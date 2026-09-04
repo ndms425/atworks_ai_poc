@@ -112,6 +112,11 @@ export interface JobMatrix {
   executions: number;
   runs_per_execution: number;
   runs_total: number;
+  /** The real per-execution/total ceiling: config.max_matrix_size for LATE (re-evaluated at
+   *  every execution, so the staged runs_per_execution is only a lower bound), else equal to
+   *  runs_per_execution/runs_total. Always read this for LATE — never job.matrix_size. */
+  max_runs_per_execution: number;
+  max_runs_total: number;
 }
 
 export interface JobPreviewPayload {

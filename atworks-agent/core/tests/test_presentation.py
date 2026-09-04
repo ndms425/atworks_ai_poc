@@ -149,4 +149,36 @@ async def test_job_preview_carries_the_matrix_block():
     assert outcome.events[0].data["payload"]["matrix"] == {
         "apis": 2, "envs": ["dev", "stg"], "data_sets": ["S1 정상"],
         "executions": 3, "runs_per_execution": 4, "runs_total": 12,
+        "max_runs_per_execution": 4, "max_runs_total": 12,
     }
+
+
+async def test_job_preview_matrix_ceiling_for_late_binding_is_the_deployment_cap():
+    from atworks_agent.types import Binding, JobSchedule
+
+    config = AtworksAgentConfig(model="m", max_matrix_size=400)
+    state = AtworksSessionState()
+    state.remember_job(JobSpec(
+        job_id="job-0003", kind=JobKind.SCHEDULED_RUN, summary="s", api_ids=["api-1", "api-2"],
+        target_envs=["dev", "stg"], binding=Binding.LATE, select_where={"query": "x"},
+        schedules=[JobSchedule(kind="daily", at="09:00", from_date="2026-09-05", count=3)],
+        created_at=datetime.now(UTC), created_by="op"))
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_job_preview"], {"job_id": "job-0003"},
+        EnrichmentContext(backend=None, config=config, session=SESSION, state=state), "Shown.",
+    )
+    matrix = outcome.events[0].data["payload"]["matrix"]
+    assert matrix["max_runs_per_execution"] == 400
+    assert matrix["max_runs_total"] == 400 * 3
+
+
+async def test_job_preview_matrix_ceiling_for_frozen_binding_equals_the_staged_figures():
+    state = AtworksSessionState()
+    state.remember_job(JobSpec(
+        job_id="job-0004", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"], target_envs=["dev"],
+        created_at=datetime.now(UTC), created_by="op"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_job_preview"],
+                                     {"job_id": "job-0004"}, _ctx(state), "Shown.")
+    matrix = outcome.events[0].data["payload"]["matrix"]
+    assert matrix["max_runs_per_execution"] == matrix["runs_per_execution"]
+    assert matrix["max_runs_total"] == matrix["runs_total"]
