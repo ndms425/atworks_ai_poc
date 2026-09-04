@@ -118,6 +118,18 @@ async def test_job_preview_joins_staged_record():
     assert payload["low_confidence"] == ["target_envs"]
 
 
+async def test_job_preview_job_record_carries_change_id_for_the_card_buttons():
+    # The card hands payload.job to web-shared's useChangeActions, which posts to
+    # /changes/{change.change_id}/apply — without the alias the click went to /changes/undefined/apply.
+    state = AtworksSessionState()
+    state.remember_job(JobSpec(job_id="job-0001", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"], target_envs=["dev"],
+                               created_at=datetime.now(UTC), created_by="op"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_job_preview"], {"job_id": "job-0001"}, _ctx(state), "Shown.")
+    job = outcome.events[0].data["payload"]["job"]
+    assert job["change_id"] == "job-0001"
+    assert job["runs_total"] == 1 and job["total_executions"] == 1   # same record shape as GET /jobs
+
+
 async def test_job_preview_refuses_unknown_job():
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_job_preview"], {"job_id": "nope"}, _ctx(AtworksSessionState()), "Shown.")
     assert outcome.blocked == "provenance"

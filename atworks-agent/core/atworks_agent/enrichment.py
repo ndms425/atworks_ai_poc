@@ -18,6 +18,7 @@ from commerce_common.presentation import (
 
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
+from .serialization import job_record
 from .tools.presentation import (
     DIGEST_TOOL,
     PREVIEW_TOOL,
@@ -115,7 +116,10 @@ async def enrich_job_preview(payload: PresentJobPreviewPayload, context: Enrichm
             gate=PROVENANCE_GATE,
         )
     enriched = payload.model_dump(exclude_none=True)
-    enriched["job"] = _record(job)
+    # job_record, not a bare model_dump: the card hands this object to web-shared's
+    # useChangeActions, which posts to /changes/{change_id}/apply, and it needs the derived
+    # matrix figures — the same shape GET /jobs serves.
+    enriched["job"] = job_record(job)
     enriched["change_id"] = job.job_id   # web-shared useMerchantChat이 이 키로 카드를 찾는다
     enriched["low_confidence"] = sorted(k for k, v in job.confidence.items() if v < LOW_CONFIDENCE)
     enriched["apis"] = [_record(a) for a in (context.state.seen_apis.get(i) for i in job.api_ids) if a is not None]
