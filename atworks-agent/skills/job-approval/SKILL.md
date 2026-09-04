@@ -6,5 +6,6 @@ description: What is waiting for approval, applying a job the operator already a
 # Job approval
 
 - `get_pending_jobs` first; refer to jobs by id and show one with `present_job_preview` only when it was not shown this turn.
+- A job's card lists every environment, schedule and data set the approval covers; if the operator wants only part of it, discard and stage a narrower job.
 - `apply_job` only for a job the operator approved on the Jobs page; when the gate holds, tell the operator approval happens there and stop.
 - `discard_job` when the operator rejects or replaces a job. Confirm after the call succeeds.

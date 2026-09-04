@@ -36,3 +36,11 @@ def test_dynamic_context_carries_attachments_and_clock():
 
 def test_dynamic_context_without_attachments_has_no_block():
     assert "<attached-result-items>" not in build_dynamic_context(atworks_context=None, attached_items=[], now=None)
+
+
+def test_static_prompt_states_the_matrix_contract():
+    text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
+    assert "several target environments, several schedules and several test-data sets" in text
+    assert "approval covers the whole matrix" in text
+    assert "never facts about the system" in text
+    assert "Never default target_envs to anything but [dev]" in text

@@ -4,6 +4,7 @@ from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.gates import (
     APPROVAL_GATE,
     PROVENANCE_GATE,
+    STAGING_FOLLOWTHROUGH_REMINDER,
     check_api_provenance,
     check_apply_job,
     check_discard_job,
@@ -56,3 +57,9 @@ def test_discard_and_followthrough_helpers():
     assert check_discard_job(state, "job-x").blocked == PROVENANCE_GATE
     assert turn_attempted_staging(["search_apis", "mcp__atworks__stage_job"])
     assert not turn_attempted_staging(["search_apis"])
+
+
+def test_staging_followthrough_reminder_names_the_list_valued_slots():
+    assert "target_envs" in STAGING_FOLLOWTHROUGH_REMINDER
+    assert "target_env," not in STAGING_FOLLOWTHROUGH_REMINDER
+    assert "target_env " not in STAGING_FOLLOWTHROUGH_REMINDER

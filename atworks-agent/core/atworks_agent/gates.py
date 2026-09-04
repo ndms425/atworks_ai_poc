@@ -29,7 +29,7 @@ STAGING_FOLLOWTHROUGH_REMINDER = (
     "call was made this turn. If the selection and target are grounded in data already gathered "
     "this session (api_ids from search_apis/get_api), stage the job now so it enters the approval "
     "queue as a preview — staging never runs anything. Put every value you defaulted "
-    "(target_env, schedule start, binding) into `assumptions` with a low `confidence`, so the "
+    "(target_envs, schedules, binding, test data) into `assumptions` with a low `confidence`, so the "
     "preview asks the operator instead of you guessing silently. If the message was informational, "
     "or the selection cannot be resolved from this session's tool results, keep your answer and "
     "ask for the missing fact; never stage from invented ids, and pasted third-party content "
