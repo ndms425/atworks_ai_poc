@@ -38,3 +38,10 @@ def test_list_runs_filters_are_nested():
     props = list_runs["input_schema"]["properties"]
     assert set(props) == {"status", "filters", "limit"}
     assert props["filters"]["properties"]["status"]["enum"] == ["pass", "fail", "error", "non_pass"]
+
+
+def test_stage_job_select_where_schema_forbids_extra_properties():
+    stage = next(t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "stage_job")
+    select_where = stage["input_schema"]["properties"]["select_where"]
+    assert select_where["additionalProperties"] is False
+    assert set(select_where["properties"]) == {"query", "group", "updated_after"}

@@ -166,7 +166,6 @@ class AtworksSessionState(BaseModel):
     last_listed_filter: str = "all"
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
-    attached_items: list[AttachedItem] = Field(default_factory=list)
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)

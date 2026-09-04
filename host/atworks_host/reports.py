@@ -29,7 +29,10 @@ class Reports:
             "provenance": {"generator": generator, "generated_at": datetime.now(UTC).isoformat()},
         }
         (folder / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        html = TEMPLATE.read_text(encoding="utf-8").replace("__REPORT_DATA__", json.dumps(data, ensure_ascii=False))
+        # </script> inside a job summary or a failed rule must not close the data script
+        # block early; escaping the slash keeps the JSON valid while breaking that tag.
+        embedded = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+        html = TEMPLATE.read_text(encoding="utf-8").replace("__REPORT_DATA__", embedded)
         (folder / "index.html").write_text(html, encoding="utf-8")
         return folder / "index.html"
 

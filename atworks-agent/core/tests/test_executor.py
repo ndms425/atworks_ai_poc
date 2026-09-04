@@ -161,3 +161,37 @@ async def test_stage_job_dedupes_api_ids(backend, config, skills, session, state
     assert not out.refused
     job_id = next(iter(state.seen_jobs))
     assert state.seen_jobs[job_id].api_ids == ["api-1"]
+
+
+async def test_stage_job_rejects_select_where_with_unknown_field(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "dev",
+                                          "binding": "LATE", "select_where": {"query": "x", "evil": 1}})
+    assert out.is_error
+    assert "unavailable" not in out.result_text
+
+
+async def test_get_run_on_fresh_state_seeds_attached_population(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("get_run", {"run_id": "run-1"})
+    assert not out.refused
+    assert state.last_population == 1
+    assert state.last_listed_run_ids == ["run-1"]
+    assert state.last_listed_filter == "attached"
+
+    digest = await ex.execute("present_run_digest", {"items": [{"kind": "fail", "ref_id": "run-1", "headline": "h"}]})
+    assert not digest.refused
+    payload = digest.events[0].data["payload"]
+    assert payload["population"] == 1
+    assert payload["population_filter"] == "attached"
+
+
+async def test_stage_job_accepts_select_where_group_only(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "dev",
+                                          "binding": "LATE", "select_where": {"group": "contract"}})
+    assert not out.refused
+    job_id = next(iter(state.seen_jobs))
+    assert state.seen_jobs[job_id].select_where == {"query": "", "group": "contract"}

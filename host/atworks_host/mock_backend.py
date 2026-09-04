@@ -86,6 +86,8 @@ class MockAtworks(AtworksBackend):
         job = self.ledger.get(job_id)
         if job is None:
             return []
+        if (job.runs_remaining or 0) <= 0:
+            return []
         api_ids = job.api_ids
         if job.binding is Binding.LATE and job.select_where:
             w = job.select_where
@@ -99,6 +101,9 @@ class MockAtworks(AtworksBackend):
                     f"execution skipped: LATE selection resolved to {len(api_ids)} APIs, "
                     f"above the limit of {self._config.max_apis_per_job}",
                 )
+                # the slot is spent even though nothing ran, so a scheduled job does not
+                # retry the same over-limit selection forever
+                self.ledger.record_execution(job_id, [])
                 return []
         produced: list[RunResult] = []
         for api_id in api_ids:

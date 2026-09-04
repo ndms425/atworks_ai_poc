@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from commerce_common.fencing import truncate_display
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import AtworksAgentConfig
 from .types import ActorKind, Binding, JobKind, JobSchedule, JobSpec, JobStatus
@@ -20,6 +20,15 @@ class GuardrailViolation(ValueError):
 
 class JobNotApplicable(ValueError):
     """id를 모르거나 상태 전이가 불가능. 백엔드가 지원하지 않는 작업에도 이 예외를 던진다."""
+
+
+class SelectWhere(BaseModel):
+    """LATE binding의 재평가 질의. stage_job이 원한 값만 받는다 — search_apis 인자를 그대로
+    받아들이면 모델이 임의 필드를 실어 보낼 수 있다."""
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(default="", max_length=120)
+    group: str | None = Field(default=None, max_length=60)
+    updated_after: datetime | None = None
 
 
 class JobDraft(BaseModel):

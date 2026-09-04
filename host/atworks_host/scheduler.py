@@ -2,6 +2,8 @@
 두 번 돌지 않는다(회차 = 지금까지 실행된 횟수)."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -9,6 +11,8 @@ from atworks_agent import AtworksSessionContext, JobKind, JobSpec, JobStatus
 
 from .mock_backend import MockAtworks
 from .reports import Reports
+
+logger = logging.getLogger(__name__)
 
 
 def due_at(job: JobSpec, index: int) -> datetime | None:
@@ -28,26 +32,36 @@ class Scheduler:
         self.backend = backend
         self.reports = reports
         self.session = session or AtworksSessionContext(session_id="scheduler", project_id="default", operator="scheduler")
+        self._lock = asyncio.Lock()
 
     async def tick(self, now: datetime) -> list[str]:
-        executed: list[str] = []
-        for job in list(self.backend.ledger.applied()):
-            if job.status is not JobStatus.APPLIED or (job.runs_remaining or 0) <= 0:
-                continue
-            index = (job.schedule.count if job.schedule else 1) - (job.runs_remaining or 0)
-            if job.kind is JobKind.RUN_NOW:
-                due = index == 0
-            else:
-                when = due_at(job, index)
-                due = when is not None and when <= now
-            if not due:
-                continue
-            produced = await self.backend.execute_job_once(self.session, job.job_id)
-            if not produced:
-                continue
-            if job.report:
-                all_ids = self.backend.ledger.get(job.job_id).run_ids
-                every = [self.backend.runs[i] for i in all_ids if i in self.backend.runs]
-                self.reports.write(self.backend.ledger.get(job.job_id), every)
-            executed.append(job.job_id)
-        return executed
+        async with self._lock:
+            executed: list[str] = []
+            for job in list(self.backend.ledger.applied()):
+                if job.status is not JobStatus.APPLIED or (job.runs_remaining or 0) <= 0:
+                    continue
+                index = (job.schedule.count if job.schedule else 1) - (job.runs_remaining or 0)
+                if job.kind is JobKind.RUN_NOW:
+                    due = index == 0
+                else:
+                    when = due_at(job, index)
+                    due = when is not None and when <= now
+                if not due:
+                    continue
+                try:
+                    produced = await self.backend.execute_job_once(self.session, job.job_id)
+                    if not produced:
+                        continue
+                    if job.report:
+                        all_ids = self.backend.ledger.get(job.job_id).run_ids
+                        every = [self.backend.runs[i] for i in all_ids if i in self.backend.runs]
+                        self.reports.write(self.backend.ledger.get(job.job_id), every)
+                    executed.append(job.job_id)
+                except Exception as error:
+                    # One job's failure must not stop the rest of the tick, and must not
+                    # leave the job spinning on the same due slot forever.
+                    logger.exception("job %s failed during scheduled execution", job.job_id)
+                    self.backend.ledger.add_guardrail_note(job.job_id, f"execution failed: {type(error).__name__}")
+                    self.backend.ledger.record_execution(job.job_id, [])
+                    continue
+            return executed

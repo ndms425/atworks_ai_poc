@@ -116,7 +116,12 @@ def build_tools(
                     "count": {"type": "integer", "minimum": 1, "maximum": 30}},
                     "required": ["kind", "at", "from_date", "count"], "additionalProperties": False},
                 "binding": {"type": "string", "enum": ["FROZEN", "LATE"], "description": "FROZEN: today's resolved api_ids every run. LATE: re-evaluate select_where each run. Ambiguous from speech — ask via present_question_form or set confidence 0.4."},
-                "select_where": {"type": "object", "description": "The search that produced api_ids (query/group/updated_after), kept for LATE binding and for the preview's provenance.", "additionalProperties": True},
+                "select_where": {"type": "object", "properties": {
+                    "query": {"type": "string", "maxLength": 120},
+                    "group": {"type": "string", "maxLength": 60},
+                    "updated_after": {"type": "string", "description": _ISO_DATETIME}},
+                    "additionalProperties": False,
+                    "description": "The search that produced api_ids (query/group/updated_after), kept for LATE binding and for the preview's provenance."},
                 "report": {"type": "boolean"},
                 "confidence": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "Per-slot confidence: target_env, schedule.from_date, binding, api_ids."},
                 "assumptions": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 160}}},

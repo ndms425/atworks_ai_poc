@@ -30,7 +30,7 @@ from .gates import (
     guardrail_block_message,
     take_discard_actor_kind,
 )
-from .jobs import GuardrailViolation, JobDraft, JobNotApplicable, check_job_guardrails
+from .jobs import GuardrailViolation, JobDraft, JobNotApplicable, SelectWhere, check_job_guardrails
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .scoring import UnknownScorer, rank_runs
 from .serialization import api_record, job_record, rank_record, run_record
@@ -179,6 +179,22 @@ class AtworksToolExecutor(BaseToolExecutor):
         if run is None:
             return ToolOutcome.error("No run with that id.")
         self._state.remember_run(run)
+        # A run fetched directly (an attached item, a follow-up on one id) has no
+        # list_runs population behind it yet; seed one so present_run_digest can still
+        # say "N of M" instead of refusing. A population already drawn from a real
+        # filter (last_listed_filter != "attached") is left alone except to grow by one
+        # when this run was not already in that window.
+        window = self._state.last_listed_run_ids
+        appended = run.run_id not in window
+        if appended:
+            window.append(run.run_id)
+        if self._state.last_population is None:
+            self._state.last_population = len(window)
+            self._state.last_listed_filter = "attached"
+        elif self._state.last_listed_filter == "attached":
+            self._state.last_population = len(window)
+        elif appended:
+            self._state.last_population += 1
         return self._fenced(run_record(run))
 
     async def _rank_failed_runs(self, tool_input: dict[str, Any]) -> ToolOutcome:
@@ -212,10 +228,13 @@ class AtworksToolExecutor(BaseToolExecutor):
         api_ids = list(dict.fromkeys(str(a) for a in (_coerce_list(tool_input.get("api_ids")) or [])))
         if held := check_api_provenance(self._state, api_ids):
             return held
+        select_where = tool_input.get("select_where")
+        if select_where is not None:
+            select_where = parse_argument(SelectWhere, select_where).model_dump(mode="json", exclude_none=True)
         draft = parse_argument(JobDraft, {
             "kind": tool_input.get("kind"), "summary": self._sanitize(tool_input.get("summary"), 200),
             "api_ids": api_ids, "target_env": str(tool_input.get("target_env", "")),
-            "schedule": tool_input.get("schedule"), "select_where": tool_input.get("select_where"),
+            "schedule": tool_input.get("schedule"), "select_where": select_where,
             "binding": tool_input.get("binding") or "FROZEN", "report": tool_input.get("report", True),
             "confidence": tool_input.get("confidence") or {},
             "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],

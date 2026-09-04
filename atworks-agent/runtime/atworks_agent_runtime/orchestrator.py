@@ -36,7 +36,6 @@ from commerce_common.presentation import (
 from commerce_common.prompt_assembly import (
     build_request_messages,
     build_system_blocks,
-    with_eager_input,
     with_tool_cache_control,
 )
 from commerce_common.skills import SkillRegistry
@@ -119,7 +118,7 @@ class AtworksAgent:
         # input as it is generated.
         self._static_system = build_static_system(self.config, self.skills)
         tools = build_tools(self.config, self.skills.names, self.extra_presentation_tools)
-        self._tools = with_tool_cache_control(with_eager_input(tools, self._partial_ui_tools))
+        self._tools = with_tool_cache_control(tools)
 
     async def stream_turn(
         self,

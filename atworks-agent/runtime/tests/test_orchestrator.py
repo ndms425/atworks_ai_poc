@@ -1,4 +1,5 @@
 """스크립트된 모델 클라이언트로 턴 루프를 돈다. commerce_common.testing.FakeClient 사용."""
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -75,6 +76,12 @@ async def test_job_request_without_staging_is_reminded_once(make_agent, session,
     reminders = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), list)
                  and m["content"][0].get("text") == STAGING_FOLLOWTHROUGH_REMINDER]
     assert len(reminders) == 1 and len(agent.client.calls) == 2
+
+
+async def test_tools_do_not_carry_eager_input_streaming(make_agent, session, state):
+    agent = make_agent([text_message("ok")])
+    await run_turn(agent, "안녕", session, state)
+    assert all("eager_input_streaming" not in json.dumps(t) for t in agent.client.calls[0]["tools"])
 
 
 async def test_attached_items_reach_the_system_prompt(make_agent, session, state):

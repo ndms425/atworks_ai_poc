@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from atworks_agent import (
@@ -9,9 +9,11 @@ from atworks_agent import (
     JobDraft,
     JobKind,
     JobSchedule,
+    RunResult,
+    RunStatus,
 )
 from atworks_host.mock_backend import MockAtworks
-from atworks_host.reports import Reports
+from atworks_host.reports import TEMPLATE, Reports
 from atworks_host.scheduler import Scheduler
 
 KST = timezone(timedelta(hours=9))
@@ -48,3 +50,59 @@ async def test_run_now_is_due_immediately(tmp_path):
     await backend.apply_job(SESSION, job.job_id)
     assert await sched.tick(datetime(2026, 9, 3, 14, tzinfo=KST)) == [job.job_id]
     assert await sched.tick(datetime(2026, 9, 3, 15, tzinfo=KST)) == []
+
+
+async def test_report_html_escapes_json_and_uses_client_side_escaping(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    job = await backend.stage_job(
+        SESSION,
+        JobDraft(kind=JobKind.RUN_NOW, summary="</script><img src=x onerror=alert(1)>",
+                 api_ids=["api-001"], target_env="dev"),
+        ActorKind.AGENT,
+    )
+    await backend.apply_job(SESSION, job.job_id)
+    run = RunResult(run_id="run-9001", api_id="api-001", executed_at=datetime.now(UTC), target_env="dev",
+                    status=RunStatus.FAIL, failed_rules=["<b>x</b>"], http_status=200, job_id=job.job_id)
+    backend.runs[run.run_id] = run
+    applied = backend.ledger.record_execution(job.job_id, [run.run_id])
+
+    path = reports.write(applied, [run])
+    html = path.read_text(encoding="utf-8")
+
+    assert "<\\/script>" in html
+    assert "</script><img" not in html
+    assert html.count("</script>") == 2
+
+    template_source = TEMPLATE.read_text(encoding="utf-8")
+    assert "esc(" in template_source
+
+
+async def test_tick_survives_one_jobs_execution_error(tmp_path):
+    class FlakyBackend(MockAtworks):
+        bad_job_id: str | None = None
+
+        async def execute_job_once(self, session, job_id):
+            if job_id == self.bad_job_id:
+                raise RuntimeError("boom")
+            return await super().execute_job_once(session, job_id)
+
+    backend = FlakyBackend(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    sched = Scheduler(backend, reports, SESSION)
+    bad = await backend.stage_job(
+        SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="bad", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+    )
+    good = await backend.stage_job(
+        SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="good", api_ids=["api-002"], target_env="dev"), ActorKind.AGENT
+    )
+    backend.bad_job_id = bad.job_id
+    await backend.apply_job(SESSION, bad.job_id)
+    await backend.apply_job(SESSION, good.job_id)
+
+    executed = await sched.tick(datetime(2026, 9, 3, 14, tzinfo=KST))
+
+    assert executed == [good.job_id]
+    bad_job = backend.ledger.get(bad.job_id)
+    assert bad_job.runs_remaining == 0
+    assert len(bad_job.guardrail_notes) == 1 and "execution failed" in bad_job.guardrail_notes[0]

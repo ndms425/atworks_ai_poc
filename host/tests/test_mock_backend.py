@@ -52,4 +52,12 @@ async def test_late_binding_over_limit_skips_execution_and_notes_guardrail():
     updated = b.ledger.get(job.job_id)
     assert len(updated.guardrail_notes) == 1
     assert "LATE" in updated.guardrail_notes[0]
-    assert updated.runs_remaining == before
+    # the slot is consumed even though nothing ran, so the schedule does not spin forever
+    assert updated.runs_remaining == before - 1
+
+    # no slots remain: execute_job_once must not add a second note or consume another slot
+    again = await b.execute_job_once(SESSION, job.job_id)
+    assert again == []
+    final = b.ledger.get(job.job_id)
+    assert len(final.guardrail_notes) == 1
+    assert final.runs_remaining == 0

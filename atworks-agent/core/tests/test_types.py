@@ -26,6 +26,13 @@ def test_state_remembers_api_for_provenance():
     assert "api-001" in state.seen_apis
 
 
+def test_state_has_no_dead_attached_items_field():
+    # attached_items is per-turn context (ChatRequest.attached_items in the host, and the
+    # stream_turn parameter) — nothing reads it off the persisted session state, so it
+    # should not be one of its fields.
+    assert "attached_items" not in AtworksSessionState.model_fields
+
+
 def test_jobspec_defaults_are_staged_and_frozen():
     job = JobSpec(job_id="job-0001", kind=JobKind.SCHEDULED_RUN, summary="s",
                   api_ids=["api-001"], target_env="dev", created_at=datetime.now(UTC),

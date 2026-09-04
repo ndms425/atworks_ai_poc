@@ -31,6 +31,19 @@ PROJECT_ID = "mes-demo"
 OPERATOR = "minseong"
 
 
+def _aware(value: str | None) -> datetime | None:
+    """Parse a query-string timestamp to a timezone-aware datetime, or raise a 400 —
+    the fixtures' run timestamps carry an offset, and comparing them against a naive
+    datetime raises TypeError instead of answering the request."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=f"{value!r} must be ISO 8601, e.g. 2026-09-01T00:00:00+09:00.") from error
+    return parsed.astimezone() if parsed.tzinfo is None else parsed
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     attached_items: list[AttachedItem] = Field(default_factory=list, max_length=8)
@@ -45,7 +58,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     Record = SessionRecord[AtworksSessionState]
 
     def context(record: Record) -> AtworksSessionContext:
-        return AtworksSessionContext(session_id=record.session_id, project_id=PROJECT_ID, operator=OPERATOR, now=datetime.now())
+        return AtworksSessionContext(session_id=record.session_id, project_id=PROJECT_ID, operator=OPERATOR, now=datetime.now().astimezone())
 
     @router.post("/session")
     async def start_session() -> dict:
@@ -65,7 +78,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.get("/runs")
     async def runs(record: CurrentSession, status: str | None = None, since: str | None = None, limit: int = Query(50, le=500)) -> dict:
         s = context(record)
-        since_dt = datetime.fromisoformat(since) if since else None
+        since_dt = _aware(since)
         rows = await backend.list_runs(s, since=since_dt, status=status, limit=limit)
         return {"population": await backend.count_runs(s, since_dt, status), "runs": [run_record(r) for r in rows]}
 
@@ -76,6 +89,12 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     async def job_action(job_id: str, action: str, record: Record) -> dict:
         # 카드의 버튼 클릭 = 호스트 자신의 승인. 마크는 클릭 한 번에 소비되고 남지 않는다.
+        # provenance는 모델을 지키는 게이트지 버튼을 지키는 게 아니다: 이 세션이 아직 모르는
+        # job이라도, 호스트가 그 job을 실제로 소유(ledger)하고 있으면 클릭 전에 기억시킨다.
+        if job_id not in record.state.seen_jobs:
+            known = backend.ledger.get(job_id)
+            if known is not None:
+                record.state.remember_job(known)
         if action == "apply_job":
             record.state.approved_job_ids.add(job_id)
         else:
@@ -104,7 +123,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.post("/scheduler/tick")
     async def tick(now: str | None = None) -> dict:
-        at = datetime.fromisoformat(now) if now else datetime.now().astimezone()
+        at = _aware(now) or datetime.now().astimezone()
         return {"executed": await scheduler.tick(at)}
 
     @router.get("/reports/{job_id}", response_class=HTMLResponse)
