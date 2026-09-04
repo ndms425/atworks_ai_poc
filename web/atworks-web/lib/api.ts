@@ -11,4 +11,5 @@ export const UNREACHABLE = `The aTworks AI host at ${API_URL} is not reachable. 
 export const fetchApis = (query = "") => api.get<{ apis: ApiSpec[] }>(`/apis?query=${encodeURIComponent(query)}`);
 export const fetchRuns = (status?: string) => api.get<{ population: number; runs: RunResult[] }>(`/runs${status ? `?status=${status}` : ""}`);
 export const fetchJobs = () => api.get<{ jobs: JobSpec[] }>("/jobs");
+export const fetchInsights = () => api.get<{ flaky: number; regression_suspect: number; window_days: number }>("/runs/insights");
 export const reportUrl = (jobId: string) => `${API_URL}/api/atworks/reports/${encodeURIComponent(jobId)}`;

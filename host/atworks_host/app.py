@@ -6,7 +6,7 @@ annotations``) — FastAPI resolves string annotations against a function's glob
 names are local to ``create_app``."""
 
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -17,6 +17,7 @@ from atworks_agent import (
     AtworksSessionContext,
     AtworksSessionState,
 )
+from atworks_agent.aggregation import summarize_insights
 from atworks_agent.serialization import api_record, job_record, run_record
 from atworks_agent_runtime import AtworksAgent
 
@@ -78,6 +79,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     async def apis(record: CurrentSession, query: str = "", group: str | None = None) -> dict:
         rows = await backend.search_apis(context(record), query=query, group=group, limit=500)
         return {"apis": [api_record(a) for a in rows]}
+
+    @router.get("/runs/insights")
+    async def insights(record: CurrentSession) -> dict:
+        s = context(record)
+        cfg = agent.config
+        since = datetime.now(UTC) - timedelta(days=cfg.max_aggregate_window_days)
+        rows = await backend.list_runs(s, since=since, status=None, limit=cfg.max_aggregate_runs)
+        apis = {a.api_id: a for a in await backend.search_apis(s, query="", limit=1000)}
+        found = summarize_insights(rows, apis, cfg)
+        return {"flaky": found.flaky, "regression_suspect": found.regression_suspect, "window_days": cfg.max_aggregate_window_days}
 
     @router.get("/runs")
     async def runs(record: CurrentSession, status: str | None = None, since: str | None = None, limit: int = Query(50, le=500)) -> dict:

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,29 @@ async def client_backend(tmp_path):
     app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         yield c, backend
+
+
+def _redate_fixture_runs(backend):
+    now = datetime.now(UTC)
+    for run in backend.runs.values():
+        delta = datetime(2026, 9, 4, tzinfo=UTC) - run.executed_at
+        backend.runs[run.run_id] = run.model_copy(update={"executed_at": now - delta})
+    for api in backend.apis.values():
+        delta = datetime(2026, 9, 4, tzinfo=UTC) - api.updated_at
+        backend.apis[api.api_id] = api.model_copy(update={"updated_at": now - delta})
+
+
+async def test_runs_insights_counts_flaky_and_regression_from_fixtures(client):
+    _redate_fixture_runs(client.backend)
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.get("/api/atworks/runs/insights", headers={"X-Session-Id": sid})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["flaky"] == 1 and body["regression_suspect"] == 1 and body["window_days"] == 30
+
+
+async def test_runs_insights_needs_a_session(client):
+    assert (await client.get("/api/atworks/runs/insights")).status_code in (401, 422)
 
 
 async def test_session_and_reads(client):

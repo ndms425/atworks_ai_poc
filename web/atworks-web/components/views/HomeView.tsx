@@ -4,21 +4,23 @@
 "use client";
 
 import { Button, Notice, PageHeader, Panel, plural, Skeleton, StatStrip, StatTile, useResource } from "web-shared";
-import { fetchJobs, fetchRuns } from "@/lib/api";
+import { fetchInsights, fetchJobs, fetchRuns } from "@/lib/api";
 
 interface HomeCounts {
   fail: number;
   error: number;
   pending: number;
+  flaky: number;
 }
 
 async function loadCounts(): Promise<HomeCounts | null> {
-  const [failRes, errorRes, jobsRes] = await Promise.all([fetchRuns("fail"), fetchRuns("error"), fetchJobs()]);
+  const [failRes, errorRes, jobsRes, insightsRes] = await Promise.all([fetchRuns("fail"), fetchRuns("error"), fetchJobs(), fetchInsights()]);
   if (!failRes || !errorRes || !jobsRes) return null;
   return {
     fail: failRes.population,
     error: errorRes.population,
     pending: jobsRes.jobs.filter((job) => job.status === "staged").length,
+    flaky: insightsRes?.flaky ?? 0,
   };
 }
 
@@ -37,7 +39,7 @@ export default function HomeView({ refreshKey, onAskAssistant }: { refreshKey: n
       ) : !data ? (
         <Skeleton className="h-36" />
       ) : (
-        <Panel title="Needs attention" subtitle={plural(data.fail + data.error + data.pending, "item")}>
+        <Panel title="Needs attention" subtitle={plural(data.fail + data.error + data.pending + data.flaky, "item")}>
           <StatStrip>
             <StatTile
               label="실패"
@@ -56,6 +58,12 @@ export default function HomeView({ refreshKey, onAskAssistant }: { refreshKey: n
               value={String(data.pending)}
               onClick={() => onAskAssistant("승인 대기 중인 job 보여줘")}
               ariaLabel="승인 대기: 어시스턴트에게 물어보기"
+            />
+            <StatTile
+              label="불안정"
+              value={String(data.flaky)}
+              onClick={() => onAskAssistant("요즘 왔다갔다 하는 API 뭐야")}
+              ariaLabel="불안정: 어시스턴트에게 물어보기"
             />
           </StatStrip>
         </Panel>
