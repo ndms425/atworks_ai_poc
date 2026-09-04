@@ -60,14 +60,17 @@ def build_tools(
         },
         {
             "name": "list_runs",
-            "description": ("Run results, newest first, filtered by time window, status (pass|fail|error), or api_id. "
-                            "It also records the total count for the window (the digest's population). The status on each "
-                            "run is the deterministic verdict; never restate it as your own judgment. / 실행 이력. "
-                            "status는 결정론 판정이다."),
+            "description": ("Run results, newest first, filtered by `filters` (time window `since`, `status` "
+                            "pass|fail|error|non_pass, or `api_id`). It also records the total count for the window "
+                            "(the digest's population). The status on each run is the deterministic verdict; never "
+                            "restate it as your own judgment. / 실행 이력. status는 결정론 판정이다."),
             "input_schema": {"type": "object", "properties": {
-                "since": {"type": "string", "description": _ISO_DATETIME},
-                "status": {"type": "string", "enum": ["pass", "fail", "error"]},
-                "api_id": {"type": "string", "description": _SESSION_API_ID},
+                "filters": {"type": "object", "properties": {
+                    "since": {"type": "string", "description": _ISO_DATETIME},
+                    "status": {"type": "string", "enum": ["pass", "fail", "error", "non_pass"],
+                               "description": "One verdict, or non_pass for fail and error together (the triage population)."},
+                    "api_id": {"type": "string", "description": _SESSION_API_ID}},
+                    "additionalProperties": False},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
                 "additionalProperties": False},
         },

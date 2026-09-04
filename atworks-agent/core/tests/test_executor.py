@@ -18,8 +18,21 @@ async def test_search_apis_records_provenance(backend, config, skills, session, 
 
 
 async def test_list_runs_records_population_and_runs(backend, config, skills, session, state):
-    out = await _exec(backend, config, skills, session, state).execute("list_runs", {"status": "fail"})
+    out = await _exec(backend, config, skills, session, state).execute("list_runs", {"filters": {"status": "fail"}})
     assert not out.refused and state.last_population == 1 and "run-1" in state.seen_runs
+
+
+async def test_list_runs_non_pass_population(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute("list_runs", {"filters": {"status": "non_pass"}})
+    assert not out.refused and state.last_population == 2
+    assert {"run-1", "run-2"} <= set(state.seen_runs)
+
+
+async def test_list_runs_status_narration_is_stripped_not_filter(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "list_runs", {"status": "looking up runs", "filters": {"status": "fail"}}
+    )
+    assert not out.refused and state.last_population == 1
 
 
 async def test_rank_needs_runs_first_then_ranks(backend, config, skills, session, state):
@@ -30,6 +43,15 @@ async def test_rank_needs_runs_first_then_ranks(backend, config, skills, session
     out = await ex.execute("rank_failed_runs", {"scorer": "risk_v1", "limit": 5})
     ranks = _payload(out)["ranked"]
     assert [r["run_id"] for r in ranks] == ["run-2", "run-1"] and state.seen_ranks
+
+
+async def test_rank_uses_last_listed_window(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("list_runs", {})
+    await ex.execute("list_runs", {"filters": {"status": "error"}})
+    out = await ex.execute("rank_failed_runs", {"scorer": "risk_v1"})
+    ranks = _payload(out)["ranked"]
+    assert [r["run_id"] for r in ranks] == ["run-2"] and state.last_population == 1
 
 
 async def test_stage_job_holds_unknown_api_then_stages_with_preview(backend, config, skills, session, state):

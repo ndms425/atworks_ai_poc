@@ -43,7 +43,9 @@ class InMemoryBackend(AtworksBackend):
         return self.apis.get(api_id)
 
     async def list_runs(self, session, since=None, status=None, api_id=None, limit=50):
-        rows = [r for r in self.runs if (since is None or r.executed_at >= since) and (status is None or r.status.value == status) and (api_id is None or r.api_id == api_id)]
+        rows = [r for r in self.runs if (since is None or r.executed_at >= since)
+                and (status is None or (status == "non_pass" and r.status.value != "pass") or r.status.value == status)
+                and (api_id is None or r.api_id == api_id)]
         return sorted(rows, key=lambda r: r.executed_at, reverse=True)[:limit]
 
     async def get_run(self, session, run_id):

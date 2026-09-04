@@ -42,6 +42,7 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
         )
     items: list[dict[str, Any]] = []
     dropped: list[str] = []
+    dropped_outside_window: list[str] = []
     scorer: str | None = None
     for item in payload.items:
         entry = item.model_dump(exclude_none=True)
@@ -60,6 +61,9 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
         if run is None:
             dropped.append(item.ref_id or "(no id)")
             continue
+        if run.run_id not in state.last_listed_run_ids:
+            dropped_outside_window.append(run.run_id)
+            continue
         entry["run"] = _record(run)
         api = state.seen_apis.get(run.api_id)
         if api is not None:
@@ -72,6 +76,11 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
     if dropped:
         context.notes.append(
             f"Dropped {', '.join(dropped)}: not returned by list_runs/get_run/rank_failed_runs this session."
+        )
+    if dropped_outside_window:
+        context.notes.append(
+            f"Dropped {', '.join(dropped_outside_window)}: not in the window list_runs last counted — "
+            "list again before presenting them."
         )
     if not items:
         raise ValueError("Nothing on the digest could be joined to this session's records; fetch runs first.")

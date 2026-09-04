@@ -61,6 +61,10 @@ def check_job_guardrails(draft: JobDraft, config: AtworksAgentConfig) -> list[st
             violations.append("scheduling is switched off for this deployment")
     if draft.kind is JobKind.RUN_NOW and draft.schedule is not None:
         violations.append("run_now must not carry a schedule — use scheduled_run")
+    if draft.binding is Binding.LATE and not draft.select_where:
+        violations.append(
+            "LATE binding needs the select_where that produced the selection — pass the search_apis arguments"
+        )
     return violations
 
 

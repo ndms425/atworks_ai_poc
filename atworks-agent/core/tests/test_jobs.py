@@ -8,7 +8,7 @@ from atworks_agent.jobs import (
     JobNotApplicable,
     check_job_guardrails,
 )
-from atworks_agent.types import JobKind, JobSchedule, JobStatus
+from atworks_agent.types import Binding, JobKind, JobSchedule, JobStatus
 
 CFG = AtworksAgentConfig(model="m", max_apis_per_job=3, allowed_target_envs=("dev", "stg"))
 
@@ -35,6 +35,13 @@ def test_guardrail_schedule_count():
     sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=5)
     v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedule=sched), cfg)
     assert any("5 runs" in m and "limit is 3" in m for m in v)
+
+
+def test_guardrail_late_requires_select_where():
+    v = check_job_guardrails(_draft(binding=Binding.LATE, select_where=None), CFG)
+    assert any("LATE binding" in m for m in v)
+    v2 = check_job_guardrails(_draft(binding=Binding.LATE, select_where={"group": "contract"}), CFG)
+    assert not any("LATE binding" in m for m in v2)
 
 
 def test_ledger_stage_apply_discard():

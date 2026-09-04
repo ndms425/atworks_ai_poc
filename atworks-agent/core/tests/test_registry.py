@@ -31,3 +31,10 @@ def test_stage_job_schema_has_confidence_and_assumptions():
     props = stage["input_schema"]["properties"]
     assert {"kind", "summary", "api_ids", "target_env", "schedule", "binding", "confidence", "assumptions"} <= set(props)
     assert stage["input_schema"]["required"] == ["kind", "summary", "api_ids", "target_env"]
+
+
+def test_list_runs_filters_are_nested():
+    list_runs = next(t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "list_runs")
+    props = list_runs["input_schema"]["properties"]
+    assert set(props) == {"status", "filters", "limit"}
+    assert props["filters"]["properties"]["status"]["enum"] == ["pass", "fail", "error", "non_pass"]

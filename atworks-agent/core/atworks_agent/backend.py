@@ -28,14 +28,16 @@ class AtworksBackend(ABC):
         self, session: AtworksSessionContext, since: datetime | None = None,
         status: str | None = None, api_id: str | None = None, limit: int = 50,
     ) -> list[RunResult]:
-        """실행 이력. status는 pass/fail/error. 판정값은 aTworks DSL이 낸 그대로다."""
+        """실행 이력. status는 pass/fail/error/non_pass. 판정값은 aTworks DSL이 낸 그대로다.
+        non_pass는 fail과 error를 함께 묶는다(트리아지 모집단)."""
 
     @abstractmethod
     async def get_run(self, session: AtworksSessionContext, run_id: str) -> RunResult | None: ...
 
     @abstractmethod
     async def count_runs(self, session: AtworksSessionContext, since: datetime | None, status: str | None) -> int:
-        """triage 카드의 모수(population). list_runs의 limit과 무관하게 전체 건수."""
+        """triage 카드의 모수(population). list_runs의 limit과 무관하게 전체 건수.
+        status는 pass/fail/error/non_pass; non_pass는 fail과 error를 함께 묶는다."""
 
     # -- 실행 계획 (propose → preview → approve → apply) ----------------------------
     @abstractmethod

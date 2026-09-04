@@ -30,6 +30,7 @@ def _state_with_run():
                                  status=RunStatus.FAIL, failed_rules=["amount >= 0"], http_status=200))
     state.remember_rank(FailedRank(run_id="run-17", api_id="api-1", scorer="risk_v1", score=4.0, reasons=["1 rule failed"]))
     state.last_population = 47
+    state.last_listed_run_ids = ["run-17"]
     return state
 
 
@@ -58,6 +59,19 @@ async def test_run_digest_drops_unknown_ref_and_reports():
     )
     assert len(outcome.events[0].data["payload"]["items"]) == 1
     assert "run-999" in outcome.result_text
+
+
+async def test_run_digest_drops_run_outside_window():
+    state = _state_with_run()
+    state.remember_run(RunResult(run_id="run-18", api_id="api-1", executed_at=datetime.now(UTC), target_env="dev",
+                                 status=RunStatus.FAIL, http_status=200))
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_run_digest"],
+        {"items": [{"kind": "fail", "ref_id": "run-17", "headline": "y"}, {"kind": "fail", "ref_id": "run-18", "headline": "z"}]},
+        _ctx(state), "Shown.",
+    )
+    assert len(outcome.events[0].data["payload"]["items"]) == 1
+    assert "run-18" in outcome.result_text
 
 
 async def test_run_digest_refused_without_population():

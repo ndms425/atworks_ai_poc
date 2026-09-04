@@ -82,16 +82,6 @@ class AtworksToolExecutor(BaseToolExecutor):
     def memory_subject(self) -> str:
         return self._session.project_id
 
-    def split_status(self, name: str, tool_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-        # list_runs's own "status" (pass|fail|error) is a domain filter, not the narration
-        # line BaseToolExecutor reserves that key for on every non-presentation tool;
-        # exempt it here so dispatch() does not silently discard the filter before the
-        # handler ever sees it (BaseToolExecutor.dispatch calls split_status first and
-        # never re-injects the stripped value).
-        if name == "list_runs":
-            return tool_input, None
-        return super().split_status(name, tool_input)
-
     def domain_error(self, error: Exception) -> ToolOutcome | None:
         if isinstance(error, GuardrailViolation):
             return ToolOutcome.held(GUARDRAIL_GATE, guardrail_block_message(error.violations))
@@ -132,16 +122,18 @@ class AtworksToolExecutor(BaseToolExecutor):
         return self._fenced(api_record(api))
 
     async def _list_runs(self, tool_input: dict[str, Any]) -> ToolOutcome:
-        since = _iso(tool_input.get("since"))
-        status = tool_input.get("status") or None
+        filters = tool_input.get("filters") or {}
+        since = _iso(filters.get("since"))
+        status = filters.get("status") or None
         runs = await self._backend.list_runs(
-            self._session, since=since, status=status, api_id=tool_input.get("api_id") or None,
+            self._session, since=since, status=status, api_id=filters.get("api_id") or None,
             limit=int(tool_input.get("limit") or 50),
         )
         population = await self._backend.count_runs(self._session, since, status)
         self._state.last_population = population
         for run in runs:
             self._state.remember_run(run)
+        self._state.last_listed_run_ids = [r.run_id for r in runs]
         return self._fenced({"population": population, "shown": len(runs), "runs": [run_record(r) for r in runs]})
 
     async def _get_run(self, tool_input: dict[str, Any]) -> ToolOutcome:
@@ -152,11 +144,12 @@ class AtworksToolExecutor(BaseToolExecutor):
         return self._fenced(run_record(run))
 
     async def _rank_failed_runs(self, tool_input: dict[str, Any]) -> ToolOutcome:
-        if not self._state.seen_runs or self._state.last_population is None:
+        if not self._state.last_listed_run_ids or self._state.last_population is None:
             return ToolOutcome.error("Nothing to rank yet — call list_runs first; it records the runs and their population.")
         scorer = str(tool_input.get("scorer") or self._config.default_scorer)
         limit = min(int(tool_input.get("limit") or self._config.max_rank_items), self._config.max_rank_items)
-        ranked = rank_runs(scorer, list(self._state.seen_runs.values()), self._state.seen_apis, limit)
+        window = [self._state.seen_runs[i] for i in self._state.last_listed_run_ids if i in self._state.seen_runs]
+        ranked = rank_runs(scorer, window, self._state.seen_apis, limit)
         for rank in ranked:
             self._state.remember_rank(rank)
         return self._fenced({

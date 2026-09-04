@@ -138,6 +138,7 @@ class AtworksSessionState(BaseModel):
     seen_ranks: dict[str, FailedRank] = Field(default_factory=dict)
     seen_jobs: dict[str, JobSpec] = Field(default_factory=dict)
     last_population: int | None = None
+    last_listed_run_ids: list[str] = Field(default_factory=list)
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
     attached_items: list[AttachedItem] = Field(default_factory=list)
