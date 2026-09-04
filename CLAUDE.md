@@ -27,7 +27,8 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `record_execution(job_id, run_ids, schedule_index)` exactly once whatever the outcome so no slot
   re-runs. Size caps are **re-derived at execution** by `enforce_execution_matrix` after any LATE
   re-resolution (over the limit = a guardrail note, no runs, a spent slot); the ABC docstring
-  states both obligations for REST.
+  states both obligations for REST. `Scheduler.tick` also generates the daily briefing at its tail
+  (`briefings.maybe_generate(now)`, LLM-free, idempotent per date — file existence is the guard).
 - **Language / path / shell:** Python 3.11+, pydantic v2, FastAPI + SSE. Role package
   `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (4), turn loop
   `atworks-agent/runtime/atworks_agent_runtime/orchestrator.py`, host `host/atworks_host/`, web
@@ -56,7 +57,12 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
 - **Surfaces and renderer modes:** the host serves the chat turn as SSE (`POST /api/atworks/chat`),
   the portal reads `/apis` `/runs` `/jobs`, the card buttons `/changes/{job_id}/apply|discard`
   (reference route names, so the web-shared hooks bind unchanged), plus `/scheduler/tick`
-  (LLM-free) and `/reports/{job_id}`. Components are presentation tools filled server-side:
+  (LLM-free) and `/reports/{job_id}`. Also `GET /runs/insights` (session; flaky/regression_suspect
+  counts for the Home tile) and the briefing pair `GET /briefings/latest` (session, JSON) /
+  `GET /briefings/{date}` (no session, HTML, `SAFE_DATE`-gated, same shape as `/reports/{job_id}`).
+  The report's run rows link back with `?attach=run:{run_id}` (`ATWORKS_PORTAL_ORIGIN`, default
+  `http://localhost:3110`); the portal reads that query param on mount into `pendingAttachments`
+  and strips it from the URL. Components are presentation tools filled server-side:
   `run_digest`, `job_preview`, `question_form`, chips; job lifecycle rides `change_update` with a
   `change_id` alias. **The report is where environments are compared**: a template rendered once
   over a `data.json` the scheduler refreshes, no LLM in the path — `summary.by_env` plus an
@@ -77,12 +83,19 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   rules in `stage_job`'s description, the cross-tool contract in the prompt, procedures in skills.
 - **Flows covered:** four skills, loaded on demand over the prompt's index. (1) `failed-triage` —
   `list_runs {filters:{status:non_pass}}` → `rank_failed_runs` (deterministic `risk_v1`, no
-  analysis delegate) → `present_run_digest`, population and items bound to one list window;
-  (2) `schedule-run` — resolve the selection, fill or ask the missing list slots (environments,
-  schedules, test data), `stage_job` → preview card → host approval → `apply_job`; the scheduler
-  then executes the matrix and the env comparison appears in the report only, never as chat prose;
-  (3) `job-approval` — pending queue, apply an already-approved job, discard; (4) `api-lookup` —
-  specs, params, rules. Screen attachments scope a turn to the ref_ids the operator attached.
+  analysis delegate) → `present_run_digest`, population and items bound to one list window; also
+  `aggregate_runs` → `present_run_groups` (component `run_groups`) for grouping by cause
+  (`group_by: failed_rule`, etc.), since-when for one API, and `flaky_v1` (≥`flaky_min_transitions`
+  pass↔non-pass transitions) — counts, first-failure time and flakiness are host-computed, never
+  restated by the model; (2) `schedule-run` — resolve the selection, fill or ask the missing list
+  slots (environments, schedules, test data), `stage_job` → preview card → host approval →
+  `apply_job`; the scheduler then executes the matrix and the env comparison appears in the report
+  only, never as chat prose. `select_where` also takes `failed_since` and `related_to`, both
+  server-resolved (`resolve_select_where`, same function at LATE re-resolution) — the model's api_id
+  list is replaced by the resolved set, and `JobSpec.selection_basis` (a server-written sentence,
+  never a model one) shows on the preview card and the Jobs row; (3) `job-approval` — pending
+  queue, apply an already-approved job, discard; (4) `api-lookup` — specs, params, rules. Screen
+  attachments scope a turn to the ref_ids the operator attached.
 - **Memory:** off. `enable_memory = False`, no `save_memory` / `recall_memories` tools, `store=None`;
   nothing crosses sessions. Phase 2 may add field-name aliases via `commerce_common.memory`'s filter.
 
