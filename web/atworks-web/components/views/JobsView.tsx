@@ -28,7 +28,9 @@ function JobRow({ job, onAct }: { job: JobSpec; onAct: (id: string, action: Chan
         <div className="min-w-0 flex-1">
           <div className="text-[13.5px] font-medium leading-snug text-(--ink)">{change.summary}</div>
           <div className="mt-0.5 text-[12px] tabular-nums text-(--ink-soft)">
-            {change.kind} · {change.target_env} · {formatDate(change.created_at)}
+            {change.kind} · {change.target_envs.join(", ")} ·{" "}
+            {change.binding === "LATE" ? "최대 " : ""}
+            {change.executions}/{change.total_executions}회 · {formatDate(change.created_at)}
           </div>
         </div>
         <ChangeStatusPill status={change.status} />

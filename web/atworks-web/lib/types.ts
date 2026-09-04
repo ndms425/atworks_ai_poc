@@ -21,6 +21,7 @@ export interface RunResult {
   api_id: string;
   executed_at: string;
   target_env: string;
+  test_data_label?: string | null;
   status: RunStatus;
   failed_rules?: string[];
   http_status?: number;
@@ -42,6 +43,12 @@ export interface JobSchedule {
   tz: string;
   from_date: string;
   count: number;
+  done: number;
+}
+
+export interface TestDataSet {
+  label: string;
+  values: Record<string, string>;
 }
 
 export interface JobSpec {
@@ -51,8 +58,9 @@ export interface JobSpec {
   status: "staged" | "applied" | "discarded";
   summary: string;
   api_ids: string[];
-  target_env: string;
-  schedule?: JobSchedule;
+  target_envs: string[];
+  schedules: JobSchedule[];
+  test_data: TestDataSet[];
   binding: "FROZEN" | "LATE";
   report: boolean;
   confidence?: Record<string, number>;
@@ -66,7 +74,12 @@ export interface JobSpec {
   discarded_by?: string | null;
   discarded_by_kind?: "operator" | "agent" | null;
   run_ids?: string[];
-  runs_remaining?: number | null;
+  executions: number;
+  /** Server-derived (job_record, ruling M17) — read, never recompute client-side. */
+  matrix_size: number;
+  total_executions: number;
+  remaining_executions: number;
+  runs_total: number;
 }
 
 export interface DigestEntry {
@@ -92,6 +105,15 @@ export interface RunDigestPayload {
   items: DigestEntry[];
 }
 
+export interface JobMatrix {
+  apis: number;
+  envs: string[];
+  data_sets: string[];
+  executions: number;
+  runs_per_execution: number;
+  runs_total: number;
+}
+
 export interface JobPreviewPayload {
   job_id: string;
   change_id: string;
@@ -101,6 +123,7 @@ export interface JobPreviewPayload {
   change?: JobSpec;
   low_confidence: string[];
   apis: ApiSpec[];
+  matrix: JobMatrix;
 }
 
 export interface FormOption {

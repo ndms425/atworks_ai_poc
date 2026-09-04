@@ -64,6 +64,7 @@ export default function RunsView({
                 <th className="py-2.5 pl-[18px] pr-3 font-semibold">API</th>
                 <th className="px-3 py-2.5 font-semibold">Executed</th>
                 <th className="px-3 py-2.5 font-semibold">Env</th>
+                <th className="px-3 py-2.5 font-semibold">데이터</th>
                 <th className="px-3 py-2.5 font-semibold">Status</th>
                 <th className="py-2.5 pl-3 pr-[18px]" />
               </tr>
@@ -82,6 +83,7 @@ export default function RunsView({
                     </td>
                     <td className="px-3 py-2 text-[12.5px] tabular-nums text-(--ink-soft)">{formatDate(run.executed_at)}</td>
                     <td className="px-3 py-2 text-[12.5px] text-(--ink-soft)">{run.target_env}</td>
+                    <td className="px-3 py-2 text-[12.5px] text-(--ink-soft)">{run.test_data_label ?? "—"}</td>
                     <td className="px-3 py-2">
                       <Pill tone={style.tone} dot>
                         {style.label}
