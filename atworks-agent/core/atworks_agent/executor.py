@@ -30,7 +30,14 @@ from .gates import (
     guardrail_block_message,
     take_discard_actor_kind,
 )
-from .jobs import GuardrailViolation, JobDraft, JobNotApplicable, SelectWhere, check_job_guardrails
+from .jobs import (
+    CONFIDENCE_KEYS,
+    GuardrailViolation,
+    JobDraft,
+    JobNotApplicable,
+    SelectWhere,
+    check_job_guardrails,
+)
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .scoring import UnknownScorer, rank_runs
 from .serialization import api_record, job_record, rank_record, run_record
@@ -285,7 +292,10 @@ class AtworksToolExecutor(BaseToolExecutor):
             "test_data": test_data,
             "select_where": select_where,
             "binding": tool_input.get("binding") or "FROZEN", "report": tool_input.get("report", True),
-            "confidence": tool_input.get("confidence") or {},
+            "confidence": {
+                k: float(v) for k, v in (tool_input.get("confidence") or {}).items()
+                if k in CONFIDENCE_KEYS and isinstance(v, (int, float))
+            },
             "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],
         })
         # The guardrail runs here, before the backend call: a permissive backend must never be

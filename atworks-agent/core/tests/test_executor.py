@@ -278,3 +278,14 @@ async def test_stage_job_matrix_guardrail_checked_before_backend_call(backend, c
                                           "api_ids": ["api-1", "api-2"], "target_envs": ["dev", "stg"]})
     assert out.blocked == "guardrail" and "4 runs per execution" in out.result_text
     assert "job-bypass" not in state.seen_jobs
+
+
+async def test_stage_job_drops_unknown_confidence_keys(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
+                                          "target_envs": ["dev"],
+                                          "confidence": {"target_envs": 0.3, "<script>evil": 0.1}})
+    assert not out.refused
+    job_id = next(iter(state.seen_jobs))
+    assert state.seen_jobs[job_id].confidence == {"target_envs": 0.3}

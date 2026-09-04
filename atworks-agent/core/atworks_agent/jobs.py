@@ -2,7 +2,7 @@
 guardrail은 stage 시점과 apply 시점에 두 번 돈다 — apply 때 config가 더 엄격해졌을 수 있다."""
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,6 +30,25 @@ class GuardrailViolation(ValueError):
 
 class JobNotApplicable(ValueError):
     """id를 모르거나 상태 전이가 불가능. 백엔드가 지원하지 않는 작업에도 이 예외를 던진다."""
+
+
+# The only slots a job's confidence dict may name; the tool schema documents the same set
+# (registry.py's stage_job "confidence" description) and executor._stage_job filters to it
+# before the draft is even built. JobDraft's validator is the second gate, for any caller
+# (a backend, a test) that constructs a draft directly.
+CONFIDENCE_KEYS = ("target_envs", "schedules", "test_data", "binding", "api_ids", "report")
+
+
+def _listed(items: Sequence[str], limit: int = 5, width: int = 40) -> str:
+    """Model-authored strings joined for a guardrail message, bounded so the message can never
+    grow with the model's input — R18: a violation string is fed back to the model verbatim
+    (ToolOutcome.held is not fence-truncated), so an unbounded list here is a cheap prompt-bloat
+    and cache-bust primitive."""
+    shown = [truncate_display(str(item), width) for item in items[:limit]]
+    text = ", ".join(shown)
+    if len(items) > limit:
+        text += f" … and {len(items) - limit} more"
+    return text
 
 
 class SelectWhere(BaseModel):
@@ -63,6 +82,19 @@ class JobDraft(BaseModel):
                 raise ValueError(f"each target env is at most 32 chars, got {len(env)}")
         return value
 
+    @field_validator("confidence")
+    @classmethod
+    def _confidence_keys_are_closed(cls, value: dict[str, float]) -> dict[str, float]:
+        unknown = sorted(k for k in value if k not in CONFIDENCE_KEYS)
+        if unknown:
+            raise ValueError(
+                f"confidence keys must be one of {', '.join(CONFIDENCE_KEYS)}; got unknown key(s) {_listed(unknown)}"
+            )
+        for key, score in value.items():
+            if not 0 <= score <= 1:
+                raise ValueError(f"confidence[{key!r}] must be between 0 and 1, got {score}")
+        return value
+
 
 def check_job_guardrails(
     draft: JobDraft,
@@ -90,7 +122,7 @@ def check_job_guardrails(
     bad_envs = [e for e in draft.target_envs if e not in config.allowed_target_envs]
     if bad_envs:
         violations.append(
-            f"target_envs {', '.join(bad_envs)} are not allowed targets "
+            f"target_envs {_listed(bad_envs)} are not allowed targets "
             f"({', '.join(config.allowed_target_envs)}); the assistant may never target them"
         )
     # Rule 2 — per-dimension counts.
@@ -150,7 +182,7 @@ def check_job_guardrails(
             unknown = sorted(k for k in data.values if k not in known)
             if unknown:
                 violations.append(
-                    f"test data set '{data.label}' binds parameters ({', '.join(unknown)}) that "
+                    f"test data set '{data.label}' binds parameters ({_listed(unknown)}) that "
                     "none of the selected APIs declares"
                 )
     if draft.binding is Binding.LATE and not draft.select_where:
@@ -240,11 +272,16 @@ class JobLedger:
         several schedules on one job could not advance independently. Exactly one call per
         execution, even when the execution produced nothing."""
         job = self._jobs[job_id]
+        if schedule_index is not None and not (0 <= schedule_index < len(job.schedules)):
+            raise JobNotApplicable(
+                f"schedule_index {schedule_index} is out of range for job {job_id} "
+                f"({len(job.schedules)} schedules)"
+            )
         update: dict[str, Any] = {
             "run_ids": [*job.run_ids, *run_ids],
             "executions": job.executions + 1,
         }
-        if schedule_index is not None and 0 <= schedule_index < len(job.schedules):
+        if schedule_index is not None:
             schedules = list(job.schedules)
             consumed = schedules[schedule_index]
             schedules[schedule_index] = consumed.model_copy(update={"done": consumed.done + 1})

@@ -79,7 +79,7 @@ class Binding(StrEnum):
 class JobSchedule(BaseModel):
     kind: Literal["once", "daily"]
     at: str = Field(pattern=r"^\d{2}:\d{2}$")   # "09:00"
-    tz: str = "Asia/Seoul"
+    tz: str = Field(default="Asia/Seoul", max_length=64)   # bounded: rule 6's message interpolates it
     from_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     count: int = Field(ge=1, le=30)
     done: int = Field(default=0, ge=0)   # occurrences already executed; the ledger owns it
@@ -120,6 +120,8 @@ class TestDataSet(BaseModel):
 
     @model_validator(mode="after")
     def _keys_and_values_are_bounded(self) -> TestDataSet:
+        if len(self.values) > 20:
+            raise ValueError(f"test data set binds too many parameters ({len(self.values)} > 20)")
         for key, value in self.values.items():
             if not 1 <= len(key) <= 60:
                 raise ValueError(f"test data key must be 1-60 chars, got {len(key)} for {key[:20]!r}")

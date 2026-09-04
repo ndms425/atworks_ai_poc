@@ -96,6 +96,11 @@ def test_test_data_set_rejects_an_oversized_key_or_value():
         TestDataSet(label="S1", values={"amount": "9" * 201})
 
 
+def test_test_data_set_caps_the_number_of_keys():
+    with pytest.raises(ValueError):
+        TestDataSet(label="S1", values={f"k{i}": "1" for i in range(21)})
+
+
 def test_jobspec_matrix_properties_multiply_the_dimensions():
     job = JobSpec(job_id="job-0001", kind=JobKind.SCHEDULED_RUN, summary="s",
                   api_ids=["api-001", "api-002"], target_envs=["dev", "stg"],

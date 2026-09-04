@@ -180,3 +180,95 @@ def test_guardrail_test_data_key_must_be_a_param_of_a_selected_api():
 def test_guardrail_skips_the_test_data_rule_without_a_catalogue():
     data = [TestDataSet(label="S1 정상", values={"amount": "1000"})]
     assert not any("test data set" in m for m in check_job_guardrails(_draft(test_data=data), CFG))
+
+
+# -- M8: confidence keys are a closed set --------------------------------------------
+
+def test_job_draft_rejects_unknown_confidence_keys():
+    with pytest.raises(ValueError):
+        _draft(confidence={"nope": 0.5})
+
+
+def test_job_draft_confidence_values_must_be_in_range():
+    with pytest.raises(ValueError):
+        _draft(confidence={"target_envs": 1.5})
+    with pytest.raises(ValueError):
+        _draft(confidence={"target_envs": -0.1})
+    assert _draft(confidence={"target_envs": 0.3}).confidence == {"target_envs": 0.3}
+
+
+# -- M9: guardrail messages are bounded -----------------------------------------------
+
+def test_guardrail_messages_stay_bounded_for_an_oversized_env_list():
+    envs = [f"env{i}" for i in range(30)]
+    v = check_job_guardrails(_draft(target_envs=envs), CFG)
+    msg = next(m for m in v if "not allowed targets" in m)
+    assert len(msg) < 400
+    assert "… and 25 more" in msg
+
+
+def test_test_data_set_caps_the_number_of_keys():
+    with pytest.raises(ValueError):
+        TestDataSet(label="S1", values={f"k{i}": "1" for i in range(21)})
+
+
+def test_guardrail_unknown_test_data_keys_message_is_bounded():
+    keys = [f"{i:02d}" + "a" * 58 for i in range(8)]   # 8 unique 60-char keys
+    data = [TestDataSet(label="S1", values={k: "1" for k in keys})]
+    v = check_job_guardrails(_draft(test_data=data), CFG, _apis(a=[]))
+    msg = next(m for m in v if "test data set" in m)
+    assert len(msg) < 400
+
+
+# -- M10: the five missing guardrail-spec tests ---------------------------------------
+
+def test_guardrail_run_now_rejects_schedules_and_scheduled_run_needs_one():
+    sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=2)
+    v = check_job_guardrails(_draft(kind=JobKind.RUN_NOW, schedules=[sched]), CFG)
+    assert any("run_now must not carry schedules" in m for m in v)
+    v2 = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedules=[]), CFG)
+    assert any("scheduled_run needs at least one schedule" in m for m in v2)
+
+
+def test_guardrail_schedule_count_sums_across_schedules():
+    over = [JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=8),
+            JobSchedule(kind="daily", at="09:00", from_date="2026-09-05", count=7)]
+    v = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedules=over), CFG)
+    assert any("15 runs" in m and "limit is 14" in m for m in v)
+
+    at_cap = [JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=7),
+              JobSchedule(kind="daily", at="09:00", from_date="2026-09-05", count=7)]
+    v2 = check_job_guardrails(_draft(kind=JobKind.SCHEDULED_RUN, schedules=at_cap), CFG)
+    assert not any("runs and the limit is" in m for m in v2)
+
+
+def test_guardrail_counts_at_the_cap_are_allowed():
+    cfg = AtworksAgentConfig(model="m", max_apis_per_job=40, max_target_envs_per_job=2,
+                             max_schedules_per_job=3, max_test_data_sets=5, max_matrix_size=400,
+                             max_schedule_count=30)
+    scheds = [JobSchedule(kind="daily", at="09:00", from_date=f"2026-09-0{d}", count=2) for d in (4, 5, 6)]
+    data = [TestDataSet(label=f"S{i}", values={"amount": "1"}) for i in range(5)]
+    draft = _draft(kind=JobKind.SCHEDULED_RUN, api_ids=[f"api-{i}" for i in range(40)],
+                   target_envs=["dev", "stg"], schedules=scheds, test_data=data)
+    v = check_job_guardrails(draft, cfg)
+    assert not v
+
+
+def test_record_execution_without_a_schedule_index_advances_no_schedule():
+    ledger = JobLedger(CFG)
+    job = ledger.stage(_draft(), actor="op")
+    ledger.apply(job.job_id, actor="op")
+    after = ledger.record_execution(job.job_id, ["run-1"], None)
+    assert after.executions == 1 and after.schedules == []
+
+    cfg = AtworksAgentConfig(model="m", max_schedule_count=10)
+    ledger2 = JobLedger(cfg)
+    sched = JobSchedule(kind="daily", at="09:00", from_date="2026-09-04", count=3)
+    job2 = ledger2.stage(_draft(kind=JobKind.SCHEDULED_RUN, schedules=[sched]), actor="op")
+    ledger2.apply(job2.job_id, actor="op")
+    after2 = ledger2.record_execution(job2.job_id, ["run-2"], None)
+    assert after2.executions == 1
+    assert [s.done for s in after2.schedules] == [0]
+
+    with pytest.raises(JobNotApplicable):
+        ledger2.record_execution(job2.job_id, ["run-3"], 5)
