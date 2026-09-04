@@ -74,6 +74,27 @@ async def test_late_binding_over_limit_skips_execution_and_notes_guardrail():
     assert final.remaining_executions == 0
 
 
+async def test_late_binding_resolving_to_no_apis_skips_execution_and_notes_guardrail():
+    b = _backend()
+    job = await b.stage_job(
+        SESSION,
+        JobDraft(kind=JobKind.RUN_NOW, summary="late empty", api_ids=["api-001"],
+                 target_envs=["dev"], binding="LATE", select_where={"query": "zzz-nothing"}),
+        ActorKind.AGENT,
+    )
+    await b.apply_job(SESSION, job.job_id)
+    before = b.ledger.get(job.job_id).remaining_executions
+
+    produced = await b.execute_job_once(SESSION, job.job_id)
+
+    assert produced == []
+    updated = b.ledger.get(job.job_id)
+    assert len(updated.guardrail_notes) == 1
+    assert "no APIs" in updated.guardrail_notes[0]
+    # the slot is consumed even though nothing ran
+    assert updated.remaining_executions == before - 1
+
+
 async def test_execute_job_once_produces_the_whole_matrix():
     b = _backend()
     job = await b.stage_job(SESSION, JobDraft(
@@ -102,6 +123,18 @@ async def test_stub_verdict_fails_a_negative_amount_binding():
     assert stub_verdict(api, "dev", TestDataSet(label="S1", values={"amount": "1000"}))[0] is RunStatus.PASS
     # today's refund rule still holds when nothing is bound, so the fixtures keep their meaning
     assert stub_verdict(b.apis["api-003"], "dev", None) == (RunStatus.FAIL, ["refundAmount >= 0"], 200)
+
+
+async def test_stub_verdict_handles_fractional_and_non_numeric_amounts():
+    b = _backend()
+    api = b.apis["api-001"]
+    # A fractional negative amount still fails the amount rule.
+    assert stub_verdict(api, "dev", TestDataSet(label="S", values={"amount": "-1.5"}))[0] is RunStatus.FAIL
+    # A non-numeric amount cannot be compared, so the amount rule does not fire; no other rule
+    # applies to api-001 with a binding present, so the verdict is PASS.
+    assert stub_verdict(api, "dev", TestDataSet(label="S", values={"amount": "abc"}))[0] is RunStatus.PASS
+    # An empty amount is likewise not a number, so it does not trip the amount rule either.
+    assert stub_verdict(api, "dev", TestDataSet(label="S", values={"amount": ""}))[0] is RunStatus.PASS
 
 
 async def test_stub_verdict_differs_between_dev_and_stg_for_api_007():

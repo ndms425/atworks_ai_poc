@@ -256,7 +256,7 @@ async def test_stage_job_rejects_a_test_data_key_no_selected_api_declares(backen
                                           "target_envs": ["dev"],
                                           "test_data": [{"label": "S1", "values": {"nope": "1"}}]})
     assert out.blocked == "guardrail"
-    assert "test data set 'S1' binds parameters (nope)" in out.result_text
+    assert "test data set(s) S1" in out.result_text
 
 
 async def test_stage_job_matrix_guardrail_checked_before_backend_call(backend, config, skills, session, state):

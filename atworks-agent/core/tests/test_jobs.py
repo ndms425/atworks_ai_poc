@@ -17,6 +17,7 @@ from atworks_agent.types import (
     Binding,
     JobKind,
     JobSchedule,
+    JobSpec,
     JobStatus,
     TestDataSet,
 )
@@ -169,13 +170,39 @@ def test_guardrail_duplicate_schedule():
     assert not any("duplicate schedule" in m for m in v2)
 
 
+# -- M13: hard ceilings on the draft shape; rules 6/7 collapse to one message each ----
+
+def test_job_draft_rejects_more_than_ten_schedules():
+    scheds = [JobSchedule(kind="daily", at="09:00", from_date=f"2026-09-{d:02d}", count=1) for d in range(1, 12)]
+    with pytest.raises(ValueError):
+        _draft(kind=JobKind.SCHEDULED_RUN, schedules=scheds)
+
+
+def test_guardrail_four_identical_schedules_collapse_into_one_violation():
+    s = JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=1)
+    cfg = AtworksAgentConfig(model="m", max_schedule_count=30)
+    draft = _draft(kind=JobKind.SCHEDULED_RUN,
+                   schedules=[s, s.model_copy(), s.model_copy(), s.model_copy()])
+    v = check_job_guardrails(draft, cfg)
+    dup = [m for m in v if "duplicate schedule" in m]
+    assert len(dup) == 1
+
+
+def test_guardrail_three_bad_test_data_sets_collapse_into_one_violation():
+    data = [TestDataSet(label=f"S{i}", values={"amount": "1"}) for i in range(3)]
+    v = check_job_guardrails(_draft(test_data=data), CFG, _apis(a=[]))
+    rule7 = [m for m in v if "test data set" in m]
+    assert len(rule7) == 1
+    assert len(rule7[0]) < 400
+
+
 def test_guardrail_test_data_key_must_be_a_param_of_a_selected_api():
     data = [TestDataSet(label="S1 정상", values={"amount": "1000"})]
     ok = check_job_guardrails(_draft(test_data=data), CFG, _apis(a=["amount"], b=["id"]))
     assert not any("test data set" in m for m in ok)
 
     bad = check_job_guardrails(_draft(test_data=data), CFG, _apis(a=["id"], b=["id"]))
-    assert any("test data set 'S1 정상' binds parameters (amount)" in m for m in bad)
+    assert any("test data set" in m and "S1 정상" in m for m in bad)
 
 
 def test_guardrail_skips_the_test_data_rule_without_a_catalogue():
@@ -201,8 +228,14 @@ def test_job_draft_confidence_values_must_be_in_range():
 # -- M9: guardrail messages are bounded -----------------------------------------------
 
 def test_guardrail_messages_stay_bounded_for_an_oversized_env_list():
+    # M13 caps JobDraft.target_envs at 10 items, so 30 bad envs can only reach the guardrail
+    # check via a caller that bypasses field validation (model_construct) — still worth
+    # pinning: _listed's bound must hold regardless of how the draft was built.
     envs = [f"env{i}" for i in range(30)]
-    v = check_job_guardrails(_draft(target_envs=envs), CFG)
+    draft = JobDraft.model_construct(kind=JobKind.RUN_NOW, summary="run", api_ids=["a", "b"],
+                                     target_envs=envs, schedules=[], test_data=[], select_where=None,
+                                     binding=Binding.FROZEN, report=True, confidence={}, assumptions=[])
+    v = check_job_guardrails(draft, CFG)
     msg = next(m for m in v if "not allowed targets" in m)
     assert len(msg) < 400
     assert "… and 25 more" in msg
@@ -300,3 +333,32 @@ def test_enforce_execution_matrix_allows_exactly_at_the_cap():
     violations = enforce_execution_matrix(cfg, job, ["a", "b", "c", "d"])
 
     assert violations == []
+
+
+# -- M14: zero resolved APIs at execution ---------------------------------------------
+
+def test_enforce_execution_matrix_flags_zero_resolved_apis():
+    ledger = JobLedger(CFG)
+    job = ledger.stage(_draft(), actor="op")
+
+    violations = enforce_execution_matrix(CFG, job, [])
+
+    assert any("no APIs" in v for v in violations)
+
+
+# -- M15: target_envs re-checked at execution time -------------------------------------
+
+def test_enforce_execution_matrix_rechecks_target_envs():
+    cfg = AtworksAgentConfig(model="m", allowed_target_envs=("dev",))
+    job = JobSpec.model_construct(
+        job_id="job-x", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED, summary="s",
+        api_ids=["a"], select_where=None, binding=Binding.FROZEN, target_envs=["dev", "prod"],
+        schedules=[], test_data=[], report=True, confidence={}, assumptions=[],
+        guardrail_notes=[], created_at=datetime.now(UTC), created_by="op",
+        created_by_kind=ActorKind.OPERATOR, applied_at=None, applied_by=None,
+        discarded_at=None, discarded_by=None, discarded_by_kind=None, run_ids=[], executions=0,
+    )
+
+    violations = enforce_execution_matrix(cfg, job, ["a"])
+
+    assert any("prod" in v and "not allowed targets" in v for v in violations)

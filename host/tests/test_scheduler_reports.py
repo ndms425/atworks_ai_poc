@@ -16,9 +16,10 @@ from atworks_agent import (
     JobStatus,
     RunResult,
     RunStatus,
+    TestDataSet,
 )
 from atworks_host.mock_backend import MockAtworks
-from atworks_host.reports import TEMPLATE, Reports
+from atworks_host.reports import TEMPLATE, Reports, _matrix
 from atworks_host.scheduler import Scheduler
 
 KST = timezone(timedelta(hours=9))
@@ -319,6 +320,55 @@ async def test_report_template_renders_the_comparison_table(tmp_path):
     assert "esc(" in template_source
 
 
+async def test_report_matrix_rows_carry_both_test_data_labels(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="two data sets", api_ids=["api-001"], target_envs=["dev"],
+        test_data=[TestDataSet(label="S1 정상", values={"amount": "1000"}),
+                   TestDataSet(label="S2 음수", values={"amount": "-1"})]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    labels = {r["test_data_label"] for r in data["matrix"]["rows"]}
+    assert labels == {"S1 정상", "S2 음수"}
+    for row in data["matrix"]["rows"]:
+        assert row["test_data_label"] in {"S1 정상", "S2 음수"}
+
+
+async def test_report_by_env_shows_zeros_for_an_env_that_produced_no_runs(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="two envs, one silent", api_ids=["api-001"],
+        target_envs=["dev", "stg"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    produced = await backend.execute_job_once(SESSION, job.job_id)
+    dev_only = [r for r in produced if r.target_env == "dev"]
+    applied = backend.ledger.get(job.job_id)
+
+    reports.write(applied, dev_only)
+
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    assert data["summary"]["by_env"]["stg"] == {"total": 0, "pass": 0, "fail": 0, "error": 0}
+    assert data["summary"]["by_env"]["dev"]["total"] == len(dev_only)
+
+
+def test_matrix_row_missing_one_envs_cell_is_not_flagged_as_differing():
+    job = JobSpec(job_id="job-1", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"],
+                 target_envs=["dev", "stg"], created_at=datetime.now(UTC), created_by="op")
+    run = RunResult(run_id="run-1", api_id="api-1", executed_at=datetime.now(UTC), target_env="dev",
+                    status=RunStatus.PASS, job_id="job-1")
+
+    result = _matrix(job, [run])
+
+    row = result["rows"][0]
+    assert row["differs"] is False
+    assert "stg" not in row["cells"]
+
+
 async def test_report_single_env_job_has_no_comparison_table_data(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
     reports = Reports(tmp_path)
@@ -335,6 +385,54 @@ async def test_report_single_env_job_has_no_comparison_table_data(tmp_path):
 
     template_source = TEMPLATE.read_text(encoding="utf-8")
     assert "envs.length>1" in template_source or "envs.length > 1" in template_source
+
+
+async def test_tick_survives_a_scheduling_failure_and_still_runs_the_good_job(tmp_path):
+    now = datetime.now(UTC)
+    bad_schedule = JobSchedule.model_construct(
+        kind="daily", at="09:00", tz="Nowhere/Bogus", from_date="2026-09-04", count=1, done=0
+    )
+    bad_job = JobSpec.model_construct(
+        job_id="job-bad", kind=JobKind.SCHEDULED_RUN, status=JobStatus.APPLIED, summary="bad tz",
+        api_ids=["api-1"], select_where=None, binding="FROZEN", target_envs=["dev"],
+        schedules=[bad_schedule], test_data=[], report=False, confidence={}, assumptions=[],
+        guardrail_notes=[], created_at=now, created_by="op", created_by_kind="operator",
+        applied_at=now, applied_by="op", discarded_at=None, discarded_by=None,
+        discarded_by_kind=None, run_ids=[], executions=0,
+    )
+    good_job = JobSpec(job_id="job-good", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED,
+                       summary="good", api_ids=["api-1"], target_envs=["dev"], report=False,
+                       created_at=now, created_by="op", executions=0)
+    run = RunResult(run_id="run-x", api_id="api-1", executed_at=now, target_env="dev",
+                    status=RunStatus.PASS, job_id="job-good")
+
+    class TwoJobBackend(RecordingBackend):
+        def __init__(self):
+            super().__init__(good_job, run)
+            self.notes: list[tuple[str, str]] = []
+            self.executed_job_ids: list[str] = []
+
+        async def applied_jobs(self, session):
+            self.calls.append("applied_jobs")
+            return [bad_job, good_job]
+
+        async def execute_job_once(self, session, job_id, schedule_index=None):
+            self.executed_job_ids.append(job_id)
+            return await super().execute_job_once(session, job_id, schedule_index)
+
+        async def add_guardrail_note(self, session, job_id, note):
+            self.notes.append((job_id, note))
+            return await super().add_guardrail_note(session, job_id, note)
+
+    backend = TwoJobBackend()
+    sched = Scheduler(backend, Reports(tmp_path), SESSION)
+
+    executed = await sched.tick(now)
+
+    assert executed == ["job-good"]
+    assert backend.executed_job_ids == ["job-good"]     # the bad job never reaches execute_job_once
+    assert backend.notes == [("job-bad", "scheduling failed: ZoneInfoNotFoundError")]
+    assert "record_execution" in backend.calls
 
 
 async def test_scheduler_uses_only_the_backend_abc(tmp_path):

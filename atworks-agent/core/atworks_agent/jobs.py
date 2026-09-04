@@ -65,9 +65,9 @@ class JobDraft(BaseModel):
     kind: JobKind
     summary: str = Field(max_length=200)
     api_ids: list[str]
-    target_envs: list[str] = Field(min_length=1)
-    schedules: list[JobSchedule] = Field(default_factory=list)
-    test_data: list[TestDataSet] = Field(default_factory=list)
+    target_envs: list[str] = Field(min_length=1, max_length=10)
+    schedules: list[JobSchedule] = Field(default_factory=list, max_length=10)
+    test_data: list[TestDataSet] = Field(default_factory=list, max_length=10)
     select_where: dict[str, Any] | None = None
     binding: Binding = Binding.FROZEN
     report: bool = True
@@ -166,25 +166,30 @@ def check_job_guardrails(
         )
     # Rule 6 — a repeated schedule is a mistake, unlike a repeated api id (which the
     # executor de-duplicates): two identical entries would double every occurrence silently.
+    # Every duplicate is collected into a single violation (via _listed) rather than one
+    # message per repeat, so a model that sends many copies cannot inflate the message count.
     seen_schedules: set[tuple[str, str, str, str]] = set()
+    duplicate_schedules: list[str] = []
     for s in draft.schedules:
         key = (s.kind, s.at, s.tz, s.from_date)
         if key in seen_schedules:
-            violations.append(
-                f"duplicate schedule: two entries share kind={s.kind}, at={s.at}, tz={s.tz}, "
-                f"from_date={s.from_date} — a repeated schedule is a mistake; drop one or raise its count"
-            )
+            duplicate_schedules.append(f"{s.kind} {s.at} {s.tz} {s.from_date}")
         seen_schedules.add(key)
-    # Rule 7 — a data set may only bind parameters the selected APIs actually declare.
+    if duplicate_schedules:
+        violations.append(
+            f"duplicate schedule(s): {_listed(duplicate_schedules)} — a repeated schedule is a "
+            "mistake; drop one or raise its count"
+        )
+    # Rule 7 — a data set may only bind parameters the selected APIs actually declare. Every
+    # offending set is collected into a single violation (via _listed), for the same reason.
     if apis is not None:
         known = {p for i in draft.api_ids for p in (apis[i].params if i in apis else [])}
-        for data in draft.test_data:
-            unknown = sorted(k for k in data.values if k not in known)
-            if unknown:
-                violations.append(
-                    f"test data set '{data.label}' binds parameters ({_listed(unknown)}) that "
-                    "none of the selected APIs declares"
-                )
+        offending = [data.label for data in draft.test_data if any(k not in known for k in data.values)]
+        if offending:
+            violations.append(
+                f"test data set(s) {_listed(offending)} bind parameters that none of the "
+                "selected APIs declares"
+            )
     if draft.binding is Binding.LATE and not draft.select_where:
         violations.append(
             "LATE binding needs the select_where that produced the selection — pass the search_apis arguments"
@@ -195,9 +200,12 @@ def check_job_guardrails(
 def enforce_execution_matrix(
     config: AtworksAgentConfig, job: JobSpec, resolved_api_ids: Sequence[str]
 ) -> list[str]:
-    """Re-derive the size caps at execution time (a LATE selection may have grown since
-    staging — staging only saw the selection as it stood then)."""
+    """Re-derive the size caps — and, since apply-time config may have tightened the
+    allow-list since this job was applied, the target-env rule — at execution time (a LATE
+    selection may also have grown or shrunk since staging)."""
     violations: list[str] = []
+    if len(resolved_api_ids) == 0:
+        violations.append("execution skipped: selection resolved to no APIs")
     if len(resolved_api_ids) > config.max_apis_per_job:
         violations.append(
             f"execution skipped: selection resolved to {len(resolved_api_ids)} APIs, "
@@ -208,6 +216,12 @@ def enforce_execution_matrix(
         violations.append(
             f"execution skipped: matrix resolved to {size} runs per execution, "
             f"above the limit of {config.max_matrix_size}"
+        )
+    bad_envs = [e for e in job.target_envs if e not in config.allowed_target_envs]
+    if bad_envs:
+        violations.append(
+            f"execution skipped: target_envs {_listed(bad_envs)} are not allowed targets "
+            f"({', '.join(config.allowed_target_envs)})"
         )
     return violations
 

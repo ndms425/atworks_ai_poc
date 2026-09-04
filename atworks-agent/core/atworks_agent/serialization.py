@@ -21,4 +21,10 @@ def rank_record(rank: FailedRank) -> dict[str, Any]:
 def job_record(job: JobSpec) -> dict[str, Any]:
     record = job.model_dump(mode="json", exclude_none=True)
     record["change_id"] = job.job_id   # web-shared의 change_update 훅과 호환 (Task 15)
+    # JobSpec의 matrix_size/total_executions/remaining_executions/runs_total은 plain @property라
+    # model_dump에 실리지 않는다 — 여기서 얹어야 카드/뷰가 매번 재계산하지 않는다.
+    record["matrix_size"] = job.matrix_size
+    record["total_executions"] = job.total_executions
+    record["remaining_executions"] = job.remaining_executions
+    record["runs_total"] = job.runs_total
     return record

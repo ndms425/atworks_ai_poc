@@ -38,17 +38,27 @@ class Scheduler:
             for job in list(await self.backend.applied_jobs(self.session)):
                 if job.status is not JobStatus.APPLIED or job.remaining_executions <= 0:
                     continue
-                if job.kind is JobKind.RUN_NOW:
-                    # No schedule to advance: run_now is due once, the moment it is applied.
-                    slots: list[int | None] = [None] if job.executions == 0 else []
-                else:
-                    slots = []
-                    for index, schedule in enumerate(job.schedules):
-                        if schedule.done >= schedule.count:
-                            continue
-                        when = due_at(schedule, schedule.done)
-                        if when is not None and when <= now:
-                            slots.append(index)
+                try:
+                    if job.kind is JobKind.RUN_NOW:
+                        # No schedule to advance: run_now is due once, the moment it is applied.
+                        slots: list[int | None] = [None] if job.executions == 0 else []
+                    else:
+                        slots = []
+                        for index, schedule in enumerate(job.schedules):
+                            if schedule.done >= schedule.count:
+                                continue
+                            when = due_at(schedule, schedule.done)
+                            if when is not None and when <= now:
+                                slots.append(index)
+                except Exception as error:
+                    # A bad schedule (e.g. an unresolvable tz) must not stall every other job:
+                    # spend the slot and move on, the same shape as an execution failure (M12).
+                    logger.exception("job %s failed while computing due slots", job.job_id)
+                    await self.backend.add_guardrail_note(
+                        self.session, job.job_id, f"scheduling failed: {type(error).__name__}"
+                    )
+                    await self.backend.record_execution(self.session, job.job_id, [], None)
+                    continue
                 for schedule_index in slots:
                     if await self._execute_one(job.job_id, schedule_index, job.report):
                         executed.append(job.job_id)

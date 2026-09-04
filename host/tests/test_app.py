@@ -89,6 +89,28 @@ async def test_host_click_applies_job_staged_outside_the_session(client_backend)
         assert r2.status_code == 400 and "not staged" in r2.json()["detail"]
 
 
+async def test_apply_then_tick_executes_the_whole_matrix(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="two envs", api_ids=["api-001", "api-003"],
+                          target_envs=["dev", "stg"]), ActorKind.AGENT
+    )
+    expected_runs = job.matrix_size
+
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers={"X-Session-Id": sid})
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+    tr = await client.post("/api/atworks/scheduler/tick", params={"now": "2026-09-03T14:00:00+09:00"})
+    assert tr.status_code == 200 and tr.json()["executed"] == [job.job_id]
+
+    applied = backend.ledger.get(job.job_id)
+    runs = await backend.runs_by_ids(session, applied.run_ids)
+    assert len(runs) == expected_runs
+    assert {r.target_env for r in runs} == set(job.target_envs)
+
+
 async def test_report_404_before_run(client):
     assert (await client.get("/api/atworks/reports/job-0001")).status_code == 404
 

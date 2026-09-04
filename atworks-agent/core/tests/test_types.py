@@ -70,6 +70,11 @@ def test_schedule_once_requires_count_one():
     JobSchedule(kind="once", at="09:00", from_date="2026-09-04", count=1)
 
 
+def test_schedule_tz_must_be_a_real_iana_zone():
+    with pytest.raises(ValueError, match="Nowhere/Bogus"):
+        JobSchedule(kind="once", at="09:00", tz="Nowhere/Bogus", from_date="2026-09-05", count=1)
+
+
 def test_run_status_values():
     assert {s.value for s in RunStatus} == {"pass", "fail", "error"}
     r = RunResult(run_id="run-1", api_id="api-001", executed_at=datetime.now(UTC),

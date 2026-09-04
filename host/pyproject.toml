@@ -2,7 +2,7 @@
 name = "atworks-host"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["atworks-agent-runtime", "fastapi", "uvicorn[standard]", "python-dotenv"]
+dependencies = ["atworks-agent-runtime", "fastapi", "uvicorn[standard]", "python-dotenv", "tzdata"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from commerce_common.types import ClockContext, remember
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -99,6 +100,15 @@ class JobSchedule(BaseModel):
             date.fromisoformat(value)
         except ValueError as error:
             raise ValueError(f"from_date must be a valid calendar date, got {value!r}") from error
+        return value
+
+    @field_validator("tz")
+    @classmethod
+    def _tz_is_a_real_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"unknown IANA timezone: {value!r}") from error
         return value
 
     @model_validator(mode="after")
