@@ -1,6 +1,6 @@
 """presentation payload에 세션 레코드를 조인한다. 모델은 id와 문구만 고르고 값은 여기서 채운다.
 - run_digest: run·api·rank 레코드 조인, population(모수) 필수 — "N건 중 먼저 볼 k건"
-- job_preview: 스테이징 레코드 그대로 + confidence<0.5 슬롯 목록
+- job_preview: 스테이징 레코드 그대로 + confidence<0.5 슬롯 목록 + 서버가 계산한 matrix(계·데이터·총 실행)
 - question_form: confidence<0.5 문항에 highlight
 merchant_agent/enrichment.py 미러."""
 from __future__ import annotations
@@ -119,6 +119,16 @@ async def enrich_job_preview(payload: PresentJobPreviewPayload, context: Enrichm
     enriched["change_id"] = job.job_id   # web-shared useMerchantChat이 이 키로 카드를 찾는다
     enriched["low_confidence"] = sorted(k for k, v in job.confidence.items() if v < LOW_CONFIDENCE)
     enriched["apis"] = [_record(a) for a in (context.state.seen_apis.get(i) for i in job.api_ids) if a is not None]
+    # Server-computed so the one approval click is informed consent over the whole matrix:
+    # every env, every data set, and the totals the operator is actually authorizing.
+    enriched["matrix"] = {
+        "apis": len(job.api_ids),
+        "envs": list(job.target_envs),
+        "data_sets": [d.label for d in job.test_data],
+        "executions": job.total_executions,
+        "runs_per_execution": job.matrix_size,
+        "runs_total": job.runs_total,
+    }
     return enriched
 
 

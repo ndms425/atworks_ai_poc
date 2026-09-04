@@ -217,3 +217,64 @@ async def test_stage_job_accepts_select_where_group_only(backend, config, skills
     assert not out.refused
     job_id = next(iter(state.seen_jobs))
     assert state.seen_jobs[job_id].select_where == {"query": "", "group": "contract"}
+
+
+async def test_stage_job_sanitizes_and_dedupes_target_envs(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
+                                          "target_envs": ["dev", "dev", "stg"]})
+    assert not out.refused
+    job_id = next(iter(state.seen_jobs))
+    assert state.seen_jobs[job_id].target_envs == ["dev", "stg"]
+
+
+async def test_stage_job_binds_test_data_and_previews_the_matrix(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {
+        "kind": "scheduled_run", "summary": "dev/stg 비교", "api_ids": ["api-1"],
+        "target_envs": ["dev", "stg"],
+        "schedules": [{"kind": "daily", "at": "09:00", "from_date": "2026-09-05", "count": 3}],
+        "test_data": [{"label": "S1 정상", "values": {"amount": "1000"}},
+                      {"label": "S2 음수 금액", "values": {"amount": "-1"}}],
+        "confidence": {"target_envs": 0.3, "test_data": 0.4},
+    })
+    assert not out.refused
+    payload = out.events[1].data["payload"]
+    assert payload["matrix"] == {
+        "apis": 1, "envs": ["dev", "stg"], "data_sets": ["S1 정상", "S2 음수 금액"],
+        "executions": 3, "runs_per_execution": 4, "runs_total": 12,
+    }
+    assert payload["low_confidence"] == ["target_envs", "test_data"]
+
+
+async def test_stage_job_rejects_a_test_data_key_no_selected_api_declares(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
+                                          "target_envs": ["dev"],
+                                          "test_data": [{"label": "S1", "values": {"nope": "1"}}]})
+    assert out.blocked == "guardrail"
+    assert "test data set 'S1' binds parameters (nope)" in out.result_text
+
+
+async def test_stage_job_matrix_guardrail_checked_before_backend_call(backend, config, skills, session, state):
+    class PermissiveBackend(backend.__class__):
+        async def stage_job(self, session, draft, actor_kind):
+            from datetime import UTC, datetime
+
+            from atworks_agent.types import ActorKind as AK
+            from atworks_agent.types import JobSpec
+            return JobSpec(job_id="job-bypass", kind=draft.kind, summary=draft.summary,
+                           api_ids=draft.api_ids, target_envs=draft.target_envs,
+                           created_at=datetime.now(UTC), created_by=session.operator,
+                           created_by_kind=AK.AGENT)
+
+    tight = config.model_copy(update={"max_matrix_size": 1})
+    ex = _exec(PermissiveBackend(tight), tight, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s",
+                                          "api_ids": ["api-1", "api-2"], "target_envs": ["dev", "stg"]})
+    assert out.blocked == "guardrail" and "4 runs per execution" in out.result_text
+    assert "job-bypass" not in state.seen_jobs

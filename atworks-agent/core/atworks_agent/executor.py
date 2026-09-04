@@ -288,7 +288,10 @@ class AtworksToolExecutor(BaseToolExecutor):
             "confidence": tool_input.get("confidence") or {},
             "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],
         })
-        if violations := check_job_guardrails(draft, self._config):
+        # The guardrail runs here, before the backend call: a permissive backend must never be
+        # handed a job this deployment's caps reject (R18). state.seen_apis is the catalogue
+        # rule 7 needs — every api_id above already passed provenance, so every one is in it.
+        if violations := check_job_guardrails(draft, self._config, self._state.seen_apis):
             return ToolOutcome.held(GUARDRAIL_GATE, guardrail_block_message(violations))
         job = await self._backend.stage_job(self._session, draft, ActorKind.AGENT)
         return await self._remember_and_preview(job)

@@ -59,14 +59,18 @@ async def test_stage_turn_shows_preview_and_change_update(make_agent, session, s
     closing.content.insert(0, text_block("Jobs 페이지에서 승인하면 실행됩니다."))
     agent = make_agent([
         tool_use_message("search_apis", {"query": "", "updated_after": "2026-08-27T00:00:00+09:00"}),
-        tool_calls_message(("stage_job", {"kind": "scheduled_run", "summary": "1주일 업데이트분 3일간 09시", "api_ids": ["api-1"], "target_envs": ["dev"],
+        tool_calls_message(("stage_job", {"kind": "scheduled_run", "summary": "1주일 업데이트분 3일간 09시 dev/stg", "api_ids": ["api-1"], "target_envs": ["dev", "stg"],
                                           "schedules": [{"kind": "daily", "at": "09:00", "from_date": "2026-09-04", "count": 3}],
-                                          "confidence": {"target_envs": 0.3}, "assumptions": ["target_envs defaulted to [dev]"]}, "tu-stage")),
+                                          "test_data": [{"label": "S1 정상", "values": {"amount": "1000"}}],
+                                          "confidence": {"target_envs": 0.3}, "assumptions": ["target_envs defaulted to [dev, stg]"]}, "tu-stage")),
         closing,
     ])
     events, _ = await run_turn(agent, "지난 1주일 업데이트된 api 오늘부터 3일간 매일 9시에 실행해줘", session, state)
     kinds = [(e.type, e.data.get("component")) for e in events if e.type in ("ui", "change_update")]
     assert kinds == [("change_update", None), ("ui", "job_preview"), ("ui", "suggestions")]
+    preview = next(e for e in events if e.data.get("component") == "job_preview")
+    assert preview.data["payload"]["matrix"]["envs"] == ["dev", "stg"]
+    assert preview.data["payload"]["matrix"]["data_sets"] == ["S1 정상"]
     assert state.seen_jobs["job-0001"].status.value == "staged" and not state.approved_job_ids
 
 

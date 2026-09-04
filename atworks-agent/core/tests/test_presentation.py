@@ -132,3 +132,21 @@ async def test_question_form_marks_low_confidence():
     )
     payload = outcome.events[0].data["payload"]
     assert payload["questions"][0]["highlight"] is True
+
+
+async def test_job_preview_carries_the_matrix_block():
+    from atworks_agent.types import JobSchedule, TestDataSet
+
+    state = AtworksSessionState()
+    state.remember_job(JobSpec(
+        job_id="job-0002", kind=JobKind.SCHEDULED_RUN, summary="s", api_ids=["api-1", "api-2"],
+        target_envs=["dev", "stg"],
+        schedules=[JobSchedule(kind="daily", at="09:00", from_date="2026-09-05", count=3)],
+        test_data=[TestDataSet(label="S1 정상", values={"amount": "1000"})],
+        created_at=datetime.now(UTC), created_by="op"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_job_preview"],
+                                     {"job_id": "job-0002"}, _ctx(state), "Shown.")
+    assert outcome.events[0].data["payload"]["matrix"] == {
+        "apis": 2, "envs": ["dev", "stg"], "data_sets": ["S1 정상"],
+        "executions": 3, "runs_per_execution": 4, "runs_total": 12,
+    }

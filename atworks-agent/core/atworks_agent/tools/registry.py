@@ -99,22 +99,35 @@ def build_tools(
         {
             "name": "stage_job",
             "description": ("Stage an execution plan (JobSpec) for the operator's approval — it runs nothing. api_ids must come "
-                            "from search_apis/get_api this session. Every value you defaulted (target_env, schedule start, "
-                            "binding) goes into assumptions with a confidence below 0.5, so the preview asks the operator. "
-                            "With stage_shows_preview the call renders its own preview card. / 실행 계획을 스테이징한다. "
-                            "실행하지 않는다. 기본값으로 채운 슬롯은 assumptions+낮은 confidence로 표시한다."),
+                            "from search_apis/get_api this session. One job may span several environments, schedules and "
+                            "test-data sets; it runs the whole matrix once per schedule occurrence. Every value you defaulted "
+                            "(target_envs, schedule start, binding, test data) goes into assumptions with a confidence below "
+                            "0.5, so the preview asks the operator. With stage_shows_preview the call renders its own preview "
+                            "card. / 실행 계획을 스테이징한다. 실행하지 않는다. 한 job은 여러 대상 계·여러 스케줄·여러 테스트 "
+                            "데이터를 가질 수 있고, 스케줄 1회마다 전체 매트릭스를 실행한다. 기본값으로 채운 슬롯은 "
+                            "assumptions+낮은 confidence로 표시한다."),
             "input_schema": {"type": "object", "properties": {
                 "kind": {"type": "string", "enum": ["run_now", "scheduled_run"]},
                 "summary": {"type": "string", "maxLength": 200, "description": "One line the preview card shows."},
                 "api_ids": {"type": "array", "minItems": 1, "maxItems": 500, "items": {"type": "string", "description": _SESSION_API_ID}},
-                "target_env": {"type": "string", "description": "dev | stg. Never prod. When the operator did not say, default dev with confidence 0.3."},
-                "schedule": {"type": "object", "properties": {
-                    "kind": {"type": "string", "enum": ["once", "daily"]},
-                    "at": {"type": "string", "pattern": "^\\d{2}:\\d{2}$"},
-                    "tz": {"type": "string"},
-                    "from_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "First run date. If today's time-of-day has passed, tomorrow — and say so in assumptions."},
-                    "count": {"type": "integer", "minimum": 1, "maximum": 30}},
-                    "required": ["kind", "at", "from_date", "count"], "additionalProperties": False},
+                "target_envs": {"type": "array", "minItems": 1, "maxItems": config.max_target_envs_per_job,
+                                "items": {"type": "string"},
+                                "description": "dev | stg, one or more. Never prod. '양쪽/두 계/비교' means dev and stg. When the operator did not say, default [dev] with confidence 0.3."},
+                "schedules": {"type": "array", "maxItems": config.max_schedules_per_job,
+                              "items": {"type": "object", "properties": {
+                                  "kind": {"type": "string", "enum": ["once", "daily"]},
+                                  "at": {"type": "string", "pattern": "^\\d{2}:\\d{2}$"},
+                                  "tz": {"type": "string"},
+                                  "from_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "First run date. If today's time-of-day has passed, tomorrow — and say so in assumptions."},
+                                  "count": {"type": "integer", "minimum": 1, "maximum": 30}},
+                                  "required": ["kind", "at", "from_date", "count"], "additionalProperties": False},
+                              "description": "Empty for run_now. Each entry runs the whole matrix once per occurrence."},
+                "test_data": {"type": "array", "maxItems": config.max_test_data_sets,
+                              "items": {"type": "object", "properties": {
+                                  "label": {"type": "string", "maxLength": 40},
+                                  "values": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 200}}},
+                                  "required": ["label", "values"], "additionalProperties": False},
+                              "description": "Parameter bindings applied identically to every environment. Keys must be params of the selected APIs (see get_api). When the operator says '임의로' propose one set per scenario worth covering, label each, and put every invented value into assumptions with confidence 0.4 — the operator approves the values on the preview card."},
                 "binding": {"type": "string", "enum": ["FROZEN", "LATE"], "description": "FROZEN: today's resolved api_ids every run. LATE: re-evaluate select_where each run. Ambiguous from speech — ask via present_question_form or set confidence 0.4."},
                 "select_where": {"type": "object", "properties": {
                     "query": {"type": "string", "maxLength": 120},
@@ -123,9 +136,9 @@ def build_tools(
                     "additionalProperties": False,
                     "description": "The search that produced api_ids (query/group/updated_after), kept for LATE binding and for the preview's provenance."},
                 "report": {"type": "boolean"},
-                "confidence": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "Per-slot confidence: target_env, schedule.from_date, binding, api_ids."},
+                "confidence": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "Per-slot confidence: target_envs, schedules, test_data, binding, api_ids, report."},
                 "assumptions": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 160}}},
-                "required": ["kind", "summary", "api_ids", "target_env"], "additionalProperties": False},
+                "required": ["kind", "summary", "api_ids", "target_envs"], "additionalProperties": False},
         },
         {
             "name": "apply_job",
@@ -158,9 +171,9 @@ def build_tools(
         },
         {
             "name": PREVIEW_TOOL,
-            "description": ("Show the approval card for a job staged or listed earlier; the card fills in APIs, target, "
-                            "schedule, assumptions, and highlights low-confidence slots. A stage call shows this card itself; "
-                            "do not call it for a job staged this turn." if config.stage_shows_preview else
+            "description": ("Show the approval card for a job staged or listed earlier; the card fills in APIs, targets, "
+                            "schedules, test data, the matrix totals, assumptions, and highlights low-confidence slots. A "
+                            "stage call shows this card itself; do not call it for a job staged this turn." if config.stage_shows_preview else
                             "Show the approval card for one staged job. Show every staged job with it before anything is applied."),
             "input_schema": {"type": "object", "properties": {
                 "job_id": _job_id(),
