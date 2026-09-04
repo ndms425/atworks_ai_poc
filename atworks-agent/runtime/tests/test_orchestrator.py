@@ -12,7 +12,7 @@ from commerce_common.testing import (
     tool_use_message,
 )
 
-from atworks_agent.gates import STAGING_FOLLOWTHROUGH_REMINDER
+from atworks_agent.gates import FIGURES_IN_PROSE_REMINDER, STAGING_FOLLOWTHROUGH_REMINDER
 from atworks_agent.types import AttachedItem
 from atworks_agent_runtime import AtworksAgent
 
@@ -86,6 +86,28 @@ async def test_tools_do_not_carry_eager_input_streaming(make_agent, session, sta
     agent = make_agent([text_message("ok")])
     await run_turn(agent, "안녕", session, state)
     assert all("eager_input_streaming" not in json.dumps(t) for t in agent.client.calls[0]["tools"])
+
+
+async def test_prose_restating_figures_is_reminded_once(make_agent, session, state):
+    agent = make_agent([
+        text_message("| 기간 | 실패율 |\n|---|---|\n| 이번 주 | 100% |"),
+        text_message("환불 API는 규칙 위반으로 실패했습니다."),
+    ])
+    _, messages = await run_turn(agent, "고마워", session, state)
+    reminders = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), list)
+                 and m["content"][0].get("text") == FIGURES_IN_PROSE_REMINDER]
+    assert len(reminders) == 1 and len(agent.client.calls) == 2
+
+
+async def test_prose_without_figures_is_not_reminded(make_agent, session, state):
+    agent = make_agent([text_message("run-0012는 pass였습니다.")])
+    _, messages = await run_turn(agent, "고마워", session, state)
+    assert len(agent.client.calls) == 1
+    assert not any(
+        m.get("role") == "user" and isinstance(m.get("content"), list)
+        and m["content"][0].get("text") == FIGURES_IN_PROSE_REMINDER
+        for m in messages
+    )
 
 
 async def test_attached_items_reach_the_system_prompt(make_agent, session, state):

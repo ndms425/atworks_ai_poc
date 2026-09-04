@@ -10,7 +10,7 @@ from typing import Any
 
 from commerce_common.execution import BaseToolExecutor, Handler, clamp_limit, parse_argument
 from commerce_common.memory import MemoryRuntime
-from commerce_common.presentation import PresentationExtension
+from commerce_common.presentation import PresentationComponent, PresentationExtension
 from commerce_common.skills import SkillRegistry
 from commerce_common.streaming import AgentEvent, ToolOutcome
 
@@ -20,6 +20,7 @@ from .enrichment import PRESENTATION_COMPONENTS
 from .fencing import ATWORKS_FENCE
 from .gates import (
     GUARDRAIL_GATE,
+    QUESTION_FORM_GATE,
     STAGED_AND_SHOWN_NOTE,
     STAGED_NOTE,
     applied_confirmation,
@@ -41,7 +42,7 @@ from .jobs import (
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .scoring import UnknownScorer, rank_runs
 from .serialization import api_record, job_record, rank_record, run_record
-from .tools.presentation import PREVIEW_TOOL
+from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL
 from .types import (
     ActorKind,
     AtworksSessionContext,
@@ -128,6 +129,10 @@ class AtworksToolExecutor(BaseToolExecutor):
         super().__init__(backend=backend, config=config, skills=skills, session=session, state=state,
                          memory=memory or build_memory(config, None), extensions=extensions, delegates=(),
                          progress=progress, usage=usage)
+        # Per-turn guards: the executor is built fresh in every stream_turn call, so this
+        # instance state never survives past the turn it was built for.
+        self._asked_form = False
+        self._previewed_jobs: set[str] = set()
 
     @property
     def memory_subject(self) -> str:
@@ -154,6 +159,29 @@ class AtworksToolExecutor(BaseToolExecutor):
                 "2026-08-27T00:00:00+09:00; adjust and call again."
             )
         return None
+
+    async def _present(self, spec: PresentationComponent, tool_input: dict[str, Any]) -> ToolOutcome:
+        # A job already shown this turn is not re-rendered: the card is already on
+        # screen, and the round stays "clean" (no note appended) so the turn can still
+        # close on it.
+        if spec.name == PREVIEW_TOOL and str(tool_input.get("job_id", "")) in self._previewed_jobs:
+            return ToolOutcome(self.displayed_text)
+        outcome = await super()._present(spec, tool_input)
+        if not outcome.refused:
+            if spec.name == QUESTION_TOOL:
+                self._asked_form = True
+            if spec.name == PREVIEW_TOOL:
+                self._previewed_jobs.add(str(tool_input.get("job_id", "")))
+        return outcome
+
+    async def dispatch(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
+        if name in ("stage_job", "apply_job") and self._asked_form:
+            return ToolOutcome.held(
+                QUESTION_FORM_GATE,
+                "A question form is open this turn. End the turn with present_suggestions "
+                "and wait for the operator's answers; stage or apply in the next turn.",
+            )
+        return await super().dispatch(name, tool_input)
 
     def handlers(self) -> dict[str, Handler]:
         return {
@@ -257,6 +285,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             if not preview.refused:
                 events += preview.events
                 note = STAGED_AND_SHOWN_NOTE
+                self._previewed_jobs.add(job.job_id)
         return self._fenced({"staged": job_record(job), "note": note}, events)
 
     async def _stage_job(self, tool_input: dict[str, Any]) -> ToolOutcome:

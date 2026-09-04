@@ -3,11 +3,13 @@ from datetime import UTC, datetime
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.gates import (
     APPROVAL_GATE,
+    FIGURES_IN_PROSE_REMINDER,
     PROVENANCE_GATE,
     STAGING_FOLLOWTHROUGH_REMINDER,
     check_api_provenance,
     check_apply_job,
     check_discard_job,
+    prose_restates_figures,
     turn_attempted_staging,
 )
 from atworks_agent.types import ApiSpec, AtworksSessionState, JobKind, JobSpec
@@ -72,3 +74,22 @@ def test_staging_followthrough_reminder_names_the_list_valued_slots():
     assert "target_envs" in STAGING_FOLLOWTHROUGH_REMINDER
     assert "target_env," not in STAGING_FOLLOWTHROUGH_REMINDER
     assert "target_env " not in STAGING_FOLLOWTHROUGH_REMINDER
+
+
+def test_figures_in_prose_reminder_does_not_ask_to_restate_reasoning():
+    assert "Do not mention this check" in FIGURES_IN_PROSE_REMINDER
+    assert "present_suggestions" in FIGURES_IN_PROSE_REMINDER
+
+
+def test_prose_restates_figures_positives():
+    assert prose_restates_figures("| 기간 | 실패율 |\n|---|---|\n| 이번 주 | 100% |")
+    assert prose_restates_figures("이번 주 성공률은 100% 입니다.")
+    assert prose_restates_figures("실패 3건이 있었습니다.")
+    assert prose_restates_figures("fail rate 50% this week.")
+
+
+def test_prose_restates_figures_negatives():
+    assert not prose_restates_figures("run-0012 상세를 보시려면 클릭하세요.")
+    assert not prose_restates_figures("2026-09-03 09:00 실행 예정입니다.")
+    assert not prose_restates_figures("HTTP 503 error가 발생했습니다.")
+    assert not prose_restates_figures("api-003 스펙을 확인하세요.")

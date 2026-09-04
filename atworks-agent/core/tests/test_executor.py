@@ -311,3 +311,40 @@ async def test_stage_job_names_a_non_dict_confidence_shape(backend, config, skil
     assert out.is_error
     assert "confidence" in out.result_text
     assert "unavailable" not in out.result_text
+
+
+async def test_open_question_form_blocks_staging_this_turn(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    form = await ex.execute("present_question_form", {
+        "id": "target-env", "title": "대상 환경",
+        "questions": [{"id": "target_envs", "label": "대상 환경", "type": "radio", "why": "target_envs가 없음",
+                       "default": "dev", "options": ["dev", "stg"]}],
+    })
+    assert not form.refused
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"]})
+    assert out.blocked == "question_form"
+
+    fresh = _exec(backend, config, skills, session, state)
+    await fresh.execute("search_apis", {"query": ""})
+    fresh_out = await fresh.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"]})
+    assert not fresh_out.refused
+
+
+async def test_preview_job_once_per_turn_then_a_different_job_still_renders(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    staged = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"]})
+    assert not staged.refused
+    kinds = [(e.type, e.data.get("component")) for e in staged.events]
+    assert kinds == [("change_update", None), ("ui", "job_preview")]
+
+    repeat = await ex.execute("present_job_preview", {"job_id": "job-0001"})
+    assert not repeat.refused
+    assert repeat.events == []
+    assert repeat.result_text == ex.displayed_text
+
+    other = await ex.execute("stage_job", {"kind": "run_now", "summary": "s2", "api_ids": ["api-1"], "target_envs": ["dev"]})
+    assert not other.refused
+    other_kinds = [(e.type, e.data.get("component")) for e in other.events]
+    assert other_kinds == [("change_update", None), ("ui", "job_preview")]

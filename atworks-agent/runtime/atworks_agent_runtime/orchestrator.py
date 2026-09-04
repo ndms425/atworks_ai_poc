@@ -66,7 +66,12 @@ from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.enrichment import PRESENTATION_COMPONENTS
 from atworks_agent.executor import AtworksToolExecutor, build_memory
-from atworks_agent.gates import STAGING_FOLLOWTHROUGH_REMINDER, turn_attempted_staging
+from atworks_agent.gates import (
+    FIGURES_IN_PROSE_REMINDER,
+    STAGING_FOLLOWTHROUGH_REMINDER,
+    prose_restates_figures,
+    turn_attempted_staging,
+)
 from atworks_agent.grounding import GROUNDING_RULES, job_requested
 from atworks_agent.prompt import build_dynamic_context, build_static_system
 from atworks_agent.tools.registry import build_tools
@@ -74,7 +79,7 @@ from atworks_agent.types import AttachedItem, AtworksSessionContext, AtworksSess
 
 logger = logging.getLogger(__name__)
 
-HOST_TEXTS = frozenset({STAGING_FOLLOWTHROUGH_REMINDER})
+HOST_TEXTS = frozenset({STAGING_FOLLOWTHROUGH_REMINDER, FIGURES_IN_PROSE_REMINDER})
 
 
 class AtworksAgent:
@@ -161,6 +166,7 @@ class AtworksAgent:
         user_text = latest_user_text(messages, HOST_TEXTS)
         forced_tool = first_forced_tool(GROUNDING_RULES, self.config, user_text, state)
         remind = job_requested(self.config, user_text)
+        figures_reminded = False
         stop_reason: str | None = None
         last_prompt = 0
 
@@ -254,6 +260,18 @@ class AtworksAgent:
                     if turn_attempted_staging(block.name for block in tool_uses):
                         remind = False
                     if not tool_uses or force_text:
+                        text = "".join(
+                            getattr(block, "text", "")
+                            for block in (final.content if final else [])
+                            if getattr(block, "type", "") == "text"
+                        )
+                        if not force_text and not figures_reminded and prose_restates_figures(text):
+                            figures_reminded = True
+                            messages.append({
+                                "role": "user",
+                                "content": [{"type": "text", "text": FIGURES_IN_PROSE_REMINDER}],
+                            })
+                            continue
                         if remind and not force_text:
                             remind = False
                             messages.append(reminder())
