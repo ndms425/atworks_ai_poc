@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 def build() -> tuple:
     load_dotenv(ROOT / ".env")
+    # Empty credentials break auth fallback: the SDK treats "" as a present key and sends it.
+    # Unset them so the SDK tries the next auth method.
+    for cred in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        if os.environ.get(cred) == "":
+            del os.environ[cred]
     if os.environ.get("ATWORKS_TRUST_OS_CA", "1") != "0":
         # The closed network's intercepting proxy presents a CA that the Windows/OS
         # certificate store trusts but Python's bundled certifi does not — every model

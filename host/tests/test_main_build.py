@@ -82,3 +82,44 @@ def test_build_respects_env_file_atworks_trust_os_ca_1(monkeypatch, tmp_path):
 
     # With ATWORKS_TRUST_OS_CA=1 in .env, inject_into_ssl MUST be called
     assert calls == [1], f"Expected one truststore.inject_into_ssl() call with ATWORKS_TRUST_OS_CA=1, but got {calls}"
+
+
+def test_build_deletes_empty_credential_env_vars(monkeypatch, tmp_path):
+    """Proves empty credential variables are deleted after load_dotenv so the SDK
+    falls back to the other auth method (e.g., empty ANTHROPIC_API_KEY doesn't block
+    ANTHROPIC_AUTH_TOKEN Bearer auth). R38: empty credentials break auth fallback."""
+    import os
+
+    # Set empty API key and valid Bearer token in OS environment (before .env load)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok_valid_bearer")
+
+    # Create empty .env so load_dotenv has nothing to add
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    # Import atworks_host.main
+    import atworks_host.main as main
+
+    # Point main.ROOT to tmp_path so load_dotenv finds our (empty) .env
+    monkeypatch.setattr("atworks_host.main.ROOT", tmp_path)
+
+    # Set ATWORKS_TRUST_OS_CA=0 to skip truststore injection
+    monkeypatch.setenv("ATWORKS_TRUST_OS_CA", "0")
+
+    # Mock out the dependencies that try to access the filesystem
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: None)
+    monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
+    monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
+    monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
+
+    # Call build() - should delete empty ANTHROPIC_API_KEY
+    app, backend, scheduler = main.build()
+
+    # After build(), empty ANTHROPIC_API_KEY must be gone (so SDK falls back to Bearer)
+    assert "ANTHROPIC_API_KEY" not in os.environ, \
+        f"Empty ANTHROPIC_API_KEY should be deleted, but found: {os.environ.get('ANTHROPIC_API_KEY')!r}"
+
+    # ANTHROPIC_AUTH_TOKEN (Bearer) must still be set
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "tok_valid_bearer", \
+        f"ANTHROPIC_AUTH_TOKEN should still be set, but got: {os.environ.get('ANTHROPIC_AUTH_TOKEN')!r}"
