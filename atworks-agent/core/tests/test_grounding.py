@@ -56,4 +56,4 @@ def test_plain_failure_question_still_starts_with_list_runs():
 
 def test_aggregate_gate_can_be_switched_off():
     cfg = AtworksAgentConfig(model="m", aggregate_grounding_gate=False)
-    assert first_forced_tool(GROUNDING_RULES, cfg, "실패 원인별로 묶어줘", AtworksSessionState()) == "list_runs"
+    assert first_forced_tool(GROUNDING_RULES, cfg, "실패 원인별로 묶어서 보여줘", AtworksSessionState()) == "list_runs"

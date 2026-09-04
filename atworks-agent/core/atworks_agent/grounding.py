@@ -47,16 +47,9 @@ def _aggregate(config: AtworksAgentConfig, text: str, _: AtworksSessionState) ->
 
 
 def _runs(config: AtworksAgentConfig, text: str, _: AtworksSessionState) -> dict[str, Any] | None:
-    # If aggregate grounding is disabled, also accept aggregate terms without cues as run questions
-    if config.aggregate_grounding_gate:
-        fires = config.runs_grounding_gate and matches_terms_and_cues_ko(
-            text, config.runs_intent_terms, config.runs_intent_cues
-        )
-    else:
-        fires = config.runs_grounding_gate and (
-            matches_terms_and_cues_ko(text, config.runs_intent_terms, config.runs_intent_cues)
-            or matches_any_ko(text, config.aggregate_intent_terms)
-        )
+    fires = config.runs_grounding_gate and matches_terms_and_cues_ko(
+        text, config.runs_intent_terms, config.runs_intent_cues
+    )
     return {} if fires else None
 
 
