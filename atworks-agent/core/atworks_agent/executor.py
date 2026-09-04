@@ -43,6 +43,9 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
                                extraction_prompt=ATWORKS_MEMORY_EXTRACTION_PROMPT, write_filter=write_filter)
 
 
+RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
+
+
 class InvalidToolArgument(ValueError):
     """A tool argument failed a manual (non-pydantic) check; ``domain_error`` reports it
     by field name instead of the generic unavailable ladder."""
@@ -113,6 +116,8 @@ class AtworksToolExecutor(BaseToolExecutor):
         if isinstance(error, InvalidToolArgument):
             if error.kind == "integer":
                 return ToolOutcome.error(f"{error.field} must be an integer; adjust and call again.")
+            if error.kind == "status":
+                return ToolOutcome.error(f"{error.field} must be one of pass, fail, error, non_pass; adjust and call again.")
             return ToolOutcome.error(
                 f"{error.field} must be an ISO 8601 datetime with offset, e.g. "
                 "2026-08-27T00:00:00+09:00; adjust and call again."
@@ -155,6 +160,8 @@ class AtworksToolExecutor(BaseToolExecutor):
         filters = tool_input.get("filters") or {}
         since = _iso(filters.get("since"), "since")
         status = filters.get("status") or None
+        if status is not None and status not in RUN_STATUS_FILTERS:
+            raise InvalidToolArgument("filters.status", kind="status")
         runs = await self._backend.list_runs(
             self._session, since=since, status=status, api_id=filters.get("api_id") or None,
             limit=_limit(tool_input.get("limit"), 50, 200),

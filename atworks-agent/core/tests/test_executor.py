@@ -35,6 +35,14 @@ async def test_list_runs_status_narration_is_stripped_not_filter(backend, config
     assert not out.refused and state.last_population == 1
 
 
+async def test_list_runs_rejects_unknown_status_filter(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "list_runs", {"filters": {"status": "<b>everything</b>"}}
+    )
+    assert out.is_error and "filters.status" in out.result_text and "unavailable" not in out.result_text
+    assert state.last_listed_filter == "all" and state.last_population is None
+
+
 async def test_rank_needs_runs_first_then_ranks(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     out = await ex.execute("rank_failed_runs", {"scorer": "risk_v1"})
