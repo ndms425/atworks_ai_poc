@@ -12,6 +12,8 @@ test-data set. Approval covers the whole matrix.
 ## Resolve the selection
 - Turn the operator's words into a `search_apis` call: "지난 1주일 업데이트" → `updated_after` seven days before now; "오늘 업데이트한" → `updated_after` today 00:00; a group name → `group`; otherwise `query`. Keep the call's arguments as `select_where`.
 - The ids in the result are the only ids the job may carry. If the result is empty, say so and stop.
+- "실패한 것만 다시 돌려 / 어제 실패한 API 재실행" → `select_where.failed_since` (the operator's window; 24 hours ago when none). Send the api_ids you know, but the host resolves the real list and shows its basis on the card.
+- "X 고쳤는데 뭘 다시 돌려야 해 / X 관련 전부" → `search_apis` for X, then `select_where.related_to: <that api_id>`. The host picks the same group and the same leading path; the card's "선택 근거" row says so. Do not hand-pick related APIs yourself.
 
 ## Environments — a list
 - "어느 계에서" is a slot with a list value. '개발' → `dev`; '이관' → `stg`; '양쪽 / 두 계 / 비교 / 동일하게' → `[dev, stg]`.

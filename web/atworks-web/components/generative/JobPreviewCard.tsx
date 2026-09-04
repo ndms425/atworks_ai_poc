@@ -14,6 +14,7 @@ const SLOT_LABEL: Record<string, string> = {
   test_data: "테스트 데이터",
   binding: "선택 고정",
   api_ids: "대상 API",
+  selection_basis: "선택 근거",
   runs_total: "총 실행",
   report: "리포트",
 };
@@ -46,6 +47,7 @@ export default function JobPreviewCard({ payload, onAct }: { payload: JobPreview
       </ul>,
     ],
     ["api_ids", `${job.api_ids.length}개 (${payload.apis.slice(0, 3).map((a) => a.path).join(", ")}${payload.apis.length > 3 ? " …" : ""})`],
+    ...(job.selection_basis ? ([["selection_basis", job.selection_basis]] as Array<[string, ReactNode]>) : []),
     ["binding", job.binding === "FROZEN" ? "오늘 고른 목록 고정" : "실행 때마다 재선택"],
     [
       "schedules",

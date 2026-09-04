@@ -38,6 +38,7 @@ function JobRow({ job, onAct }: { job: JobSpec; onAct: (id: string, action: Chan
         <ChangeStatusPill status={change.status} />
       </div>
       <GuardrailNotes notes={change.guardrail_notes} />
+      {change.selection_basis ? <div className="mt-0.5 text-[12px] text-(--ink-soft)">선택 근거: {change.selection_basis}</div> : null}
       {change.status === "applied" && change.run_ids?.length ? (
         <a className="mt-1.5 inline-block text-[12.5px] underline" href={reportUrl(change.job_id)} target="_blank" rel="noreferrer">
           리포트 열기

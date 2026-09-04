@@ -66,6 +66,7 @@ export interface JobSpec {
   confidence?: Record<string, number>;
   assumptions?: string[];
   guardrail_notes?: string[];
+  selection_basis?: string | null;
   created_at: string;
   created_by: string;
   created_by_kind: "operator" | "agent";
