@@ -175,7 +175,7 @@ class AtworksToolExecutor(BaseToolExecutor):
         return outcome
 
     async def dispatch(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
-        if name in ("stage_job", "apply_job") and self._asked_form:
+        if name in ("stage_job", "apply_job") and self._asked_form and name not in self._absent:
             return ToolOutcome.held(
                 QUESTION_FORM_GATE,
                 "A question form is open this turn. End the turn with present_suggestions "

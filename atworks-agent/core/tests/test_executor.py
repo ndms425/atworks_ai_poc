@@ -348,3 +348,18 @@ async def test_preview_job_once_per_turn_then_a_different_job_still_renders(back
     assert not other.refused
     other_kinds = [(e.type, e.data.get("component")) for e in other.events]
     assert other_kinds == [("change_update", None), ("ui", "job_preview")]
+
+
+async def test_absent_tools_are_reported_as_absent_even_when_question_form_is_open(backend, config, skills, session, state):
+    no_jobs_config = config.model_copy(update={"enable_jobs": False})
+    ex = _exec(backend, no_jobs_config, skills, session, state)
+    form = await ex.execute("present_question_form", {
+        "id": "target-env", "title": "대상 환경",
+        "questions": [{"id": "target_envs", "label": "대상 환경", "type": "radio", "why": "target_envs가 없음",
+                       "default": "dev", "options": ["dev", "stg"]}],
+    })
+    assert not form.refused
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"]})
+    assert out.is_error
+    assert "not something this deployment does" in out.result_text
+    assert out.blocked is None
