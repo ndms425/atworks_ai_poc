@@ -5,6 +5,7 @@
 
 import { Button, Notice, PageHeader, Panel, plural, Skeleton, StatStrip, StatTile, useResource } from "web-shared";
 import { fetchInsights, fetchJobs, fetchRuns } from "@/lib/api";
+import BriefingCard from "@/components/BriefingCard";
 
 interface HomeCounts {
   fail: number;
@@ -30,6 +31,8 @@ export default function HomeView({ refreshKey, onAskAssistant }: { refreshKey: n
   return (
     <div className="ac-reveal flex flex-col gap-5">
       <PageHeader title="Home" subtitle="오늘 봐야 할 것" />
+
+      <BriefingCard refreshKey={refreshKey} onAskAssistant={onAskAssistant} />
 
       {failed && !data ? (
         <Notice>

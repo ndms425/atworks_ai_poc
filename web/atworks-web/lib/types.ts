@@ -198,3 +198,13 @@ export interface RunGroupsPayload {
   shown: number;
   items: RunGroup[];
 }
+
+export interface Briefing {
+  date: string;
+  generated_at: string;
+  window: { from: string; to: string };
+  counts: { total: number; pass: number; fail: number; error: number };
+  top_groups: RunGroup[];
+  insights: { flaky: number; regression_suspect: number };
+  jobs: { executed: { job_id: string; summary: string; runs: number }[]; pending: { job_id: string; summary: string; created_at: string }[]; stale_pending: number };
+}
