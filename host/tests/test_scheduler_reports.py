@@ -2,13 +2,18 @@ import json
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
+    AtworksBackend,
     AtworksSessionContext,
     JobDraft,
     JobKind,
     JobSchedule,
+    JobSpec,
+    JobStatus,
     RunResult,
     RunStatus,
 )
@@ -126,3 +131,103 @@ async def test_report_failure_does_not_consume_a_second_slot(tmp_path):
     assert len(after.run_ids) == 1                        # the run was produced
     assert any(n.startswith("report failed") for n in after.guardrail_notes)
     assert not any(n.startswith("execution failed") for n in after.guardrail_notes)
+
+
+def test_read_html_rejects_an_unsafe_id(tmp_path):
+    reports = Reports(tmp_path)
+    with pytest.raises(ValueError):
+        reports.read_html("..\\x")
+
+
+def test_all_runs_rejects_an_unsafe_id(tmp_path):
+    reports = Reports(tmp_path)
+    with pytest.raises(ValueError):
+        reports.all_runs("../secret")
+
+
+class RecordingBackend(AtworksBackend):
+    """A minimal AtworksBackend the scheduler must be able to run against without ever
+    reaching for a `ledger` or `runs` attribute (R44/I3) — the seam a REST backend
+    would implement."""
+
+    def __init__(self, job: JobSpec, run: RunResult):
+        self.job = job
+        self.run = run
+        self.calls: list[str] = []
+
+    async def search_apis(self, session, query="", updated_after=None, group=None, limit=20):
+        raise NotImplementedError
+
+    async def get_api(self, session, api_id):
+        raise NotImplementedError
+
+    async def list_runs(self, session, since=None, status=None, api_id=None, limit=50):
+        raise NotImplementedError
+
+    async def get_run(self, session, run_id):
+        raise NotImplementedError
+
+    async def count_runs(self, session, since, status):
+        raise NotImplementedError
+
+    async def stage_job(self, session, draft, actor_kind):
+        raise NotImplementedError
+
+    async def get_pending_jobs(self, session):
+        raise NotImplementedError
+
+    async def apply_job(self, session, job_id):
+        raise NotImplementedError
+
+    async def discard_job(self, session, job_id, actor_kind):
+        raise NotImplementedError
+
+    async def execute_job_once(self, session, job_id):
+        self.calls.append("execute_job_once")
+        self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "runs_remaining": 0})
+        return [self.run]
+
+    async def get_job(self, session, job_id):
+        self.calls.append("get_job")
+        return self.job
+
+    async def applied_jobs(self, session):
+        self.calls.append("applied_jobs")
+        return [self.job]
+
+    async def all_jobs(self, session):
+        self.calls.append("all_jobs")
+        return [self.job]
+
+    async def runs_by_ids(self, session, run_ids):
+        self.calls.append("runs_by_ids")
+        return [self.run] if run_ids else []
+
+    async def record_execution(self, session, job_id, run_ids):
+        self.calls.append("record_execution")
+        return self.job
+
+    async def add_guardrail_note(self, session, job_id, note):
+        self.calls.append("add_guardrail_note")
+        return self.job
+
+
+async def test_scheduler_uses_only_the_backend_abc(tmp_path):
+    now = datetime.now(UTC)
+    job = JobSpec(job_id="job-01", kind=JobKind.RUN_NOW, status=JobStatus.APPLIED, summary="s",
+                 api_ids=["api-1"], target_env="dev", report=True, created_at=now, created_by="op",
+                 runs_remaining=1)
+    run = RunResult(run_id="run-x", api_id="api-1", executed_at=now, target_env="dev",
+                    status=RunStatus.PASS, job_id="job-01")
+    backend = RecordingBackend(job, run)
+    assert not hasattr(backend, "ledger")
+    assert not hasattr(backend, "runs")
+
+    sched = Scheduler(backend, Reports(tmp_path), SESSION)
+    executed = await sched.tick(now)
+
+    assert executed == ["job-01"]
+    assert "execute_job_once" in backend.calls
+    assert "applied_jobs" in backend.calls
+    assert not hasattr(backend, "ledger")
+    assert not hasattr(backend, "runs")

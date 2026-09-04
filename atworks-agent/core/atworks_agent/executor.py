@@ -35,7 +35,14 @@ from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .scoring import UnknownScorer, rank_runs
 from .serialization import api_record, job_record, rank_record, run_record
 from .tools.presentation import PREVIEW_TOOL
-from .types import ActorKind, AtworksSessionContext, AtworksSessionState, JobSpec
+from .types import (
+    ActorKind,
+    AtworksSessionContext,
+    AtworksSessionState,
+    JobSpec,
+    RunResult,
+    RunStatus,
+)
 
 
 def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = None) -> MemoryRuntime:
@@ -44,6 +51,17 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
 
 
 RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
+
+
+def _matches_filter(run: RunResult, filt: str) -> bool:
+    """Whether ``run`` belongs to the population the last ``list_runs`` (or a fresh/attached
+    window) is counting — the same rule ``list_runs``' backend filter applies, so ``get_run``
+    never grows a filtered population with a run the filter would have excluded (R32/I1)."""
+    return (
+        filt in ("all", "attached")
+        or (filt == "non_pass" and run.status is not RunStatus.PASS)
+        or run.status.value == filt
+    )
 
 
 class InvalidToolArgument(ValueError):
@@ -183,7 +201,11 @@ class AtworksToolExecutor(BaseToolExecutor):
         # list_runs population behind it yet; seed one so present_run_digest can still
         # say "N of M" instead of refusing. A population already drawn from a real
         # filter (last_listed_filter != "attached") is left alone except to grow by one
-        # when this run was not already in that window.
+        # when this run was not already in that window — and only when the run actually
+        # belongs to that filter's population (R32/I1): a pass run fetched while the last
+        # list_runs was "non_pass" must not inflate a non-pass count.
+        if not _matches_filter(run, self._state.last_listed_filter):
+            return self._fenced(run_record(run))
         window = self._state.last_listed_run_ids
         appended = run.run_id not in window
         if appended:
@@ -233,7 +255,12 @@ class AtworksToolExecutor(BaseToolExecutor):
             select_where = parse_argument(SelectWhere, select_where).model_dump(mode="json", exclude_none=True)
         draft = parse_argument(JobDraft, {
             "kind": tool_input.get("kind"), "summary": self._sanitize(tool_input.get("summary"), 200),
-            "api_ids": api_ids, "target_env": str(tool_input.get("target_env", "")),
+            "api_ids": api_ids,
+            # Not truncated here: JobDraft.target_env caps at 32 chars, and an oversized
+            # value should surface as a clear invalid-arguments error naming the field
+            # rather than being silently mangled and then possibly rejected later by the
+            # guardrail check with a truncated value in the message (R47/Minor 4).
+            "target_env": self._sanitize(tool_input.get("target_env"), None),
             "schedule": tool_input.get("schedule"), "select_where": select_where,
             "binding": tool_input.get("binding") or "FROZEN", "report": tool_input.get("report", True),
             "confidence": tool_input.get("confidence") or {},

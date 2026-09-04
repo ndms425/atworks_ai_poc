@@ -78,6 +78,16 @@ async def test_stage_job_holds_unknown_api_then_stages_with_preview(backend, con
     assert "Staged, and shown" in out.result_text and job_id == "job-0001"
 
 
+async def test_stage_job_rejects_an_oversized_target_env(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"],
+                                          "target_env": "x" * 200})
+    assert out.is_error
+    assert "target_env" in out.result_text
+    assert "unavailable" not in out.result_text
+
+
 async def test_stage_job_guardrail_prod(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})
@@ -185,6 +195,18 @@ async def test_get_run_on_fresh_state_seeds_attached_population(backend, config,
     payload = digest.events[0].data["payload"]
     assert payload["population"] == 1
     assert payload["population_filter"] == "attached"
+
+
+async def test_get_run_of_a_pass_run_does_not_grow_a_non_pass_population(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("list_runs", {"filters": {"status": "non_pass"}})
+    assert state.last_population == 2
+
+    out = await ex.execute("get_run", {"run_id": "run-3"})  # run-3 is a PASS run
+    assert not out.refused
+    assert state.last_population == 2
+    assert "run-3" not in state.last_listed_run_ids
+    assert "run-3" in state.seen_runs
 
 
 async def test_stage_job_accepts_select_where_group_only(backend, config, skills, session, state):

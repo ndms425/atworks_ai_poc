@@ -40,4 +40,5 @@ python scripts/smoke_chat.py           # host가 떠 있는 상태에서 — 발
 2. Runs 뷰에서 실패 행을 "채팅에 첨부" → "이거 왜 실패했어" → 답변이 첨부한 그 run만 다룬다.
 3. "지난 1주일 업데이트된 api 오늘부터 3일간 매일 9시에 실행해줘" → `question_form` 또는
    `job_preview`(대상 건에 ● 표시) → Jobs 뷰에서 승인 →
-   `POST /api/atworks/scheduler/tick?now=<from_date>T09:00:00+09:00` → 리포트 링크가 열린다.
+   `POST /api/atworks/scheduler/tick?now=<from_date>T09:00:00%2B09:00`
+   (`+` must be URL-encoded as `%2B`) → 리포트 링크가 열린다.

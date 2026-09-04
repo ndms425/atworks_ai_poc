@@ -53,10 +53,46 @@ class AtworksBackend(ABC):
     @abstractmethod
     async def discard_job(self, session: AtworksSessionContext, job_id: str, actor_kind: ActorKind) -> JobSpec: ...
 
+    @abstractmethod
+    async def get_job(self, session: AtworksSessionContext, job_id: str) -> JobSpec | None:
+        """id로 job 1건 조회. 상태(staged/applied/discarded) 무관 — 감사 이력 포함."""
+
+    @abstractmethod
+    async def applied_jobs(self, session: AtworksSessionContext) -> list[JobSpec]:
+        """승인(applied) 상태인 job 전체. 스케줄러가 매 tick마다 순회하는 대상."""
+
+    @abstractmethod
+    async def all_jobs(self, session: AtworksSessionContext) -> list[JobSpec]:
+        """pending + applied job (Jobs 페이지가 보여주는 전체). discarded는 빠진다."""
+
+    @abstractmethod
+    async def runs_by_ids(self, session: AtworksSessionContext, run_ids: list[str]) -> list[RunResult]:
+        """id 목록으로 실행 이력 조회(순서 무관, 없는 id는 건너뛴다). 리포트가 job.run_ids로 실행
+        레코드를 모을 때 쓴다."""
+
+    @abstractmethod
+    async def record_execution(
+        self, session: AtworksSessionContext, job_id: str, run_ids: list[str]
+    ) -> JobSpec:
+        """job의 실행 1회를 기록한다: run_ids가 이번 실행이 낸 결과(비어 있을 수 있다 — 실행이
+        실패했거나 LATE 재평가가 상한을 넘겨 건너뛴 경우), runs_remaining을 정확히 1 줄인다."""
+
+    @abstractmethod
+    async def add_guardrail_note(self, session: AtworksSessionContext, job_id: str, note: str) -> JobSpec:
+        """job의 guardrail_notes에 note 한 줄을 남긴다. 스케줄러가 실행/리포트 실패를 기록할 때 쓴다."""
+
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod
     async def execute_job_once(self, session: AtworksSessionContext, job_id: str) -> list[RunResult]:
-        """job의 api_ids(또는 LATE면 select_where 재평가)를 target_env에 1회 실행하고 결과를 돌려준다."""
+        """job의 api_ids(또는 LATE면 select_where 재평가)를 target_env에 1회 실행하고 결과를 돌려준다.
+
+        계약: 이 호출 하나가 정확히 한 번의 실행이다. 구현은 결과와 무관하게(빈 리스트를 내더라도)
+        ``record_execution``을 정확히 한 번 호출해 job의 남은 실행 횟수를 소비해야 한다 — 그러지
+        않으면 스케줄러의 ``due_at(index)``가 앞으로 나아가지 않고 같은 job이 매 tick마다 실제
+        target_env를 향해 다시 실행된다(R29가 막으려던 바로 그 루프). 예외로 남는 경우는 딱 하나,
+        ``runs_remaining``이 이미 0이어서 애초에 소비할 슬롯이 없을 때뿐이다 — 그때는 아무 것도
+        기록하지 않고 빈 리스트를 돌려준다. apply 이후 guardrail이 다시 걸린 실행 시도는 빈 결과와
+        함께 ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다."""
 
     # -- 선택 --------------------------------------------------------------------------
     async def get_context(self, session: AtworksSessionContext) -> dict[str, Any] | None:

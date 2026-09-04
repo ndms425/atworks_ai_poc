@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from commerce_common.streaming import ToolOutcome
 from commerce_common.testing import FakeClient, text_message
 from httpx import ASGITransport, AsyncClient
 
@@ -8,6 +9,7 @@ from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
     AtworksSessionContext,
+    AtworksToolExecutor,
     JobDraft,
     JobKind,
 )
@@ -129,3 +131,102 @@ async def test_memory_route_returns_empty_facts(client):
     r = await client.get("/api/atworks/memory", headers={"X-Session-Id": sid})
     assert r.status_code == 200
     assert r.json() == {"facts": []}
+
+
+async def test_report_route_rejects_backslash_traversal(client):
+    reports = client.reports
+    secret_dir = reports.out_dir.parent / "secret-atworks-test"
+    secret_dir.mkdir(parents=True, exist_ok=True)
+    (secret_dir / "index.html").write_text("TOP SECRET", encoding="utf-8")
+    try:
+        r = await client.get(f"/api/atworks/reports/..%5C{secret_dir.name}")
+        assert r.status_code == 404
+        assert "TOP SECRET" not in r.text
+    finally:
+        (secret_dir / "index.html").unlink()
+        secret_dir.rmdir()
+
+
+async def test_report_route_dotdot_forward_slash_is_not_200(client):
+    r = await client.get("/api/atworks/reports/../secret")
+    assert r.status_code != 200
+    assert "TOP SECRET" not in r.text
+
+
+async def test_scheduler_tick_accepts_offset_via_params(client):
+    r = await client.post("/api/atworks/scheduler/tick", params={"now": "2026-09-05T09:00:00+09:00"})
+    assert r.status_code == 200
+
+
+async def test_scheduler_tick_accepts_offset_sent_as_a_raw_plus(client):
+    r = await client.post("/api/atworks/scheduler/tick?now=2026-09-05T09:00:00+09:00")
+    assert r.status_code == 200
+
+
+async def test_scheduler_tick_accepts_percent_encoded_offset(client):
+    r = await client.post("/api/atworks/scheduler/tick?now=2026-09-05T09:00:00%2B09:00")
+    assert r.status_code == 200
+
+
+async def test_apply_click_consumes_the_mark(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+
+    r2 = await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers={"X-Session-Id": sid})
+    if r2.status_code == 200:
+        assert r2.json()["ok"] is False and "not staged" in r2.json()["reason"]
+    else:
+        assert r2.status_code == 400 and "not staged" in r2.json()["detail"]
+
+
+async def test_route_discard_records_operator(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/changes/{job.job_id}/discard", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["change"]["discarded_by_kind"] == "operator"
+
+
+CUSTOM_EXECUTOR_MARKER = "held-by-a-deployments-own-executor-subclass"
+
+
+class _TaggingExecutor(AtworksToolExecutor):
+    async def _discard_job(self, tool_input):
+        return ToolOutcome.held("guardrail", CUSTOM_EXECUTOR_MARKER)
+
+
+@pytest.fixture
+async def client_with_custom_executor(tmp_path):
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config,
+                         client=FakeClient([text_message("ok")]), executor_class=_TaggingExecutor)
+    reports = Reports(tmp_path)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None), reports=reports)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        yield c, backend
+
+
+async def test_job_action_route_uses_the_agents_executor_class(client_with_custom_executor):
+    client, backend = client_with_custom_executor
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_env="dev"), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/changes/{job.job_id}/discard", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is False
+    assert body["reason"] == CUSTOM_EXECUTOR_MARKER

@@ -25,7 +25,7 @@ class AtworksAgentConfig(BaseAgentConfig):
     enable_scheduling: bool = True       # JobSchedule 허용 여부
 
     # -- guardrail (stage·apply 2회 검사) ---------------------------------------------
-    max_apis_per_job: int = Field(default=200, ge=1)
+    max_apis_per_job: int = Field(default=100, ge=1)
     allowed_target_envs: tuple[str, ...] = ("dev", "stg")
     max_schedule_count: int = Field(default=14, ge=1)
     max_concurrency: int = Field(default=4, ge=1, le=32)
@@ -53,7 +53,7 @@ class AtworksAgentConfig(BaseAgentConfig):
     job_intent_terms: tuple[str, ...] = (
         "실행", "돌려", "돌리", "수행", "스케줄", "매일", "run", "execute", "schedule", "daily",
     )
-    job_intent_cues: tuple[str, ...] = ("해줘", "해 줘", "줘", "해", "please", "now", "every")
+    job_intent_cues: tuple[str, ...] = ("해줘", "해 줘", "줘", "please", "now", "every")
     apply_intent_phrases: tuple[str, ...] = ("승인", "적용", "approve", "apply", "go ahead")
 
     @property

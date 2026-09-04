@@ -131,9 +131,9 @@ def stream_turn(
             logger.exception("chat turn failed: API authentication")
             yield to_sse(
                 AgentEvent.error(
-                    f"Anthropic API authentication failed (401). Check ANTHROPIC_API_KEY in "
-                    f"{env_hint}, unset any stale key exported by your shell, or restart with "
-                    "COMMERCE_DEMO_AUTH=sdk to use the SDK's own credential chain."
+                    f"Anthropic API authentication failed (401). Set ANTHROPIC_AUTH_TOKEN (or "
+                    f"ANTHROPIC_API_KEY) in {env_hint} and unset any stale key exported by your "
+                    "shell, then restart."
                 )
             )
         except Exception as error:  # the client gets a safe event, the log gets the rest
@@ -143,8 +143,8 @@ def stream_turn(
                 yield to_sse(
                     AgentEvent.error(
                         "No Anthropic API credentials are configured, so chat can't run. Set "
-                        f"ANTHROPIC_API_KEY in {env_hint} and restart; everything except chat "
-                        "works without one."
+                        f"ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in {env_hint} and restart; "
+                        "everything except chat works without one."
                     )
                 )
             else:

@@ -1,4 +1,5 @@
 import pytest
+from commerce_common.types import PROVENANCE_CAP
 
 from atworks_agent.config import AtworksAgentConfig
 
@@ -18,3 +19,9 @@ def test_absent_tools_follow_switches():
     cfg = AtworksAgentConfig(model="m", enable_jobs=False)
     assert {"stage_job", "apply_job", "discard_job", "get_pending_jobs"} <= cfg.absent_tools()
     assert AtworksAgentConfig(model="m").absent_tools() == frozenset()
+
+
+def test_max_apis_per_job_default_is_below_the_provenance_cap():
+    default = AtworksAgentConfig(model="m").max_apis_per_job
+    assert default == 100
+    assert default < PROVENANCE_CAP

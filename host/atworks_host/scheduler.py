@@ -7,9 +7,8 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from atworks_agent import AtworksSessionContext, JobKind, JobSpec, JobStatus
+from atworks_agent import AtworksBackend, AtworksSessionContext, JobKind, JobSpec, JobStatus
 
-from .mock_backend import MockAtworks
 from .reports import Reports
 
 logger = logging.getLogger(__name__)
@@ -28,7 +27,7 @@ def due_at(job: JobSpec, index: int) -> datetime | None:
 
 
 class Scheduler:
-    def __init__(self, backend: MockAtworks, reports: Reports, session: AtworksSessionContext | None):
+    def __init__(self, backend: AtworksBackend, reports: Reports, session: AtworksSessionContext | None):
         self.backend = backend
         self.reports = reports
         self.session = session or AtworksSessionContext(session_id="scheduler", project_id="default", operator="scheduler")
@@ -37,7 +36,7 @@ class Scheduler:
     async def tick(self, now: datetime) -> list[str]:
         async with self._lock:
             executed: list[str] = []
-            for job in list(self.backend.ledger.applied()):
+            for job in list(await self.backend.applied_jobs(self.session)):
                 if job.status is not JobStatus.APPLIED or (job.runs_remaining or 0) <= 0:
                     continue
                 index = (job.schedule.count if job.schedule else 1) - (job.runs_remaining or 0)
@@ -53,20 +52,20 @@ class Scheduler:
                 except Exception as error:
                     # Execution failure: record as such and move on.
                     logger.exception("job %s failed during scheduled execution", job.job_id)
-                    self.backend.ledger.add_guardrail_note(job.job_id, f"execution failed: {type(error).__name__}")
-                    self.backend.ledger.record_execution(job.job_id, [])
+                    await self.backend.add_guardrail_note(self.session, job.job_id, f"execution failed: {type(error).__name__}")
+                    await self.backend.record_execution(self.session, job.job_id, [])
                     continue
                 if not produced:
                     continue
                 if job.report:
                     try:
-                        all_ids = self.backend.ledger.get(job.job_id).run_ids
-                        every = [self.backend.runs[i] for i in all_ids if i in self.backend.runs]
-                        self.reports.write(self.backend.ledger.get(job.job_id), every)
+                        current = await self.backend.get_job(self.session, job.job_id)
+                        every = await self.backend.runs_by_ids(self.session, current.run_ids)
+                        self.reports.write(current, every)
                     except Exception as error:
                         # Report failure: log and note it, but do NOT record a second execution.
                         # The execution already happened.
                         logger.exception("job %s report failed", job.job_id)
-                        self.backend.ledger.add_guardrail_note(job.job_id, f"report failed: {type(error).__name__}")
+                        await self.backend.add_guardrail_note(self.session, job.job_id, f"report failed: {type(error).__name__}")
                 executed.append(job.job_id)
             return executed

@@ -20,7 +20,7 @@ def _risk_v1(run: RunResult, all_runs: Sequence[RunResult], apis: Mapping[str, A
     same_api = [r for r in all_runs if r.api_id == run.api_id and r.status is not RunStatus.PASS]
     if len(same_api) >= 2:
         score += 3.0 * (len(same_api) - 1)
-        reasons.append(f"{len(same_api)} consecutive non-pass runs on this API")
+        reasons.append(f"{len(same_api)} non-pass runs on this API in the window")
     if run.status is RunStatus.ERROR:
         score += 4.0
         reasons.append("error (no verdict from rules — transport or 5xx)")

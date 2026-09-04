@@ -44,6 +44,16 @@ def test_unknown_scorer_raises():
         rank_runs("vibes", [], {}, limit=5)
 
 
+def test_repeated_non_pass_reason_does_not_claim_consecutive():
+    runs = [
+        _run("r1", "a", RunStatus.FAIL, 0, rules=["x"]),
+        _run("r2", "a", RunStatus.FAIL, 10, rules=["x"]),
+    ]
+    ranked = rank_runs("risk_v1", runs, {"a": _api("a")}, limit=5)
+    assert any("non-pass runs on this API in the window" in r for r in ranked[0].reasons)
+    assert not any("consecutive" in r for r in ranked[0].reasons)
+
+
 def test_deterministic():
     runs = [_run("r1", "a", RunStatus.FAIL, 0, rules=["x"]), _run("r2", "b", RunStatus.FAIL, 1, rules=["x"])]
     apis = {"a": _api("a"), "b": _api("b")}

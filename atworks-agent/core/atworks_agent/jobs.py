@@ -36,7 +36,7 @@ class JobDraft(BaseModel):
     kind: JobKind
     summary: str = Field(max_length=200)
     api_ids: list[str]
-    target_env: str
+    target_env: str = Field(max_length=32)
     schedule: JobSchedule | None = None
     select_where: dict[str, Any] | None = None
     binding: Binding = Binding.FROZEN

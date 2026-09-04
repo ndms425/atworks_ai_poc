@@ -36,3 +36,7 @@ def test_queue_rule_silent_when_job_already_seen():
 def test_job_requested_detector():
     assert job_requested(CFG, "지난 1주일간 업데이트된 api 매일 9시에 실행해줘")
     assert not job_requested(CFG, "이 API 스펙이 뭐야?")
+
+
+def test_job_requested_does_not_fire_on_understood_not_run():
+    assert not job_requested(CFG, "이 API 실행 결과를 이해했어")

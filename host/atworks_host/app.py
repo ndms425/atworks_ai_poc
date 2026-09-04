@@ -16,7 +16,6 @@ from atworks_agent import (
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
-    AtworksToolExecutor,
 )
 from atworks_agent.serialization import api_record, job_record, run_record
 from atworks_agent_runtime import AtworksAgent
@@ -37,6 +36,11 @@ def _aware(value: str | None) -> datetime | None:
     datetime raises TypeError instead of answering the request."""
     if not value:
         return None
+    if " " in value:
+        # A literal '+' in a query string decodes to a space (application/x-www-form-
+        # urlencoded convention); restore it so an offset like +09:00 round-trips even
+        # when the caller did not percent-encode it as %2B.
+        value = value.replace(" ", "+")
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
@@ -84,8 +88,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/jobs")
     async def jobs(record: CurrentSession) -> dict:
-        del record
-        return {"jobs": [job_record(j) for j in (*backend.ledger.pending(), *backend.ledger.applied())]}
+        return {"jobs": [job_record(j) for j in await backend.all_jobs(context(record))]}
 
     # 이 배포는 메모리가 꺼져 있다(enable_memory=False). web-shared의 useAgentTurn이
     # 로드 시 무조건 이 경로를 찾으므로, 빈 상태를 돌려주는 자리표시 라우트를 둔다.
@@ -104,15 +107,15 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # provenance는 모델을 지키는 게이트지 버튼을 지키는 게 아니다: 이 세션이 아직 모르는
         # job이라도, 호스트가 그 job을 실제로 소유(ledger)하고 있으면 클릭 전에 기억시킨다.
         if job_id not in record.state.seen_jobs:
-            known = backend.ledger.get(job_id)
+            known = await backend.get_job(context(record), job_id)
             if known is not None:
                 record.state.remember_job(known)
         if action == "apply_job":
             record.state.approved_job_ids.add(job_id)
         else:
             record.state.host_action_job_ids.add(job_id)
-        executor = AtworksToolExecutor(backend=backend, config=agent.config, skills=agent.skills,
-                                       session=context(record), state=record.state, memory=agent.memory)
+        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
+                                        session=context(record), state=record.state, memory=agent.memory)
         execution = await executor.execute(action, {"job_id": job_id})
         record.state.approved_job_ids.discard(job_id)
         record.state.host_action_job_ids.discard(job_id)
@@ -140,7 +143,10 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/reports/{job_id}", response_class=HTMLResponse)
     async def report(job_id: str) -> str:
-        html = reports.read_html(job_id)
+        try:
+            html = reports.read_html(job_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="no report yet") from error
         if html is None:
             raise HTTPException(status_code=404, detail="no report yet")
         return html
