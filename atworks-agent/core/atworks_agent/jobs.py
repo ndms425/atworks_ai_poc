@@ -126,7 +126,8 @@ class JobLedger:
     def discard(self, job_id: str, *, actor: str, actor_kind: ActorKind = ActorKind.OPERATOR) -> JobSpec:
         job = self._require_staged(job_id, "discard")
         updated = job.model_copy(update={"status": JobStatus.DISCARDED,
-                                         "discarded_at": datetime.now(UTC), "discarded_by": actor})
+                                         "discarded_at": datetime.now(UTC), "discarded_by": actor,
+                                         "discarded_by_kind": actor_kind})
         self._jobs[job_id] = updated
         return updated
 

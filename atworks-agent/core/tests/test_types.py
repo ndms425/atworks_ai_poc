@@ -41,6 +41,25 @@ def test_schedule_count_bounds():
         JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-04", count=0)
 
 
+def test_schedule_at_must_be_a_valid_time():
+    import pytest
+    with pytest.raises(ValueError):
+        JobSchedule(kind="daily", at="99:99", from_date="2026-09-04", count=1)
+
+
+def test_schedule_from_date_must_be_a_valid_date():
+    import pytest
+    with pytest.raises(ValueError):
+        JobSchedule(kind="daily", at="09:00", from_date="2026-13-45", count=1)
+
+
+def test_schedule_once_requires_count_one():
+    import pytest
+    with pytest.raises(ValueError):
+        JobSchedule(kind="once", at="09:00", from_date="2026-09-04", count=3)
+    JobSchedule(kind="once", at="09:00", from_date="2026-09-04", count=1)
+
+
 def test_run_status_values():
     assert {s.value for s in RunStatus} == {"pass", "fail", "error"}
     r = RunResult(run_id="run-1", api_id="api-001", executed_at=datetime.now(UTC),

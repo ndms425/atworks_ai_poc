@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from commerce_common.execution import BaseToolExecutor, Handler, parse_argument
+from commerce_common.execution import BaseToolExecutor, Handler, clamp_limit, parse_argument
 from commerce_common.memory import MemoryRuntime
 from commerce_common.presentation import PresentationExtension
 from commerce_common.skills import SkillRegistry
@@ -30,7 +30,7 @@ from .gates import (
     guardrail_block_message,
     take_discard_actor_kind,
 )
-from .jobs import GuardrailViolation, JobDraft, JobNotApplicable
+from .jobs import GuardrailViolation, JobDraft, JobNotApplicable, check_job_guardrails
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .scoring import UnknownScorer, rank_runs
 from .serialization import api_record, job_record, rank_record, run_record
@@ -43,10 +43,33 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
                                extraction_prompt=ATWORKS_MEMORY_EXTRACTION_PROMPT, write_filter=write_filter)
 
 
-def _iso(value: Any) -> datetime | None:
+class InvalidToolArgument(ValueError):
+    """A tool argument failed a manual (non-pydantic) check; ``domain_error`` reports it
+    by field name instead of the generic unavailable ladder."""
+
+    def __init__(self, field: str, *, kind: str = "datetime") -> None:
+        super().__init__(field)
+        self.field = field
+        self.kind = kind
+
+
+def _iso(value: Any, field: str) -> datetime | None:
     if not value:
         return None
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as error:
+        raise InvalidToolArgument(field) from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _limit(raw: Any, default: int, ceiling: int) -> int:
+    try:
+        return clamp_limit(raw, default, ceiling)
+    except (TypeError, ValueError) as error:
+        raise InvalidToolArgument("limit", kind="integer") from error
 
 
 def _coerce_list(value: Any) -> list[Any] | None:
@@ -87,6 +110,13 @@ class AtworksToolExecutor(BaseToolExecutor):
             return ToolOutcome.held(GUARDRAIL_GATE, guardrail_block_message(error.violations))
         if isinstance(error, (JobNotApplicable, UnknownScorer)):
             return ToolOutcome.error(self._sanitize(str(error), 300))
+        if isinstance(error, InvalidToolArgument):
+            if error.kind == "integer":
+                return ToolOutcome.error(f"{error.field} must be an integer; adjust and call again.")
+            return ToolOutcome.error(
+                f"{error.field} must be an ISO 8601 datetime with offset, e.g. "
+                "2026-08-27T00:00:00+09:00; adjust and call again."
+            )
         return None
 
     def handlers(self) -> dict[str, Handler]:
@@ -107,8 +137,8 @@ class AtworksToolExecutor(BaseToolExecutor):
     async def _search_apis(self, tool_input: dict[str, Any]) -> ToolOutcome:
         apis = await self._backend.search_apis(
             self._session, query=self._sanitize(tool_input.get("query"), 120),
-            updated_after=_iso(tool_input.get("updated_after")), group=tool_input.get("group") or None,
-            limit=int(tool_input.get("limit") or 20),
+            updated_after=_iso(tool_input.get("updated_after"), "updated_after"), group=tool_input.get("group") or None,
+            limit=_limit(tool_input.get("limit"), 20, 200),
         )
         for api in apis:
             self._state.remember_api(api)
@@ -123,17 +153,18 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _list_runs(self, tool_input: dict[str, Any]) -> ToolOutcome:
         filters = tool_input.get("filters") or {}
-        since = _iso(filters.get("since"))
+        since = _iso(filters.get("since"), "since")
         status = filters.get("status") or None
         runs = await self._backend.list_runs(
             self._session, since=since, status=status, api_id=filters.get("api_id") or None,
-            limit=int(tool_input.get("limit") or 50),
+            limit=_limit(tool_input.get("limit"), 50, 200),
         )
         population = await self._backend.count_runs(self._session, since, status)
         self._state.last_population = population
         for run in runs:
             self._state.remember_run(run)
         self._state.last_listed_run_ids = [r.run_id for r in runs]
+        self._state.last_listed_filter = status or "all"
         return self._fenced({"population": population, "shown": len(runs), "runs": [run_record(r) for r in runs]})
 
     async def _get_run(self, tool_input: dict[str, Any]) -> ToolOutcome:
@@ -147,7 +178,7 @@ class AtworksToolExecutor(BaseToolExecutor):
         if not self._state.last_listed_run_ids or self._state.last_population is None:
             return ToolOutcome.error("Nothing to rank yet — call list_runs first; it records the runs and their population.")
         scorer = str(tool_input.get("scorer") or self._config.default_scorer)
-        limit = min(int(tool_input.get("limit") or self._config.max_rank_items), self._config.max_rank_items)
+        limit = _limit(tool_input.get("limit"), self._config.max_rank_items, self._config.max_rank_items)
         window = [self._state.seen_runs[i] for i in self._state.last_listed_run_ids if i in self._state.seen_runs]
         ranked = rank_runs(scorer, window, self._state.seen_apis, limit)
         for rank in ranked:
@@ -171,7 +202,7 @@ class AtworksToolExecutor(BaseToolExecutor):
         return self._fenced({"staged": job_record(job), "note": note}, events)
 
     async def _stage_job(self, tool_input: dict[str, Any]) -> ToolOutcome:
-        api_ids = [str(a) for a in (_coerce_list(tool_input.get("api_ids")) or [])]
+        api_ids = list(dict.fromkeys(str(a) for a in (_coerce_list(tool_input.get("api_ids")) or [])))
         if held := check_api_provenance(self._state, api_ids):
             return held
         draft = parse_argument(JobDraft, {
@@ -182,6 +213,8 @@ class AtworksToolExecutor(BaseToolExecutor):
             "confidence": tool_input.get("confidence") or {},
             "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],
         })
+        if violations := check_job_guardrails(draft, self._config):
+            return ToolOutcome.held(GUARDRAIL_GATE, guardrail_block_message(violations))
         job = await self._backend.stage_job(self._session, draft, ActorKind.AGENT)
         return await self._remember_and_preview(job)
 

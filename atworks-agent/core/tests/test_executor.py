@@ -92,3 +92,64 @@ async def test_apply_requires_host_mark(backend, config, skills, session, state)
 async def test_unknown_tool_is_refused(backend, config, skills, session, state):
     out = await _exec(backend, config, skills, session, state).execute("drop_database", {})
     assert out.is_error
+
+
+async def test_search_apis_bad_updated_after_names_field(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "search_apis", {"query": "", "updated_after": "not-a-date"}
+    )
+    assert out.is_error
+    assert "updated_after" in out.result_text
+    assert "unavailable" not in out.result_text
+
+
+async def test_list_runs_naive_since_does_not_outage(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "list_runs", {"filters": {"since": "2026-09-01"}}
+    )
+    assert not out.refused
+
+
+async def test_list_runs_records_last_listed_filter(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "list_runs", {"filters": {"status": "non_pass"}}
+    )
+    assert not out.refused
+    assert state.last_listed_filter == "non_pass"
+
+
+async def test_list_runs_bad_limit_names_field(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "list_runs", {"filters": {"since": "2026-09-01"}, "limit": "abc"}
+    )
+    assert out.is_error
+    assert "limit" in out.result_text
+    assert "unavailable" not in out.result_text
+
+
+async def test_stage_job_guardrail_checked_before_backend_call(backend, config, skills, session, state):
+    class PermissiveBackend(backend.__class__):
+        async def stage_job(self, session, draft, actor_kind):
+            from datetime import UTC, datetime
+
+            from atworks_agent.types import ActorKind as AK
+            from atworks_agent.types import JobSpec
+            return JobSpec(job_id="job-bypass", kind=draft.kind, summary=draft.summary,
+                           api_ids=draft.api_ids, target_env=draft.target_env,
+                           created_at=datetime.now(UTC), created_by=session.operator,
+                           created_by_kind=AK.AGENT)
+
+    permissive = PermissiveBackend(config)
+    ex = _exec(permissive, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_env": "prod"})
+    assert out.blocked == "guardrail"
+
+
+async def test_stage_job_dedupes_api_ids(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1", "api-1"], "target_env": "dev"})
+    assert not out.refused
+    job_id = next(iter(state.seen_jobs))
+    assert state.seen_jobs[job_id].api_ids == ["api-1"]

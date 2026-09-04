@@ -4,12 +4,12 @@ provenance 기록이다: 쓰기 게이트는 여기 있는 id만 받고, present
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
 from commerce_common.types import ClockContext, remember
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # -- 레코드 ---------------------------------------------------------------------------
 
@@ -82,6 +82,29 @@ class JobSchedule(BaseModel):
     from_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     count: int = Field(ge=1, le=30)
 
+    @field_validator("at")
+    @classmethod
+    def _at_is_a_real_time(cls, value: str) -> str:
+        hh, _, mm = value.partition(":")
+        if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59):
+            raise ValueError(f"at must be a valid 24h time (00:00-23:59), got {value!r}")
+        return value
+
+    @field_validator("from_date")
+    @classmethod
+    def _from_date_is_a_real_date(cls, value: str) -> str:
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError(f"from_date must be a valid calendar date, got {value!r}") from error
+        return value
+
+    @model_validator(mode="after")
+    def _once_runs_exactly_once(self) -> JobSchedule:
+        if self.kind == "once" and self.count != 1:
+            raise ValueError("a 'once' schedule must have count == 1")
+        return self
+
 
 class JobSpec(BaseModel):
     """LLM이 초안을 잡고 사람이 승인하는 실행 계획. StagedChange 미러.
@@ -107,6 +130,7 @@ class JobSpec(BaseModel):
     applied_by: str | None = None
     discarded_at: datetime | None = None
     discarded_by: str | None = None
+    discarded_by_kind: ActorKind | None = None
     run_ids: list[str] = Field(default_factory=list)
     runs_remaining: int | None = None
 
@@ -139,6 +163,7 @@ class AtworksSessionState(BaseModel):
     seen_jobs: dict[str, JobSpec] = Field(default_factory=dict)
     last_population: int | None = None
     last_listed_run_ids: list[str] = Field(default_factory=list)
+    last_listed_filter: str = "all"
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
     attached_items: list[AttachedItem] = Field(default_factory=list)

@@ -8,7 +8,7 @@ from atworks_agent.jobs import (
     JobNotApplicable,
     check_job_guardrails,
 )
-from atworks_agent.types import Binding, JobKind, JobSchedule, JobStatus
+from atworks_agent.types import ActorKind, Binding, JobKind, JobSchedule, JobStatus
 
 CFG = AtworksAgentConfig(model="m", max_apis_per_job=3, allowed_target_envs=("dev", "stg"))
 
@@ -57,6 +57,14 @@ def test_ledger_stage_apply_discard():
 def test_ledger_rejects_guardrail_at_stage():
     with pytest.raises(GuardrailViolation):
         JobLedger(CFG).stage(_draft(target_env="prod"), actor="op")
+
+
+def test_discard_records_actor_kind():
+    ledger = JobLedger(CFG)
+    job = ledger.stage(_draft(), actor="op")
+    discarded = ledger.discard(job.job_id, actor="assistant", actor_kind=ActorKind.AGENT)
+    assert discarded.discarded_by_kind is ActorKind.AGENT
+    assert discarded.discarded_by == "assistant"
 
 
 def test_record_execution_counts_executions_not_runs():

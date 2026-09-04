@@ -36,6 +36,7 @@ def _state_with_run():
 
 async def test_run_digest_joins_run_and_population():
     state = _state_with_run()
+    state.last_listed_filter = "fail"
     outcome = await run_presentation(
         PRESENTATION_COMPONENTS["present_run_digest"],
         {"title": "먼저 볼 실패", "items": [{"kind": "fail", "ref_id": "run-17", "headline": "amount 음수", "why_it_matters": "계약 금액 규칙 위반"}]},
@@ -45,6 +46,7 @@ async def test_run_digest_joins_run_and_population():
     assert ui.data["component"] == "run_digest"
     payload = ui.data["payload"]
     assert payload["population"] == 47 and payload["scorer"] == "risk_v1"
+    assert payload["population_filter"] == "fail"
     item = payload["items"][0]
     assert item["run"]["status"] == "fail" and item["api"]["path"] == "/v1/contracts"
     assert item["rank"]["score"] == 4.0
@@ -72,6 +74,27 @@ async def test_run_digest_drops_run_outside_window():
     )
     assert len(outcome.events[0].data["payload"]["items"]) == 1
     assert "run-18" in outcome.result_text
+
+
+async def test_run_digest_uses_run_status_and_drops_pass():
+    state = _state_with_run()
+    state.remember_run(RunResult(run_id="run-20", api_id="api-1", executed_at=datetime.now(UTC), target_env="dev",
+                                 status=RunStatus.ERROR, http_status=500))
+    state.remember_run(RunResult(run_id="run-21", api_id="api-1", executed_at=datetime.now(UTC), target_env="dev",
+                                 status=RunStatus.PASS, http_status=200))
+    state.last_listed_run_ids = ["run-17", "run-20", "run-21"]
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_run_digest"],
+        {"items": [
+            {"kind": "fail", "ref_id": "run-20", "headline": "x"},
+            {"kind": "fail", "ref_id": "run-21", "headline": "y"},
+        ]},
+        _ctx(state), "Shown.",
+    )
+    items = outcome.events[0].data["payload"]["items"]
+    assert len(items) == 1
+    assert items[0]["kind"] == "error"
+    assert "run-21" in outcome.result_text
 
 
 async def test_run_digest_refused_without_population():

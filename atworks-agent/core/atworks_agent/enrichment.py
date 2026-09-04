@@ -25,6 +25,7 @@ from .tools.presentation import (
     PresentJobPreviewPayload,
     PresentRunDigestPayload,
 )
+from .types import RunStatus
 
 LOW_CONFIDENCE = 0.5
 
@@ -43,6 +44,7 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
     items: list[dict[str, Any]] = []
     dropped: list[str] = []
     dropped_outside_window: list[str] = []
+    dropped_pass: list[str] = []
     scorer: str | None = None
     for item in payload.items:
         entry = item.model_dump(exclude_none=True)
@@ -64,6 +66,12 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
         if run.run_id not in state.last_listed_run_ids:
             dropped_outside_window.append(run.run_id)
             continue
+        if run.status is RunStatus.PASS:
+            dropped_pass.append(run.run_id)
+            continue
+        # The run record is the deterministic verdict; it overrides whatever kind the
+        # model picked so a mislabeled item can never present a pass run as a failure.
+        entry["kind"] = run.status.value
         entry["run"] = _record(run)
         api = state.seen_apis.get(run.api_id)
         if api is not None:
@@ -82,11 +90,16 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
             f"Dropped {', '.join(dropped_outside_window)}: not in the window list_runs last counted — "
             "list again before presenting them."
         )
+    if dropped_pass:
+        context.notes.append(
+            f"Dropped {', '.join(dropped_pass)}: status is pass; the digest lists non-pass runs only."
+        )
     if not items:
         raise ValueError("Nothing on the digest could be joined to this session's records; fetch runs first.")
     return {
         "title": payload.title,
         "population": state.last_population,
+        "population_filter": state.last_listed_filter,
         "shown": sum(1 for i in items if i["kind"] in ("fail", "error")),
         "scorer": scorer,
         "items": items,
