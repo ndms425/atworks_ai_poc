@@ -101,7 +101,7 @@ async def test_report_opens_without_session_header(client):
         session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT
     )
     await backend.apply_job(session, job.job_id)
-    runs = await backend.execute_job_once(session, job.job_id)
+    runs = await backend.execute_job_once(session, job.job_id, None)
     reports.write(job, runs)
     r = await client.get(f"/api/atworks/reports/{job.job_id}")
     assert r.status_code == 200

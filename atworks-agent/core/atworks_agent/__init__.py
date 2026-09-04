@@ -9,6 +9,7 @@ from .jobs import (
     JobNotApplicable,
     SelectWhere,
     check_job_guardrails,
+    enforce_execution_matrix,
 )
 from .types import (
     ActorKind,

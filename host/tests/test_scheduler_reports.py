@@ -87,10 +87,10 @@ async def test_tick_survives_one_jobs_execution_error(tmp_path):
     class FlakyBackend(MockAtworks):
         bad_job_id: str | None = None
 
-        async def execute_job_once(self, session, job_id):
+        async def execute_job_once(self, session, job_id, schedule_index=None):
             if job_id == self.bad_job_id:
                 raise RuntimeError("boom")
-            return await super().execute_job_once(session, job_id)
+            return await super().execute_job_once(session, job_id, schedule_index)
 
     backend = FlakyBackend(AtworksAgentConfig(model="m"), FIXTURES)
     reports = Reports(tmp_path)
@@ -182,7 +182,7 @@ class RecordingBackend(AtworksBackend):
     async def discard_job(self, session, job_id, actor_kind):
         raise NotImplementedError
 
-    async def execute_job_once(self, session, job_id):
+    async def execute_job_once(self, session, job_id, schedule_index=None):
         self.calls.append("execute_job_once")
         self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "executions": 1})
         return [self.run]
@@ -203,7 +203,7 @@ class RecordingBackend(AtworksBackend):
         self.calls.append("runs_by_ids")
         return [self.run] if run_ids else []
 
-    async def record_execution(self, session, job_id, run_ids):
+    async def record_execution(self, session, job_id, run_ids, schedule_index):
         self.calls.append("record_execution")
         return self.job
 

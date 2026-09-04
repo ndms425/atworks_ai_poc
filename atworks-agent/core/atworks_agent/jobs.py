@@ -192,6 +192,26 @@ def check_job_guardrails(
     return violations
 
 
+def enforce_execution_matrix(
+    config: AtworksAgentConfig, job: JobSpec, resolved_api_ids: Sequence[str]
+) -> list[str]:
+    """Re-derive the size caps at execution time (a LATE selection may have grown since
+    staging — staging only saw the selection as it stood then)."""
+    violations: list[str] = []
+    if len(resolved_api_ids) > config.max_apis_per_job:
+        violations.append(
+            f"execution skipped: selection resolved to {len(resolved_api_ids)} APIs, "
+            f"above the limit of {config.max_apis_per_job}"
+        )
+    size = len(resolved_api_ids) * len(job.target_envs) * max(1, len(job.test_data))
+    if size > config.max_matrix_size:
+        violations.append(
+            f"execution skipped: matrix resolved to {size} runs per execution, "
+            f"above the limit of {config.max_matrix_size}"
+        )
+    return violations
+
+
 class JobLedger:
     """백엔드가 얹어 쓸 수 있는 인메모리 생명주기. 적용·폐기된 job도 감사 이력으로 남는다."""
 

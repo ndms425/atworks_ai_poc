@@ -9,6 +9,7 @@ from atworks_agent.jobs import (
     JobLedger,
     JobNotApplicable,
     check_job_guardrails,
+    enforce_execution_matrix,
 )
 from atworks_agent.types import (
     ActorKind,
@@ -272,3 +273,30 @@ def test_record_execution_without_a_schedule_index_advances_no_schedule():
 
     with pytest.raises(JobNotApplicable):
         ledger2.record_execution(job2.job_id, ["run-3"], 5)
+
+
+def test_enforce_execution_matrix_flags_both_caps_when_a_late_selection_grew():
+    # A LATE selection is re-resolved at execution time and may have grown past staging —
+    # M11 re-derives both size caps against the resolved api list, not the staged one.
+    cfg = AtworksAgentConfig(model="m", max_apis_per_job=3, max_matrix_size=10, allowed_target_envs=("dev", "stg"))
+    ledger = JobLedger(cfg)
+    job = ledger.stage(_draft(api_ids=["a", "b"], target_envs=["dev", "stg"],
+                              test_data=[TestDataSet(label="S1", values={"amount": "1"}),
+                                         TestDataSet(label="S2", values={"amount": "2"})]), actor="op")
+    resolved = ["a", "b", "c", "d", "e"]  # grew to 5 APIs since staging
+
+    violations = enforce_execution_matrix(cfg, job, resolved)
+
+    assert len(violations) == 2
+    assert any("resolved to 5 APIs" in v and "limit of 3" in v for v in violations)
+    assert any("resolved to 20 runs per execution" in v and "limit of 10" in v for v in violations)
+
+
+def test_enforce_execution_matrix_allows_exactly_at_the_cap():
+    cfg = AtworksAgentConfig(model="m", max_apis_per_job=4, max_matrix_size=8, allowed_target_envs=("dev",))
+    ledger = JobLedger(cfg)
+    job = ledger.stage(_draft(api_ids=["a"], target_envs=["dev"], test_data=[]), actor="op")
+
+    violations = enforce_execution_matrix(cfg, job, ["a", "b", "c", "d"])
+
+    assert violations == []

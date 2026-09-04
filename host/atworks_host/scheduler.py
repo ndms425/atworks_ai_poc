@@ -48,12 +48,12 @@ class Scheduler:
                 if not due:
                     continue
                 try:
-                    produced = await self.backend.execute_job_once(self.session, job.job_id)
+                    produced = await self.backend.execute_job_once(self.session, job.job_id, None)
                 except Exception as error:
                     # Execution failure: record as such and move on.
                     logger.exception("job %s failed during scheduled execution", job.job_id)
                     await self.backend.add_guardrail_note(self.session, job.job_id, f"execution failed: {type(error).__name__}")
-                    await self.backend.record_execution(self.session, job.job_id, [])
+                    await self.backend.record_execution(self.session, job.job_id, [], None)
                     continue
                 if not produced:
                     continue

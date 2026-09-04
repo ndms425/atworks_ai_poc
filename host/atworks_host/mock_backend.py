@@ -16,15 +16,35 @@ from atworks_agent import (
     JobSpec,
     RunResult,
     RunStatus,
+    TestDataSet,
+    enforce_execution_matrix,
 )
 from atworks_agent.types import Binding
 
 
-# 결정론 스텁 "DSL": 경로에 refund가 있으면 금액 규칙 실패, api-007은 503 에러, 나머지 pass.
-def stub_verdict(api: ApiSpec, sequence: int) -> tuple[RunStatus, list[str], int]:
-    if "refund" in api.path:
+def stub_verdict(api: ApiSpec, env: str, data: TestDataSet | None) -> tuple[RunStatus, list[str], int]:
+    """결정론 스텁 "DSL". 실제 aTworks에선 규칙 엔진이 내는 판정을 대신한다. 규칙은 위에서 아래로,
+    처음 맞는 하나가 판정이다:
+
+    1. 바인딩된 키 중 이름에 ``amount``/``Amount``가 들어가고 값이 음수로 파싱되면 그 규칙 FAIL(200).
+    2. 그 외, 경로에 ``refund``가 있고 바인딩이 없으면 ``refundAmount`` 규칙 FAIL(200) — 기존
+       픽스처와 테스트가 계속 의미를 갖도록 남긴 오늘의 규칙.
+    3. 그 외, ``api-007``을 ``stg``에서 부르면 ERROR(503) — dev/stg 비교가 차이를 보이도록. dev에선
+       통과한다.
+    4. 그 외 PASS(200).
+    """
+    if data is not None:
+        for key, value in data.values.items():
+            if "amount" in key or "Amount" in key:
+                try:
+                    number = float(value)
+                except ValueError:
+                    continue
+                if number < 0:
+                    return RunStatus.FAIL, [f"{key} >= 0"], 200
+    if "refund" in api.path and data is None:
         return RunStatus.FAIL, ["refundAmount >= 0"], 200
-    if api.api_id == "api-007":
+    if api.api_id == "api-007" and env == "stg":
         return RunStatus.ERROR, [], 503
     return RunStatus.PASS, [], 200
 
@@ -94,13 +114,13 @@ class MockAtworks(AtworksBackend):
     async def runs_by_ids(self, session, run_ids):
         return [self.runs[i] for i in run_ids if i in self.runs]
 
-    async def record_execution(self, session, job_id, run_ids):
-        return self.ledger.record_execution(job_id, run_ids, None)
+    async def record_execution(self, session, job_id, run_ids, schedule_index):
+        return self.ledger.record_execution(job_id, run_ids, schedule_index)
 
     async def add_guardrail_note(self, session, job_id, note):
         return self.ledger.add_guardrail_note(job_id, note)
 
-    async def execute_job_once(self, session, job_id) -> list[RunResult]:
+    async def execute_job_once(self, session, job_id, schedule_index=None) -> list[RunResult]:
         job = self.ledger.get(job_id)
         if job is None:
             return []
@@ -108,35 +128,43 @@ class MockAtworks(AtworksBackend):
             return []
         api_ids = job.api_ids
         if job.binding is Binding.LATE and job.select_where:
+            # LATE re-resolves once per execution, not once per environment: the selection is
+            # a property of the job, and re-running it per env would let two envs disagree
+            # about what the job even is.
             w = job.select_where
             api_ids = [a.api_id for a in await self.search_apis(
                 session, query=w.get("query", ""), group=w.get("group"),
                 updated_after=datetime.fromisoformat(w["updated_after"]) if w.get("updated_after") else None,
                 limit=self._config.max_apis_per_job + 1)]
-            if len(api_ids) > self._config.max_apis_per_job:
-                self.ledger.add_guardrail_note(
-                    job_id,
-                    f"execution skipped: LATE selection resolved to {len(api_ids)} APIs, "
-                    f"above the limit of {self._config.max_apis_per_job}",
-                )
-                # the slot is spent even though nothing ran, so a scheduled job does not
-                # retry the same over-limit selection forever
-                self.ledger.record_execution(job_id, [], None)
-                return []
+        # The size caps are re-derived here (not just relied on from staging): a LATE
+        # selection may have grown since then, and a FROZEN job may run under a config that
+        # has since tightened (M11).
+        violations = enforce_execution_matrix(self._config, job, api_ids)
+        if violations:
+            for message in violations:
+                self.ledger.add_guardrail_note(job_id, message)
+            # the slot is spent even though nothing ran, so a scheduled job does not retry
+            # the same over-limit matrix forever
+            self.ledger.record_execution(job_id, [], schedule_index)
+            return []
         produced: list[RunResult] = []
+        bindings: list[TestDataSet | None] = list(job.test_data) or [None]
         for env in job.target_envs:
-            for api_id in api_ids:
-                api = self.apis.get(api_id)
-                if api is None:
-                    continue
-                self._run_seq += 1
-                status, rules, http = stub_verdict(api, self._run_seq)
-                run = RunResult(run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
-                                target_env=env, status=status, failed_rules=rules, http_status=http,
-                                duration_ms=100 + self._run_seq % 50, job_id=job_id)
-                self.runs[run.run_id] = run
-                produced.append(run)
-        self.ledger.record_execution(job_id, [r.run_id for r in produced], None)
+            for data in bindings:
+                for api_id in api_ids:
+                    api = self.apis.get(api_id)
+                    if api is None:
+                        continue
+                    self._run_seq += 1
+                    status, rules, http = stub_verdict(api, env, data)
+                    run = RunResult(
+                        run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
+                        target_env=env, test_data_label=data.label if data is not None else None,
+                        status=status, failed_rules=rules, http_status=http,
+                        duration_ms=100 + self._run_seq % 50, job_id=job_id)
+                    self.runs[run.run_id] = run
+                    produced.append(run)
+        self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
         return produced
 
     async def get_context(self, session):

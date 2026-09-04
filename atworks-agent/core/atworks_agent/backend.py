@@ -72,10 +72,12 @@ class AtworksBackend(ABC):
 
     @abstractmethod
     async def record_execution(
-        self, session: AtworksSessionContext, job_id: str, run_ids: list[str]
+        self, session: AtworksSessionContext, job_id: str, run_ids: list[str], schedule_index: int | None
     ) -> JobSpec:
         """job의 실행 1회를 기록한다: run_ids가 이번 실행이 낸 결과(비어 있을 수 있다 — 실행이
-        실패했거나 LATE 재평가가 상한을 넘겨 건너뛴 경우), runs_remaining을 정확히 1 줄인다."""
+        실패했거나 LATE 재평가가 상한을 넘겨 건너뛴 경우), ``executions``를 정확히 1 늘린다.
+        ``schedule_index``는 이번 실행이 소비한 스케줄의 인덱스다(run_now면 ``None``) — 여러
+        스케줄이 각자의 ``done``을 따로 세기 때문에 이 값 없이는 어느 회차가 소비됐는지 알 수 없다."""
 
     @abstractmethod
     async def add_guardrail_note(self, session: AtworksSessionContext, job_id: str, note: str) -> JobSpec:
@@ -83,16 +85,28 @@ class AtworksBackend(ABC):
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod
-    async def execute_job_once(self, session: AtworksSessionContext, job_id: str) -> list[RunResult]:
-        """job의 api_ids(또는 LATE면 select_where 재평가)를 target_env에 1회 실행하고 결과를 돌려준다.
+    async def execute_job_once(
+        self, session: AtworksSessionContext, job_id: str, schedule_index: int | None
+    ) -> list[RunResult]:
+        """job의 매트릭스를 1회 실행하고 결과를 돌려준다: ``target_envs`` × (``test_data`` 또는
+        바인딩 없음) × ``api_ids``(LATE면 ``select_where`` 재평가)의 조합마다 run 1건. 각 run은
+        자기 계를 ``target_env``에, 자기 데이터 세트를 ``test_data_label``에 달고 나오므로 한 번의
+        실행이 낸 두 run이 같은 식별자로 겹치지 않는다.
+
+        구현은 API 목록(LATE/FROZEN 해석 후)이 확정된 뒤 ``enforce_execution_matrix``를 실행 1회당
+        한 번 호출해 크기 상한을 다시 매겨야 한다 — LATE 선택은 stage 이후 늘어날 수 있어 그때의
+        확인만으로는 부족하다. 위반이 있으면 각각을 ``add_guardrail_note``로 남기고, run은 하나도
+        내지 않은 채 슬롯만 소비한다(``record_execution``에 빈 ``run_ids``와 이 실행의
+        ``schedule_index``를 실어서).
 
         계약: 이 호출 하나가 정확히 한 번의 실행이다. 구현은 결과와 무관하게(빈 리스트를 내더라도)
-        ``record_execution``을 정확히 한 번 호출해 job의 남은 실행 횟수를 소비해야 한다 — 그러지
-        않으면 스케줄러의 ``due_at(index)``가 앞으로 나아가지 않고 같은 job이 매 tick마다 실제
-        target_env를 향해 다시 실행된다(R29가 막으려던 바로 그 루프). 예외로 남는 경우는 딱 하나,
-        ``runs_remaining``이 이미 0이어서 애초에 소비할 슬롯이 없을 때뿐이다 — 그때는 아무 것도
-        기록하지 않고 빈 리스트를 돌려준다. apply 이후 guardrail이 다시 걸린 실행 시도는 빈 결과와
-        함께 ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다."""
+        ``record_execution``을 정확히 한 번, 받은 ``schedule_index``와 함께 호출해 job의 남은 실행
+        횟수를 소비해야 한다 — 그러지 않으면 스케줄러의 ``due_at``이 앞으로 나아가지 않고 같은 job이
+        매 tick마다 실제 target을 향해 다시 실행된다(R29가 막으려던 바로 그 루프). 예외로 남는 경우는
+        딱 하나, ``remaining_executions``가 이미 0이어서 애초에 소비할 슬롯이 없을 때뿐이다 — 그때는
+        아무 것도 기록하지 않고 빈 리스트를 돌려준다. LATE 재평가와 상한 초과 스킵은 계마다가 아니라
+        실행 1회당 한 번 적용된다. apply 이후 guardrail이 다시 걸린 실행 시도는 빈 결과와 함께
+        ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다."""
 
     # -- 선택 --------------------------------------------------------------------------
     async def get_context(self, session: AtworksSessionContext) -> dict[str, Any] | None:
