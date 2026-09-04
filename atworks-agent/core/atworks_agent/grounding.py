@@ -1,6 +1,6 @@
-"""grounding 규칙(우선순위 순): 실패/에러/최근 질문은 list_runs에서 시작하고, 이 세션에서
-job을 본 적이 없는데 승인/적용을 말하면 get_pending_jobs에서 시작한다. merchant_agent/grounding.py
-미러. 한국어는 조사가 붙어 단어경계가 없으므로 한글 needle은 substring으로 본다."""
+"""grounding 규칙(우선순위 순): 묶기/원인별/불안정 질문은 aggregate_runs에서 시작하고, 실패/에러/최근 질문은 list_runs에서
+시작하고, 이 세션에서 job을 본 적이 없는데 승인/적용을 말하면 get_pending_jobs에서 시작한다.
+merchant_agent/grounding.py 미러. 한국어는 조사가 붙어 단어경계가 없으므로 한글 needle은 substring으로 본다."""
 from __future__ import annotations
 
 import re
@@ -39,10 +39,24 @@ def job_requested(config: AtworksAgentConfig, text: str) -> bool:
     )
 
 
+def _aggregate(config: AtworksAgentConfig, text: str, _: AtworksSessionState) -> dict[str, Any] | None:
+    # Terms only: "묶어/원인별/언제부터/왔다갔다/불안정" are specific enough that a request cue adds
+    # nothing, and the runs rule (which needs a cue) must not steal these.
+    fires = config.aggregate_grounding_gate and matches_any_ko(text, config.aggregate_intent_terms)
+    return {} if fires else None
+
+
 def _runs(config: AtworksAgentConfig, text: str, _: AtworksSessionState) -> dict[str, Any] | None:
-    fires = config.runs_grounding_gate and matches_terms_and_cues_ko(
-        text, config.runs_intent_terms, config.runs_intent_cues
-    )
+    # If aggregate grounding is disabled, also accept aggregate terms without cues as run questions
+    if config.aggregate_grounding_gate:
+        fires = config.runs_grounding_gate and matches_terms_and_cues_ko(
+            text, config.runs_intent_terms, config.runs_intent_cues
+        )
+    else:
+        fires = config.runs_grounding_gate and (
+            matches_terms_and_cues_ko(text, config.runs_intent_terms, config.runs_intent_cues)
+            or matches_any_ko(text, config.aggregate_intent_terms)
+        )
     return {} if fires else None
 
 
@@ -58,6 +72,12 @@ def _queue(config: AtworksAgentConfig, text: str, state: AtworksSessionState) ->
 
 
 GROUNDING_RULES: tuple[GroundingRule, ...] = (
+    GroundingRule(
+        "aggregate",
+        "aggregate_runs",
+        _aggregate,
+        prefetch_intro=lambda _: "Aggregated run groups for this turn, fetched by the host (the same data an aggregate_runs call returns):",
+    ),
     GroundingRule(
         "runs",
         "list_runs",
