@@ -31,16 +31,20 @@ export default function RunDigestCard({
       <DigestList>
         {payload.items.map((item, i) => {
           const style = DIGEST_KINDS[item.kind];
+          // Rendered only inside `context` below (item.run branch), never doubled into `why`.
           const sub = item.run
             ? `${item.api?.method ?? ""} ${item.api?.path ?? item.run.api_id} · ${item.run.status}${item.run.failed_rules?.length ? ` · ${item.run.failed_rules.join(", ")}` : ""}${item.run.http_status ? ` · HTTP ${item.run.http_status}` : ""}`
-            : (item.why_it_matters ?? "");
+            : "";
+          // `why` is the model's own explanation, falling back to the scorer's top reason;
+          // when neither is present the headline alone is enough, so we omit it.
+          const why = item.why_it_matters ?? item.rank?.reasons?.[0];
           return (
             <DigestRow
               key={`${item.ref_id ?? "note"}-${i}`}
               icon={style.icon}
               tone={style.tone}
               headline={item.headline}
-              why={item.why_it_matters ?? sub}
+              why={why}
               context={
                 item.run ? (
                   <>

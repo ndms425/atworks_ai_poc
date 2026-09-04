@@ -99,3 +99,10 @@ async def test_runs_since_garbage_is_400(client):
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.get("/api/atworks/runs?since=garbage", headers={"X-Session-Id": sid})
     assert r.status_code == 400
+
+
+async def test_memory_route_returns_empty_facts(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.get("/api/atworks/memory", headers={"X-Session-Id": sid})
+    assert r.status_code == 200
+    assert r.json() == {"facts": []}

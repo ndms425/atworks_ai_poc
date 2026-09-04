@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantRail, Inspector, type PortalNavItem, PortalShell, type Prefill, useMerchantChat, useSession } from "web-shared";
 import AssistantPanel from "@/components/AssistantPanel";
 import ApisView from "@/components/views/ApisView";
@@ -43,6 +43,21 @@ export default function PortalPage() {
     onPortalRefresh: refreshPortal,
   });
 
+  // Snapshot of what a send actually carried, so the busy->false cleanup below can tell a sent
+  // attachment apart from one dropped in mid-send (see onAttach/effect below).
+  const sentRef = useRef<AttachedItem[]>([]);
+  const send = useCallback(
+    (text: string) => {
+      sentRef.current = api.pendingAttachments as AttachedItem[];
+      return chat.send(text);
+    },
+    [chat.send],
+  );
+  // The composer, starter chips, and suggestion chips all call `chat.send` directly (inside
+  // web-shared), so we hand the panel a chat object whose `send` is wrapped instead of patching
+  // every call site.
+  const chatForPanel = useMemo(() => ({ ...chat, send }), [chat, send]);
+
   // The rail is part of the default layout on wide screens; narrow screens open it on demand.
   useEffect(() => {
     setAssistantOpen(window.innerWidth >= 1024);
@@ -63,13 +78,22 @@ export default function PortalPage() {
   }, []);
 
   // The attachments ride the next chatStream call and are consumed there; once a reply
-  // finishes, clear them here too so the rail's badge and re-attach state reset together.
+  // finishes, drop only the items that actually went out with that send (sentRef, set by
+  // `send` above) so an item attached while the previous turn was still streaming survives.
   useEffect(() => {
     if (chat.busy) return;
+    const sent = sentRef.current;
+    sentRef.current = [];
+    if (sent.length === 0) return;
+    const sentKeys = new Set(sent.map((item) => `${item.ref_id}:${item.order}`));
     setAttached((current) => {
       if (current.length === 0) return current;
-      api.pendingAttachments = [];
-      return [];
+      const remaining = current
+        .filter((item) => !sentKeys.has(`${item.ref_id}:${item.order}`))
+        .map((item, index) => ({ ...item, order: index + 1 }));
+      if (remaining.length === current.length) return current;
+      api.pendingAttachments = remaining;
+      return remaining;
     });
   }, [chat.busy]);
 
@@ -98,7 +122,7 @@ export default function PortalPage() {
           <AssistantRail open={assistantOpen} storageKey="atworks-ai-merchant-panel-width" onClose={() => setAssistantOpen(false)}>
             {(rail) => (
               <AssistantPanel
-                chat={chat}
+                chat={chatForPanel}
                 prefill={prefill}
                 onPrefill={askAssistant}
                 onAttach={onAttach}

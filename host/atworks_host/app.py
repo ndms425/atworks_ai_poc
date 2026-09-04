@@ -87,6 +87,18 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         del record
         return {"jobs": [job_record(j) for j in (*backend.ledger.pending(), *backend.ledger.applied())]}
 
+    # 이 배포는 메모리가 꺼져 있다(enable_memory=False). web-shared의 useAgentTurn이
+    # 로드 시 무조건 이 경로를 찾으므로, 빈 상태를 돌려주는 자리표시 라우트를 둔다.
+    @router.get("/memory")
+    async def memory(record: CurrentSession) -> dict:
+        del record
+        return {"facts": []}
+
+    @router.delete("/memory")
+    async def delete_memory(record: CurrentSession, ref: dict | None = None) -> dict:
+        del record, ref
+        return {"ok": True}
+
     async def job_action(job_id: str, action: str, record: Record) -> dict:
         # 카드의 버튼 클릭 = 호스트 자신의 승인. 마크는 클릭 한 번에 소비되고 남지 않는다.
         # provenance는 모델을 지키는 게이트지 버튼을 지키는 게 아니다: 이 세션이 아직 모르는

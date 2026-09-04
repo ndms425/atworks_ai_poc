@@ -12,11 +12,13 @@ export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {
   error: { label: "error", tone: "warn" },
 };
 
-export const DIGEST_KINDS: Record<"fail" | "error" | "pending_job" | "note", KindStyle> = {
-  fail: { label: "Rule failed", icon: "alert", tone: "danger" },
-  error: { label: "Error", icon: "alert", tone: "warn" },
-  pending_job: { label: "Awaiting approval", icon: "clock", tone: "violet" },
-  note: { label: "Note", icon: "message", tone: "muted" },
+// Only `.icon`/`.tone` are read (RunDigestCard); `KindStyle.label` is dropped here since
+// nothing in this app consumes a digest-kind label.
+export const DIGEST_KINDS: Record<"fail" | "error" | "pending_job" | "note", Omit<KindStyle, "label">> = {
+  fail: { icon: "alert", tone: "danger" },
+  error: { icon: "alert", tone: "warn" },
+  pending_job: { icon: "clock", tone: "violet" },
+  note: { icon: "message", tone: "muted" },
 };
 
 /** R20: the digest header scope, "<label> <population>건 중 먼저 볼 <shown>건". */
