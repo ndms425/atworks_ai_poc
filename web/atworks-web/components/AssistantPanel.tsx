@@ -3,7 +3,9 @@
 
 "use client";
 
+import { useMemo } from "react";
 import { AssistantPanel as PanelShell, type MerchantChat, type Prefill } from "web-shared";
+import { humanizeFormAnswers } from "@/lib/formAnswers";
 import type { AttachedItem, JobSpec } from "@/lib/types";
 import GenerativeBlock from "./generative";
 
@@ -37,9 +39,20 @@ export default function AssistantPanel({
   fullscreen: boolean;
   onToggleFullscreen: () => void;
 }) {
+  // Display only: the model still receives `chat`'s exact `formatFormAnswers` text via chat.send;
+  // this only reshapes the bubble the transcript shows for it.
+  const shown = useMemo(
+    () => ({
+      ...chat,
+      items: chat.items.map((item) =>
+        item.kind === "user" ? { ...item, text: humanizeFormAnswers(item.text) ?? item.text } : item,
+      ),
+    }),
+    [chat],
+  );
   return (
     <PanelShell
-      chat={chat}
+      chat={shown}
       copy={COPY}
       prefill={prefill}
       renderBlock={(segment) => (
