@@ -68,3 +68,9 @@ python scripts/smoke_chat.py           # host가 떠 있는 상태에서 — 발
 `GET /api/atworks/briefings/{date}`(세션 없음, HTML)로 조회한다. Home 상단 BriefingCard에 요약이
 뜬다. 리포트의 실행 행에는 "채팅에서 보기" 링크(`?attach=run:{run_id}`)가 있어 포털이 열리면서 해당
 run이 자동으로 첨부된다.
+
+## Validation rules
+
+채팅에서 값 검증 규칙 초안을 작성 — 수치 비교, 코드값 소속(membership), 필수값(required), 포맷(named
+또는 raw regex) 네 종류 — 하고 Rules 뷰에서 승인하면 이후 실행되는 run에만 적용된다. 과거 run과
+성공률, 리포트, 브리핑은 그대로 남는다(effective_from 이후만 평가).

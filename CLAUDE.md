@@ -30,7 +30,7 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   states both obligations for REST. `Scheduler.tick` also generates the daily briefing at its tail
   (`briefings.maybe_generate(now)`, LLM-free, idempotent per date — file existence is the guard).
 - **Language / path / shell:** Python 3.11+, pydantic v2, FastAPI + SSE. Role package
-  `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (4), turn loop
+  `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (5), turn loop
   `atworks-agent/runtime/atworks_agent_runtime/orchestrator.py`, host `host/atworks_host/`, web
   `web/` (Task 15). Windows; Git Bash; `.venv/Scripts/python.exe`; `pytest -q` from the repo root.
 - **Backend:** one ABC, `AtworksBackend` (`atworks-agent/core/atworks_agent/backend.py`) — the only
@@ -40,7 +40,11 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   run-history store (its DSL, not the model, decides pass/fail); `stage_job` / `get_pending_jobs` /
   `apply_job` / `discard_job` → the job queue (`stage` proposes, `apply` is the sole state change);
   `execute_job_once` → the execution engine, called by the scheduler with no LLM in it;
-  `get_context` → the project profile that fills the per-request context block.
+  `get_context` → the project profile that fills the per-request context block;
+  `stage_rule` / `apply_rule` / `discard_rule` / `get_pending_rules` / `list_rules` / `simulate_rule`
+  → the rule ledger (`stage` drafts a structured `ValidationRule` on a session-seen API param,
+  `apply` stamps `effective_from` and is the sole state change, `simulate_rule` is a read-only
+  impact preview).
 - **Identity and credentials:** auth mechanism is none in MVP (fixed `OPERATOR` constant; a
   production host derives the principal from its authentication). Backend calls carry server-side
   credentials the model never sees.
@@ -64,7 +68,10 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `http://localhost:3110`); the portal reads that query param on mount into `pendingAttachments`
   and strips it from the URL. Components are presentation tools filled server-side:
   `run_digest`, `job_preview`, `question_form`, `run_groups`, chips; job lifecycle rides `change_update` with a
-  `change_id` alias. **The report is where environments are compared**: a template rendered once
+  `change_id` alias. Rules get their own surface, never `/changes/`: the Rules page (5th nav),
+  `POST /rules/{id}/apply|discard` (mirror of `job_action`), `GET /rules`, and the `rule_preview`
+  card shown when `stage_rule` runs, carrying the impact simulation and immutability note.
+  **The report is where environments are compared**: a template rendered once
   over a `data.json` the scheduler refreshes, no LLM in the path — `summary.by_env` plus an
   api × data grid, one column per env from the latest run per cell with differing rows flagged,
   computed in `host/atworks_host/reports.py` from run records and escaped on the way out. Next.js
@@ -81,7 +88,7 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   the card carries a server-computed `matrix` block — envs, data-set labels, executions, runs per
   execution, runs total — from `JobSpec` properties, never a model number. Rule layering: one-tool
   rules in `stage_job`'s description, the cross-tool contract in the prompt, procedures in skills.
-- **Flows covered:** four skills, loaded on demand over the prompt's index. (1) `failed-triage` —
+- **Flows covered:** five skills, loaded on demand over the prompt's index. (1) `failed-triage` —
   `list_runs {filters:{status:non_pass}}` → `rank_failed_runs` (deterministic `risk_v1`, no
   analysis delegate) → `present_run_digest`, population and items bound to one list window; also
   `aggregate_runs` → `present_run_groups` (component `run_groups`) for grouping by cause
@@ -94,8 +101,15 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   server-resolved (`resolve_select_where`, same function at LATE re-resolution) — the model's api_id
   list is replaced by the resolved set, and `JobSpec.selection_basis` (a server-written sentence,
   never a model one) shows on the preview card and the Jobs row; (3) `job-approval` — pending
-  queue, apply an already-approved job, discard; (4) `api-lookup` — specs, params, rules. Screen
-  attachments scope a turn to the ref_ids the operator attached.
+  queue, apply an already-approved job, discard; (4) `api-lookup` — specs, params, rules; (5)
+  `rule-authoring` — NL → a structured `ValidationRule` draft on a session-seen API param
+  (`stage_rule`, four kinds: numeric compare, membership, required, format) → `present_rule_preview`
+  (impact simulation, immutability note) → Rules page approval (`apply_rule`) → applies to future
+  runs only. Screen attachments scope a turn to the ref_ids the operator attached.
+- **Validation rules SI guarantee:** a rule's `effective_from` is stamped at `apply_rule`;
+  evaluation in `execute_job_once` is additive over the legacy stub and only ever considers runs
+  with `executed_at >= effective_from` — past `RunResult`s, success rates, reports and briefings are
+  never re-judged or rewritten.
 - **Memory:** off. `enable_memory = False`, no `save_memory` / `recall_memories` tools, `store=None`;
   nothing crosses sessions. Phase 2 may add field-name aliases via `commerce_common.memory`'s filter.
 
