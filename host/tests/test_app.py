@@ -13,6 +13,7 @@ from atworks_agent import (
     AtworksToolExecutor,
     JobDraft,
     JobKind,
+    RuleDraft,
 )
 from atworks_agent_runtime import AtworksAgent
 from atworks_host.app import create_app
@@ -245,6 +246,61 @@ async def test_route_discard_records_operator(client_backend):
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/changes/{job.job_id}/discard", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["change"]["discarded_by_kind"] == "operator"
+
+
+async def test_rules_route_needs_a_session(client):
+    assert (await client.get("/api/atworks/rules")).status_code in (401, 422)
+
+
+async def test_rules_route_lists_staged_rules(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    rule = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.get("/api/atworks/rules", headers={"X-Session-Id": sid})
+    assert r.status_code == 200
+    assert [row["rule_id"] for row in r.json()["rules"]] == [rule.rule_id]
+
+
+async def test_apply_rule_route_marks_then_consumes_approval(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    rule = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/rules/{rule.rule_id}/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True and body["change"]["status"] == "applied"
+
+    # the mark is spent on the first click — a second click (or a chat turn) finds no mark left.
+    r2 = await client.post(f"/api/atworks/rules/{rule.rule_id}/apply", headers={"X-Session-Id": sid})
+    if r2.status_code == 200:
+        assert r2.json()["ok"] is False
+    else:
+        assert r2.status_code == 400
+
+
+async def test_apply_unknown_rule_returns_ok_false(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post("/api/atworks/rules/rule-9999/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is False
+
+
+async def test_rule_route_discard_records_operator(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    rule = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/rules/{rule.rule_id}/discard", headers={"X-Session-Id": sid})
     body = r.json()
     assert r.status_code == 200 and body["ok"] is True
     assert body["change"]["discarded_by_kind"] == "operator"

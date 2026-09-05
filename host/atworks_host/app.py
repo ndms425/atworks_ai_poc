@@ -18,7 +18,7 @@ from atworks_agent import (
     AtworksSessionState,
 )
 from atworks_agent.aggregation import summarize_insights
-from atworks_agent.serialization import api_record, job_record, run_record
+from atworks_agent.serialization import api_record, job_record, rule_record, run_record
 from atworks_agent_runtime import AtworksAgent
 
 from .briefing import Briefings
@@ -147,6 +147,46 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/changes/{job_id:path}/discard")
     async def discard(job_id: str, record: CurrentSession) -> dict:
         return await job_action(job_id, "discard_job", record)
+
+    @router.get("/rules")
+    async def rules(record: CurrentSession) -> dict:
+        return {"rules": [rule_record(r) for r in await backend.list_rules(context(record))]}
+
+    async def rule_action(rule_id: str, action: str, record: Record) -> dict:
+        # rule_action은 job_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
+        # 클릭 한 번에 소비되고 남지 않는다. provenance는 모델을 지키는 게이트지 버튼을 지키는
+        # 게 아니다: 이 세션이 아직 모르는 rule이라도, 호스트가 그 rule을 실제로 소유(ledger)
+        # 하고 있으면 클릭 전에 기억시킨다.
+        if rule_id not in record.state.seen_rules:
+            known = next((r for r in await backend.list_rules(context(record)) if r.rule_id == rule_id), None)
+            if known is not None:
+                record.state.remember_rule(known)
+        if action == "apply_rule":
+            record.state.approved_rule_ids.add(rule_id)
+        else:
+            record.state.host_action_rule_ids.add(rule_id)
+        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
+                                        session=context(record), state=record.state, memory=agent.memory)
+        execution = await executor.execute(action, {"rule_id": rule_id})
+        record.state.approved_rule_ids.discard(rule_id)
+        record.state.host_action_rule_ids.discard(rule_id)
+        if execution.is_error:
+            raise HTTPException(status_code=400, detail=execution.result_text)
+        if execution.blocked is not None:
+            return {"ok": False, "change": None, "reason": execution.result_text}
+        record.pending_app_events.append(
+            f"Operator {'approved' if action == 'apply_rule' else 'dismissed'} rule {rule_id} from the card."
+        )
+        change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
+        return {"ok": True, "change": change}
+
+    @router.post("/rules/{rule_id}/apply")
+    async def approve_rule(rule_id: str, record: CurrentSession) -> dict:
+        return await rule_action(rule_id, "apply_rule", record)
+
+    @router.post("/rules/{rule_id}/discard")
+    async def discard_rule(rule_id: str, record: CurrentSession) -> dict:
+        return await rule_action(rule_id, "discard_rule", record)
 
     @router.post("/scheduler/tick")
     async def tick(now: str | None = None) -> dict:
