@@ -65,3 +65,14 @@ def test_rule_draft_requires_the_fields_its_kind_needs():
         RuleDraft(api_id="api-1", param="p", kind="membership", op="in", values=[])   # non-empty set
     ok = RuleDraft(api_id="api-1", param="amount", kind="compare", op=">=", value="0")
     assert ok.review_required is False
+
+
+def test_rule_draft_rejects_unrecognized_named_format():
+    with pytest.raises(ValueError):
+        RuleDraft(api_id="api-1", param="p", kind="format", format="phone")
+
+
+def test_evaluate_never_raises_on_unrecognized_format_bypassing_draft():
+    # Constructed directly (bypassing RuleDraft's validation) so evaluate() must stay total.
+    bad = rule(kind="format", op=None, value=None, format="phone", message="x")
+    assert evaluate(bad, "555") is False

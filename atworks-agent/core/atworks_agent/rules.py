@@ -107,6 +107,10 @@ class RuleDraft(BaseModel):
         elif self.kind == "format":
             if not (self.format or self.pattern):
                 raise ValueError("format rule needs a named format or a pattern")
+            if self.format is not None and self.format not in NAMED_FORMATS:
+                raise ValueError(
+                    f"named format {self.format!r} must be one of {', '.join(NAMED_FORMATS)}"
+                )
             if self.pattern is not None:
                 try:
                     re.compile(self.pattern)
@@ -140,7 +144,7 @@ def evaluate(rule: ValidationRule, value: str | None) -> bool:
     if rule.kind == "membership":
         return (value in rule.values) if rule.op == "in" else (value not in rule.values)
     if rule.kind == "format":
-        pattern = NAMED_FORMATS[rule.format] if rule.format else (rule.pattern or "")
+        pattern = NAMED_FORMATS.get(rule.format, "") if rule.format else (rule.pattern or "")
         try:
             return re.fullmatch(pattern, value) is not None
         except re.error:
