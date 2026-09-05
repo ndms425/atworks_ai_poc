@@ -4,8 +4,21 @@
 /** One entry per aTworks presentation tool. */
 
 import { type ChangeAction, type GenerativeBlockProps, UnknownBlock } from "web-shared";
+import type { FormatBatchAction } from "@/lib/useFormatBatchActions";
 import type { RuleAction } from "@/lib/useRuleActions";
-import type { AttachedItem, JobPreviewPayload, JobSpec, QuestionFormPayload, RulePreviewPayload, RunDigestPayload, RunGroupsPayload, ValidationRule } from "@/lib/types";
+import type {
+  AttachedItem,
+  FormatBatch,
+  FormatBatchPayload,
+  JobPreviewPayload,
+  JobSpec,
+  QuestionFormPayload,
+  RulePreviewPayload,
+  RunDigestPayload,
+  RunGroupsPayload,
+  ValidationRule,
+} from "@/lib/types";
+import FormatBatchCard from "./FormatBatchCard";
 import JobPreviewCard from "./JobPreviewCard";
 import QuestionFormCard from "./QuestionFormCard";
 import RulePreviewCard from "./RulePreviewCard";
@@ -17,6 +30,7 @@ export default function GenerativeBlock({
   status,
   onChangeAction,
   onRuleAction,
+  onFormatBatchAction,
   onPrefill,
   onSend,
   onAttach,
@@ -24,6 +38,8 @@ export default function GenerativeBlock({
   onChangeAction?: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
   /** /changes/ 가 아니라 /rules/{id}/{action}으로 나간다 — onChangeAction과는 별개 경로. */
   onRuleAction?: (id: string, action: RuleAction) => Promise<ValidationRule | null>;
+  /** /changes/ 도 /rules/ 도 아니라 /format-batches/{id}/{action}으로 나간다. */
+  onFormatBatchAction?: (id: string, action: FormatBatchAction) => Promise<FormatBatch | null>;
   onPrefill?: (text: string) => void;
   onSend?: (text: string) => void;
   onAttach?: (item: Omit<AttachedItem, "order">) => void;
@@ -37,6 +53,8 @@ export default function GenerativeBlock({
       return <JobPreviewCard payload={block.payload as JobPreviewPayload} onAct={onChangeAction} />;
     case "rule_preview":
       return <RulePreviewCard payload={block.payload as RulePreviewPayload} onRuleAct={onRuleAction} />;
+    case "format_batch":
+      return <FormatBatchCard payload={block.payload as FormatBatchPayload} onFormatBatchAct={onFormatBatchAction} />;
     case "question_form":
       return <QuestionFormCard payload={block.payload as QuestionFormPayload} onSubmit={onSend} />;
     default:

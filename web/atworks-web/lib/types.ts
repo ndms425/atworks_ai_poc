@@ -211,6 +211,9 @@ export interface ValidationRule {
   values: string[];
   format?: string | null;
   pattern?: string | null;
+  pass_examples: string[];
+  fail_examples: string[];
+  format_name?: string | null;
   review_required: boolean;
   message: string;
   status: "staged" | "applied" | "discarded";
@@ -245,7 +248,66 @@ export interface RulePreviewPayload {
   review_required: boolean;
   low_confidence: string[];
   impact?: RuleImpact;
-  format_hint?: { label: string; example?: string | null; pattern?: string | null };
+  format_hint?: {
+    label: string;
+    example?: string | null;
+    pattern?: string | null;
+    pass_examples?: string[];
+    fail_examples?: string[];
+  };
+  headline?: string;
+  note?: string;
+}
+
+export interface FormatDefinition {
+  name: string;
+  pattern: string;
+  pass_examples: string[];
+  fail_examples: string[];
+  builtin: boolean;
+  created_at?: string | null;
+  created_by?: string | null;
+}
+
+export type FormatBatchOutcome = "new" | "duplicate" | "invalid";
+
+export interface FormatBatchEntry {
+  name: string;
+  pattern: string;
+  pass_examples: string[];
+  fail_examples: string[];
+  outcome: FormatBatchOutcome;
+  reason?: string | null;
+}
+
+export interface FormatBatch {
+  batch_id: string;
+  change_id: string;
+  status: "staged" | "applied" | "discarded";
+  summary?: string | null;
+  entries: FormatBatchEntry[];
+  created_at: string;
+  created_by: string;
+  created_by_kind: "operator" | "agent";
+  applied_at?: string | null;
+  applied_by?: string | null;
+  discarded_at?: string | null;
+  discarded_by?: string | null;
+  discarded_by_kind?: "operator" | "agent" | null;
+  new_count: number;
+  duplicate_count: number;
+  invalid_count: number;
+}
+
+export interface FormatBatchPayload {
+  batch_id: string;
+  change_id: string;
+  batch: FormatBatch;
+  change?: FormatBatch;
+  entries: FormatBatchEntry[];
+  new_count: number;
+  duplicate_count: number;
+  invalid_count: number;
   headline?: string;
   note?: string;
 }

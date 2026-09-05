@@ -57,14 +57,37 @@ export default function RulePreviewCard({
         </tbody>
       </table>
       {payload.format_hint ? (
-        <p className="mx-3.5 mb-2 text-[12.5px] text-(--ink-soft)">
-          형식: {payload.format_hint.label}
-          {payload.format_hint.example
-            ? ` · 예: ${payload.format_hint.example}`
-            : payload.format_hint.pattern
-              ? ` · ${payload.format_hint.pattern}`
-              : ""}
-        </p>
+        <div className="mx-3.5 mb-2 text-[12.5px] text-(--ink-soft)">
+          <p>
+            형식: {payload.format_hint.label}
+            {rule.format_name ? ` (${rule.format_name})` : ""}
+            {payload.format_hint.example
+              ? ` · 예: ${payload.format_hint.example}`
+              : payload.format_hint.pattern
+                ? ` · ${payload.format_hint.pattern}`
+                : ""}
+          </p>
+          {payload.format_hint.pass_examples?.length ? (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="text-(--ok)">통과</span>
+              {payload.format_hint.pass_examples.map((example) => (
+                <span key={`pass-${example}`} className="rounded-full bg-(--ok-soft) px-2 py-0.5 font-mono text-[11.5px] text-(--ink)">
+                  {example}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {payload.format_hint.fail_examples?.length ? (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="text-(--danger)">실패</span>
+              {payload.format_hint.fail_examples.map((example) => (
+                <span key={`fail-${example}`} className="rounded-full bg-(--danger-soft) px-2 py-0.5 font-mono text-[11.5px] text-(--ink)">
+                  {example}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
       ) : null}
       {payload.review_required ? (
         <div className="mx-3.5 mb-2 flex items-start gap-2 rounded-[11px] bg-(--warn-soft) px-3 py-2 text-[12.5px] leading-snug text-(--ink)">
