@@ -258,6 +258,17 @@ def test_ledger_apply_rejects_second_rule_once_cap_reached_by_a_prior_apply():
         ledger.apply(b.rule_id, actor="op")
 
 
+def test_ledger_apply_rebuilds_raw_pattern_format_rule_with_examples():
+    # apply() rebuilds a RuleDraft from the stored ValidationRule to recheck guardrails; a
+    # raw-pattern FORMAT rule's RuleDraft needs pass_examples/fail_examples carried through
+    # or its _kind_fields validator raises (the same class of bug check_apply_rule had).
+    ledger = RuleLedger(CFG)
+    staged = ledger.stage(_draft(kind="format", op=None, value=None, pattern=r"^\d+$",
+                                  pass_examples=["123"], fail_examples=["12a"]), actor="op")
+    applied = ledger.apply(staged.rule_id, actor="op")
+    assert applied.status is RuleStatus.APPLIED
+
+
 def test_ledger_apply_rechecks_guardrails_under_current_config():
     # A rule that is valid at stage time but violates a param guardrail against the ledger's
     # own catalogue (added after staging) must still be caught at apply.

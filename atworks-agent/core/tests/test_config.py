@@ -31,3 +31,9 @@ def test_matrix_caps_are_config_fields_with_defaults():
     cfg = AtworksAgentConfig(model="m")
     assert (cfg.max_target_envs_per_job, cfg.max_schedules_per_job,
             cfg.max_test_data_sets, cfg.max_matrix_size) == (2, 3, 5, 400)
+
+
+def test_format_rule_caps_are_config_fields_with_defaults():
+    cfg = AtworksAgentConfig(model="m")
+    assert (cfg.min_format_examples, cfg.max_format_examples,
+            cfg.max_format_library, cfg.max_format_batch) == (1, 8, 200, 30)

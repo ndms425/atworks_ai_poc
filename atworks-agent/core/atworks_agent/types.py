@@ -236,7 +236,7 @@ class ValidationRule(BaseModel):
     pattern: str | None = Field(default=None, max_length=200)
     pass_examples: list[str] = Field(default_factory=list)
     fail_examples: list[str] = Field(default_factory=list)
-    save_format_as: str | None = None
+    save_format_as: str | None = Field(default=None, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
     review_required: bool = False
     message: str = Field(max_length=200)
     status: RuleStatus = RuleStatus.STAGED
