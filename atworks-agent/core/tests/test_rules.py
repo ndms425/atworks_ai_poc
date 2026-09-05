@@ -13,6 +13,7 @@ from atworks_agent.rules import (
     check_rule_guardrails,
     evaluate,
     render_message,
+    verify_examples,
 )
 from atworks_agent.types import (  # noqa: F401 -- interface check: importable from types
     ActorKind,
@@ -70,6 +71,47 @@ def test_named_format_and_raw_pattern():
     raw = rule(kind="format", op=None, value=None, pattern="^[A-Z]{3}$", review_required=True, message="x")
     assert evaluate(raw, "ABC") is True and evaluate(raw, "ab") is False
     assert set(NAMED_FORMATS) >= {"email", "date", "iso8601", "uuid", "number"}
+
+
+def test_verify_examples_empty_when_pattern_classifies_everything_correctly():
+    assert verify_examples(r"^\d+$", ["123", "0"], ["12a", "abc"]) == []
+
+
+def test_verify_examples_reports_pass_example_that_does_not_match():
+    bad = verify_examples(r"^\d+$", ["123", "12a"], ["abc"])
+    assert any("12a" in m and "does not match" in m for m in bad)
+
+
+def test_verify_examples_reports_fail_example_that_matches():
+    bad = verify_examples(r"^\d+$", ["123"], ["999"])
+    assert any("999" in m and "unexpectedly matches" in m for m in bad)
+
+
+def test_verify_examples_reports_uncompilable_pattern_without_raising():
+    bad = verify_examples("([", ["x"], ["y"])
+    assert any("does not compile" in m for m in bad)
+
+
+def test_rule_draft_with_raw_pattern_stages_with_good_examples():
+    draft = RuleDraft(api_id="api-1", param="p", kind="format", pattern=r"^\d+$",
+                      pass_examples=["123"], fail_examples=["12a"])
+    assert draft.pass_examples == ["123"] and draft.fail_examples == ["12a"]
+
+
+def test_rule_draft_with_raw_pattern_raises_naming_the_bad_fail_example():
+    with pytest.raises(ValueError, match="999"):
+        RuleDraft(api_id="api-1", param="p", kind="format", pattern=r"^\d+$",
+                 pass_examples=["123"], fail_examples=["999"])
+
+
+def test_rule_draft_with_raw_pattern_and_no_examples_raises():
+    with pytest.raises(ValueError):
+        RuleDraft(api_id="api-1", param="p", kind="format", pattern=r"^\d+$")
+
+
+def test_rule_draft_with_named_format_needs_no_examples():
+    draft = RuleDraft(api_id="api-1", param="email", kind="format", format="email")
+    assert draft.pass_examples == [] and draft.fail_examples == []
 
 
 def test_rule_draft_rejects_uncompilable_pattern():

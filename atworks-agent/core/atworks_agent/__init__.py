@@ -19,6 +19,7 @@ from .rules import (
     ValidationRule,
     check_rule_guardrails,
     evaluate,
+    verify_examples,
 )
 from .selection import Resolution, resolve_select_where
 from .types import (

@@ -61,6 +61,22 @@ def _as_number(text: str) -> float | None:
         return None
 
 
+def verify_examples(pattern: str, pass_examples: list[str], fail_examples: list[str]) -> list[str]:
+    """Empty result = the pattern classifies every example correctly. Never raises."""
+    try:
+        compiled = re.compile(pattern)
+    except re.error as error:
+        return [f"pattern does not compile: {error}"]
+    bad: list[str] = []
+    for value in pass_examples:
+        if compiled.fullmatch(value) is None:
+            bad.append(f"pass example {value!r} does not match the pattern")
+    for value in fail_examples:
+        if compiled.fullmatch(value) is not None:
+            bad.append(f"fail example {value!r} unexpectedly matches the pattern")
+    return bad
+
+
 class RuleDraft(BaseModel):
     """stage_rule 입력이 검증·정규화된 뒤의 모양. 백엔드는 이걸 받아 ValidationRule을 만든다."""
     model_config = ConfigDict(extra="forbid")
@@ -72,6 +88,9 @@ class RuleDraft(BaseModel):
     values: list[str] = Field(default_factory=list, max_length=200)
     format: str | None = None
     pattern: str | None = Field(default=None, max_length=200)
+    pass_examples: list[str] = Field(default_factory=list)
+    fail_examples: list[str] = Field(default_factory=list)
+    save_format_as: str | None = Field(default=None, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
     summary: str | None = Field(default=None, max_length=200)
     confidence: dict[str, float] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
@@ -101,6 +120,13 @@ class RuleDraft(BaseModel):
                     re.compile(self.pattern)
                 except re.error as error:
                     raise ValueError(f"pattern is not a valid regex: {error}") from error
+            if self.pattern is not None and self.format is None:
+                if not self.pass_examples or not self.fail_examples:
+                    raise ValueError(
+                        "a raw pattern needs at least one pass example and one fail example"
+                    )
+                if bad := verify_examples(self.pattern, self.pass_examples, self.fail_examples):
+                    raise ValueError(bad[0])
         return self
 
     def message(self) -> str:
@@ -182,6 +208,8 @@ class RuleLedger:
         rule = ValidationRule(
             rule_id=f"rule-{self._sequence:04d}", api_id=draft.api_id, param=draft.param, kind=draft.kind,
             op=draft.op, value=draft.value, values=list(draft.values), format=draft.format, pattern=draft.pattern,
+            pass_examples=list(draft.pass_examples), fail_examples=list(draft.fail_examples),
+            save_format_as=draft.save_format_as,
             review_required=draft.review_required, message=draft.message(),
             confidence=dict(draft.confidence), assumptions=list(draft.assumptions),
             created_at=datetime.now(UTC), created_by=actor, created_by_kind=actor_kind)
@@ -202,7 +230,8 @@ class RuleLedger:
             raise RuleGuardrailViolation([f"{rule.api_id} already has {applied_for_api} applied rules; "
                                           f"the limit is {self._config.max_rules_per_api}"])
         draft = RuleDraft(api_id=rule.api_id, param=rule.param, kind=rule.kind, op=rule.op, value=rule.value,
-                          values=list(rule.values), format=rule.format, pattern=rule.pattern)
+                          values=list(rule.values), format=rule.format, pattern=rule.pattern,
+                          pass_examples=list(rule.pass_examples), fail_examples=list(rule.fail_examples))
         api = self._apis.get(rule.api_id) if self._apis else None
         if violations := check_rule_guardrails(draft, self._config, api):
             raise RuleGuardrailViolation(violations)

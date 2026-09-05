@@ -52,6 +52,10 @@ class AtworksAgentConfig(BaseAgentConfig):
     allowed_rule_kinds: tuple[str, ...] = ("compare", "membership", "required", "format")
     allowed_compare_ops: tuple[str, ...] = (">=", ">", "<=", "<", "==", "!=")
     allowed_named_formats: tuple[str, ...] = ("email", "date", "iso8601", "uuid", "number")
+    min_format_examples: int = Field(default=1, ge=0)
+    max_format_examples: int = Field(default=8, ge=1)
+    max_format_library: int = Field(default=200, ge=1)
+    max_format_batch: int = Field(default=30, ge=1)
 
     # -- 집계 (aggregate_runs · /runs/insights · 브리핑) --------------------------------
     max_aggregate_runs: int = Field(default=2000, ge=1)           # list_runs limit for aggregation

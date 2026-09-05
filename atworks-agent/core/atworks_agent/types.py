@@ -234,6 +234,9 @@ class ValidationRule(BaseModel):
     values: list[str] = Field(default_factory=list)
     format: str | None = None
     pattern: str | None = Field(default=None, max_length=200)
+    pass_examples: list[str] = Field(default_factory=list)
+    fail_examples: list[str] = Field(default_factory=list)
+    save_format_as: str | None = None
     review_required: bool = False
     message: str = Field(max_length=200)
     status: RuleStatus = RuleStatus.STAGED
