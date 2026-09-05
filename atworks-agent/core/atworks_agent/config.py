@@ -64,6 +64,11 @@ class AtworksAgentConfig(BaseAgentConfig):
     max_format_library: int = Field(default=200, ge=1)
     max_format_batch: int = Field(default=30, ge=1)
 
+    # -- 화면 지시어 (navigate_screen/highlight_screen) --------------------------------
+    enable_screen_directives: bool = True
+    max_highlight_targets: int = Field(default=8, ge=1)
+    max_screen_visible: int = Field(default=40, ge=1)
+
     # -- 값 동등성 비교 (ComparisonProfile ignore-spec) --------------------------------
     max_ignore_paths: int = Field(default=200, ge=1)
 
@@ -110,6 +115,10 @@ class AtworksAgentConfig(BaseAgentConfig):
     def stages_parity(self) -> bool:
         return self.enable_parity
 
+    @property
+    def stages_screen_directives(self) -> bool:
+        return self.enable_screen_directives
+
     def thinking_request_fields(self) -> dict:
         """BaseAgentConfig는 항상 `thinking` 필드를 보낸다. 비-Anthropic 모델은 그 필드를 거부할 수
         있으므로 스위치가 꺼져 있으면 아무것도 보내지 않는다."""
@@ -131,4 +140,6 @@ class AtworksAgentConfig(BaseAgentConfig):
                 "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles",
                 "recommend_ignore_paths", "present_parity_summary", "present_profile_preview",
             }
+        if not self.enable_screen_directives:
+            names |= {"navigate_screen", "highlight_screen"}
         return frozenset(names)

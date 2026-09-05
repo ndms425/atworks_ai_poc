@@ -16,6 +16,9 @@ from atworks_agent.types import (
     JobStatus,
     RunResult,
     RunStatus,
+    ScreenFilter,
+    ScreenState,
+    ScreenTarget,
     TestDataSet,
     ValidationRule,
 )
@@ -186,3 +189,19 @@ def test_seen_format_batches_survives_the_session_json_round_trip():
     assert isinstance(known, FormatBatch)
     assert known.entries[0].outcome == "new"
     assert known.new_count == 1
+
+
+def test_screen_state_round_trips_as_a_model_on_session_state():
+    state = AtworksSessionState()
+    state.current_screen = ScreenState(view="runs", visible=[ScreenTarget(kind="run", ref_id="run-0031")])
+    restored = AtworksSessionState.model_validate(json.loads(state.model_dump_json()))
+    assert isinstance(restored.current_screen, ScreenState)
+    assert restored.current_screen.visible[0].ref_id == "run-0031"
+
+
+def test_screen_filter_rejects_unknown_keys_and_bad_status():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ScreenFilter(status="non_pass")
+    with pytest.raises(ValidationError):
+        ScreenFilter(group="payment")

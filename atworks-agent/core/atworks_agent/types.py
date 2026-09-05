@@ -360,6 +360,30 @@ class AttachedItem(BaseModel):
         return {str(k)[:40]: str(v)[:120] for k, v in list(value.items())[:8]}
 
 
+# -- 화면 상태 (navigate_screen/highlight_screen 지시어) --------------------------------
+
+ScreenTargetKind = Literal["api", "run", "job", "rule"]
+
+
+class ScreenTarget(BaseModel):
+    kind: ScreenTargetKind
+    ref_id: str = Field(max_length=64)
+    label: str | None = Field(default=None, max_length=120)
+
+
+class ScreenFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["all", "pass", "fail", "error"] | None = None
+    query: str | None = Field(default=None, max_length=80)
+
+
+class ScreenState(BaseModel):
+    view: Literal["home", "apis", "runs", "jobs", "rules"]
+    focus: ScreenTarget | None = None
+    filter: ScreenFilter | None = None
+    visible: list[ScreenTarget] = Field(default_factory=list, max_length=40)
+
+
 # -- 세션 ------------------------------------------------------------------------------
 
 class AtworksSessionContext(ClockContext):
@@ -398,6 +422,8 @@ class AtworksSessionState(BaseModel):
     seen_profiles: dict[str, ComparisonProfile] = Field(default_factory=dict)
     approved_profile_ids: set[str] = Field(default_factory=set)
     host_action_profile_ids: set[str] = Field(default_factory=set)
+    # Typed with the real model so it survives the session JSON round-trip
+    current_screen: ScreenState | None = None
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)

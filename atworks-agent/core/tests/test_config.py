@@ -43,3 +43,15 @@ def test_format_rule_caps_are_config_fields_with_defaults():
     cfg = AtworksAgentConfig(model="m")
     assert (cfg.min_format_examples, cfg.max_format_examples,
             cfg.max_format_library, cfg.max_format_batch) == (1, 8, 200, 30)
+
+
+def test_screen_directive_tools_are_absent_when_disabled():
+    on = AtworksAgentConfig(model="m").absent_tools()
+    off = AtworksAgentConfig(model="m", enable_screen_directives=False).absent_tools()
+    assert not {"navigate_screen", "highlight_screen"} & on
+    assert {"navigate_screen", "highlight_screen"} <= off
+
+
+def test_screen_directive_caps_have_defaults():
+    cfg = AtworksAgentConfig(model="m")
+    assert cfg.max_highlight_targets == 8 and cfg.max_screen_visible == 40 and cfg.stages_screen_directives
