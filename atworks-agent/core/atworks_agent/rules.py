@@ -102,7 +102,11 @@ class RuleDraft(BaseModel):
 
     @property
     def review_required(self) -> bool:
-        return self.kind == "format" and self.pattern is not None and self.format is None
+        # A rule that resolved format_name at stage time (Task 3 ruling) came from a trusted,
+        # already-verified library format -- format is cleared and pattern is filled in from
+        # that entry, but it must NOT read as an unvetted raw regex needing review.
+        return (self.kind == "format" and self.pattern is not None and self.format is None
+                and self.format_name is None)
 
     @model_validator(mode="after")
     def _kind_fields(self) -> RuleDraft:
@@ -232,10 +236,14 @@ def compute_batch_entries(
         if (dup := seen_patterns.get(item.pattern) or library.has_pattern(item.pattern)) is not None:
             entries.append(FormatBatchEntry(**base, outcome="duplicate", reason=f"same pattern as {dup}"))
             continue
-        if (len(item.pass_examples) < config.min_format_examples
-                or len(item.fail_examples) < config.min_format_examples):
+        # Every batch entry is a raw pattern (there is no named-format slot here), so it needs
+        # the same floor RuleDraft._kind_fields enforces on the single-rule path: at least one
+        # pass and one fail example, whatever config.min_format_examples says -- a 0-example
+        # unverified pattern must not slip into the library through the batch path.
+        min_examples = max(config.min_format_examples, 1)
+        if len(item.pass_examples) < min_examples or len(item.fail_examples) < min_examples:
             entries.append(FormatBatchEntry(**base, outcome="invalid",
-                reason=f"needs at least {config.min_format_examples} pass and fail example(s)"))
+                reason=f"needs at least {min_examples} pass and fail example(s)"))
             continue
         if bad := verify_examples(item.pattern, item.pass_examples, item.fail_examples):
             entries.append(FormatBatchEntry(**base, outcome="invalid", reason=bad[0]))
@@ -269,7 +277,6 @@ class FormatBatchLedger:
 
     def get(self, batch_id): return self._batches.get(batch_id)
     def pending(self): return [b for b in self._batches.values() if b.status is RuleStatus.STAGED]
-    def applied(self): return [b for b in self._batches.values() if b.status is RuleStatus.APPLIED]
 
     def apply(self, batch_id: str, *, actor: str) -> FormatBatch:
         batch = self._require_staged(batch_id, "apply")

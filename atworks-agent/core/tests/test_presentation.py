@@ -265,6 +265,24 @@ async def test_rule_preview_format_hint_includes_examples_for_raw_pattern():
     }
 
 
+async def test_rule_preview_review_required_true_for_raw_pattern_false_for_library_resolved():
+    # Fix round 2 ruling: the card must not warn "직접 검토 필요: 정규식" for a rule that
+    # resolved a trusted, already-verified library format (format_name set) -- only a fresh,
+    # unvetted raw pattern should carry review_required.
+    state = AtworksSessionState()
+    state.remember_rule(_rule(kind="format", op=None, value=None, pattern="^[A-Z]{3}$",
+                              review_required=True, message="code matches /^[A-Z]{3}$/"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001"}, _ctx(state), "Shown.")
+    assert outcome.events[0].data["payload"]["review_required"] is True
+
+    state2 = AtworksSessionState()
+    state2.remember_rule(_rule(kind="format", op=None, value=None, pattern=r"^\d{3}-\d{4}$",
+                               format_name="phone-digits", review_required=False,
+                               message="phone matches /^\\d{3}-\\d{4}$/"))
+    outcome2 = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001"}, _ctx(state2), "Shown.")
+    assert outcome2.events[0].data["payload"]["review_required"] is False
+
+
 async def test_rule_preview_refuses_unknown_rule():
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "nope"}, _ctx(AtworksSessionState()), "Shown.")
     assert outcome.blocked == "provenance"

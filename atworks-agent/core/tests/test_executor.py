@@ -469,6 +469,7 @@ async def test_stage_rule_raw_pattern_carries_examples_and_save_format_as(backen
     assert rule.pass_examples == ["C-1234"]
     assert rule.fail_examples == ["C-12"]
     assert rule.save_format_as == "contract-no"
+    assert rule.review_required is True   # fresh raw pattern, not yet vetted into the library
 
 
 async def test_stage_rule_below_min_format_examples_is_a_named_error(backend, skills, session, state):
@@ -518,6 +519,9 @@ async def test_stage_rule_resolves_a_saved_library_format_by_name(backend, confi
     assert rule.format is None
     assert rule.pattern == r"^\d{3}-\d{4}$"
     assert rule.format_name == "phone-digits"
+    # Fix round 2 ruling: resolving a trusted, already-verified library format must NOT flag
+    # for review -- only a fresh, unvetted raw pattern does.
+    assert rule.review_required is False
 
     from atworks_agent.rules import evaluate
     assert evaluate(rule, "123-4567") is True
@@ -548,6 +552,20 @@ async def test_stage_rule_resolving_a_saved_format_clears_save_format_as(backend
     assert rule.format_name == "phone-digits"
     assert rule.pattern == r"^\d{3}-\d{4}$"
     assert rule.save_format_as is None
+
+
+async def test_stage_rule_raw_pattern_with_misclassifying_example_is_refused(backend, config, skills, session, state):
+    # Safety spine at the tool boundary: RuleDraft._kind_fields runs verify_examples on a raw
+    # pattern before a rule can ever be staged. "12a" does not fullmatch ^\d+$, so it is a bad
+    # pass example -- stage_rule must refuse it, not silently stage a self-contradicting rule.
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {
+        "api_id": "api-1", "param": "amount", "kind": "format", "pattern": r"^\d+$",
+        "pass_examples": ["12a"], "fail_examples": ["abc"], "summary": "s",
+    })
+    assert out.is_error
+    assert "rule-0001" not in state.seen_rules
 
 
 async def test_stage_rule_unknown_format_name_is_a_named_error(backend, config, skills, session, state):

@@ -76,8 +76,8 @@ export default function FormatBatchCard({
         신규 {payload.new_count} · 중복 {payload.duplicate_count} · 무효 {payload.invalid_count}
       </p>
       <ul className="mx-3.5 my-2 divide-y divide-(--line) rounded-[11px] border border-(--line)">
-        {payload.entries.map((entry) => (
-          <EntryRow key={entry.name} entry={entry} />
+        {payload.entries.map((entry, i) => (
+          <EntryRow key={`${entry.name}-${i}`} entry={entry} />
         ))}
       </ul>
       <ApproveBar change={batch} busy={busy} error={error} canAct={canAct} onAct={(action) => void act(action)} />

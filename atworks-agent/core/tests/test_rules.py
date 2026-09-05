@@ -116,6 +116,18 @@ def test_rule_draft_with_raw_pattern_and_no_examples_raises():
         RuleDraft(api_id="api-1", param="p", kind="format", pattern=r"^\d+$")
 
 
+def test_rule_draft_review_required_true_for_fresh_raw_pattern_false_for_library_resolved():
+    # Fix round 2 ruling: a raw pattern authored fresh still needs review; a format_name means
+    # the executor resolved this against a trusted, already-verified library entry, so it must
+    # NOT read as an unvetted raw regex.
+    fresh = RuleDraft(api_id="api-1", param="p", kind="format", pattern=r"^\d+$",
+                      pass_examples=["123"], fail_examples=["12a"])
+    assert fresh.review_required is True
+    resolved = RuleDraft(api_id="api-1", param="p", kind="format", pattern=r"^\d{3}-\d{4}$",
+                         pass_examples=["123-4567"], fail_examples=["abc"], format_name="phone-digits")
+    assert resolved.review_required is False
+
+
 def test_rule_draft_with_named_format_needs_no_examples():
     draft = RuleDraft(api_id="api-1", param="email", kind="format", format="email")
     assert draft.pass_examples == [] and draft.fail_examples == []
@@ -471,6 +483,22 @@ def test_format_batch_below_min_format_examples_is_invalid():
     ]), actor="op")
     assert batch.entries[0].outcome == "invalid"
     assert "at least 2" in batch.entries[0].reason
+
+
+def test_format_batch_raw_pattern_with_no_examples_is_invalid_even_when_min_format_examples_is_zero():
+    # Fix round 2 ruling: the batch path must not let a 0-example unverified raw pattern into
+    # the library just because config.min_format_examples is 0 -- align with the >=1/>=1 floor
+    # RuleDraft._kind_fields enforces on the single-rule path.
+    cfg = AtworksAgentConfig(model="m", min_format_examples=0)
+    lib = FormatLibrary(max_size=cfg.max_format_library)
+    ledger = FormatBatchLedger(cfg, lib)
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$"},
+    ]), actor="op")
+    assert batch.entries[0].outcome == "invalid"
+    assert batch.new_count == 0 and batch.invalid_count == 1
+    ledger.apply(batch.batch_id, actor="op")
+    assert lib.get("phone-digits") is None
 
 
 def test_apply_format_batch_never_touches_runs_or_a_rule_ledger():
