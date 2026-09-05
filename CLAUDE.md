@@ -18,8 +18,13 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   (`.../jobs.py`), so stage and apply both get it, and is the schema's `maxItems`, so tool bytes
   stay a pure function of config: apis 100, envs 2, schedules 3, test-data sets 5,
   `max_matrix_size=400` (apis × envs × data), `max_schedule_count=14` (the **sum** of every
-  `count`), `allowed_target_envs=("dev","stg")` — every offending env named, never `all()`, never
-  just the first. Test-data keys must be `params` of a selected API.
+  `count`), `allowed_target_envs=("dev","stg","legacy","renewed")` — a named-target allow-list, not
+  just server environments: parity's `legacy`/`renewed` targets are the same string set, checked by
+  the same guardrail (stage and execute both), every offending name named, never `all()`, never
+  just the first; opening a new target is only ever widening this tuple. `target_endpoints:
+  dict[str,str]` maps a target name to a URL for the (future) REST adapter — Mock ignores it and
+  keys `stub_response`/`stub_verdict` off the name string alone; per-target auth is out of MVP
+  scope. Test-data keys must be `params` of a selected API.
 - **Execution contract.** One `execute_job_once` call = **one execution per schedule occurrence**.
   The scheduler (`host/atworks_host/scheduler.py`; no LLM on this path) emits one slot per schedule
   whose `done < count` and whose `due_at` has passed — two schedules advance independently, two due
@@ -72,7 +77,14 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   so an applied format can be offered to expand; inward — given a rule-less API,
   `RuleRecommendation`s built only from rules already applied to peer APIs' same-named params (an
   unmatched param suggests nothing). Each recommended target still stages and is approved as its
-  own rule.
+  own rule. `stage_profile` / `get_pending_profiles` / `apply_profile` / `discard_profile` /
+  `list_profiles` / `get_parity_report` → the comparison-profile ledger and the parity report
+  (below): `execute_job_once` now captures `RunResult.response_body: dict | None` at execution
+  time (Mock's `stub_response` injects a volatile `serverTime` and a real `api-004` `$.limit`
+  difference between targets); `stage_profile` drafts an ignore-spec (`ProfileDraft` → the
+  `ProfileLedger`, mirroring the rule ledger), `apply_profile` stamps `effective_from` and, if a
+  parity report already exists for the profile's job, re-diffs it from the STORED response
+  bodies with no new backend call and no new run.
 - **Identity and credentials:** auth mechanism is none in MVP (fixed `OPERATOR` constant; a
   production host derives the principal from its authentication). Backend calls carry server-side
   credentials the model never sees.
@@ -102,7 +114,14 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   get their own namespace too, never `/rules/` or `/changes/`: `GET /formats` (built-ins + saved),
   `GET /format-batches` (pending), `POST /format-batches/{id}/apply|discard`
   (`format_batch_action`, mirror of `rule_action`) — a Formats section on the Rules page and its own
-  `format_batch` card, posting only to `/format-batches`.
+  `format_batch` card, posting only to `/format-batches`. Comparison profiles get a third such
+  namespace, `/profiles` (`GET /profiles`(+`?job_id=`), `POST /profiles/{id}/apply|discard` via
+  `profile_action`, mirror of `rule_action`) — a Profiles section on the Rules page, its own
+  `profile_preview` card, and the profile lifecycle still rides `change_update` under the hood;
+  the parity block itself is not a new route, it lives inside the existing report template
+  (`host/atworks_host/reports.py` `_parity`), rendered from the same `data.json` `/reports/{job_id}`
+  already serves. Named parity targets (`legacy`, `renewed`) generalize `allowed_target_envs`
+  rather than replacing it — a parity job is an ordinary two-target `JobSpec`.
   **The report is where environments are compared**: a template rendered once
   over a `data.json` the scheduler refreshes, no LLM in the path — `summary.by_env` plus an
   api × data grid, one column per env from the latest run per cell with differing rows flagged,
@@ -120,7 +139,7 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   the card carries a server-computed `matrix` block — envs, data-set labels, executions, runs per
   execution, runs total — from `JobSpec` properties, never a model number. Rule layering: one-tool
   rules in `stage_job`'s description, the cross-tool contract in the prompt, procedures in skills.
-- **Flows covered:** five skills, loaded on demand over the prompt's index. (1) `failed-triage` —
+- **Flows covered:** six skills, loaded on demand over the prompt's index. (1) `failed-triage` —
   `list_runs {filters:{status:non_pass}}` → `rank_failed_runs` (deterministic `risk_v1`, no
   analysis delegate) → `present_run_digest`, population and items bound to one list window; also
   `aggregate_runs` → `present_run_groups` (component `run_groups`) for grouping by cause
@@ -137,7 +156,19 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `rule-authoring` — NL → a structured `ValidationRule` draft on a session-seen API param
   (`stage_rule`, four kinds: numeric compare, membership, required, format) → `present_rule_preview`
   (impact simulation, immutability note) → Rules page approval (`apply_rule`) → applies to future
-  runs only. Screen attachments scope a turn to the ref_ids the operator attached.
+  runs only; (6) `parity-compare` — resolve the API selection plus two named targets (e.g.
+  `legacy`/`renewed`) and identical test data → `stage_job` a two-target parity job → host
+  approval → the scheduler executes it and the report's parity block compares response BODIES
+  field-by-field (`compare_bodies`) → the operator reads the noise clusters
+  (`cluster_diffs`) → `recommend_ignore_paths` proposes an ignore-spec from those real clusters,
+  never fabricating a path with no cluster behind it → `stage_profile`/`present_profile_preview`
+  → Rules page (Profiles section) host approval (`apply_profile`) → `Reports.rediff` recomputes
+  the parity block from the STORED response bodies, no re-run. Value equivalence is judged only
+  by the deterministic engine, never the model; the model's role is to translate loose language
+  ("serverTime 무시해") into a structured ignore-spec and to orchestrate staging, nothing more; a
+  person approves every profile before it affects a report; and re-diffing over stored bodies
+  never re-judges or rewrites a past `RunResult`, the same immutability guarantee validation
+  rules already give. Screen attachments scope a turn to the ref_ids the operator attached.
 - **Validation rules SI guarantee:** a rule's `effective_from` is stamped at `apply_rule`;
   evaluation in `execute_job_once` is additive over the legacy stub and only ever considers runs
   with `executed_at >= effective_from` — past `RunResult`s, success rates, reports and briefings are

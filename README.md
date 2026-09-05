@@ -87,3 +87,13 @@ email/date/iso8601/uuid/number는 예시가 필요 없다). 승인된 raw-patter
 같은 이름의 param을 가진 다른 API들에 이미 적용된 규칙을 제안한다(대응하는 사례가 없으면 아무것도
 지어내지 않는다) — 제안된 규칙도 각각 개별 스테이징·승인을 거친다. Rules 페이지의 Formats 섹션에서
 `GET /formats`·`GET /format-batches`로 보고 `POST /format-batches/{id}/apply|discard`로 승인/폐기한다.
+
+## 값 병행 비교 (Value Parity)
+
+노후·신규 서버(예: `legacy`/`renewed`, 명명 타깃)에 같은 API·같은 테스트 데이터를 동시에 돌려
+**응답 값**까지 대량으로 비교한다 — 상태(pass/fail)만 같아도 payload가 다르면 리포트의 parity
+블록이 값 불일치로 잡아낸다. 매 호출마다 달라지는 `serverTime` 같은 필드는 노이즈일 뿐이라, 채팅에서
+"serverTime 무시해"라고 하면 실제 차이 클러스터를 근거로 무시 스펙(비교 프로파일)을 초안하고, Rules
+페이지의 Profiles 섹션에서 승인하면 **서버를 다시 부르지 않고** 저장된 응답 본문만 재비교해 노이즈가
+걷힌 리포트를 즉시 보여준다. 판정은 항상 결정론 엔진(`compare_bodies`)이 하고, 모델은 무시 경로를
+제안만 하며, 과거 run과 그 판정은 재비교로도 절대 바뀌지 않는다.
