@@ -9,11 +9,13 @@ import AssistantPanel from "@/components/AssistantPanel";
 import ApisView from "@/components/views/ApisView";
 import HomeView from "@/components/views/HomeView";
 import JobsView from "@/components/views/JobsView";
+import RulesView from "@/components/views/RulesView";
 import RunsView from "@/components/views/RunsView";
-import { api, UNREACHABLE } from "@/lib/api";
-import type { AttachedItem, JobSpec } from "@/lib/types";
+import { actOnRule, api, UNREACHABLE } from "@/lib/api";
+import type { RuleAction } from "@/lib/useRuleActions";
+import type { AttachedItem, JobSpec, ValidationRule } from "@/lib/types";
 
-type PortalView = "home" | "apis" | "runs" | "jobs";
+type PortalView = "home" | "apis" | "runs" | "jobs" | "rules";
 
 function StoreMark() {
   return (
@@ -62,6 +64,18 @@ export default function PortalPage() {
   useEffect(() => {
     setAssistantOpen(window.innerWidth >= 1024);
   }, []);
+
+  // /changes/ 가 아니라 /rules/{id}/{action}으로 나간다 — AssistantPanel의 onRuleAction과 같은 방식으로
+  // {ok, change} 응답에서 change만 꺼내고, 성공하면 다른 위젯도 다시 읽도록 refreshPortal을 부른다.
+  const onRuleAct = useCallback(
+    async (ruleId: string, action: RuleAction): Promise<ValidationRule | null> => {
+      const data = await actOnRule(ruleId, action);
+      const change = data?.change ?? null;
+      if (change) refreshPortal();
+      return change;
+    },
+    [refreshPortal],
+  );
 
   const askAssistant = useCallback((text: string) => {
     setAssistantOpen(true);
@@ -117,6 +131,7 @@ export default function PortalPage() {
       { id: "apis", label: "APIs", icon: "signal" },
       { id: "runs", label: "Runs", icon: "chart" },
       { id: "jobs", label: "Jobs", icon: "calendar" },
+      { id: "rules", label: "Rules", icon: "check" },
     ],
     [],
   );
@@ -154,6 +169,7 @@ export default function PortalPage() {
             {view === "apis" ? <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} onAttach={onAttach} /> : null}
             {view === "runs" ? <RunsView refreshKey={refreshKey} attachedCount={attached.length} onAttach={onAttach} /> : null}
             {view === "jobs" ? <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} onAttach={onAttach} /> : null}
+            {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} /> : null}
           </>
         ) : null}
       </PortalShell>
