@@ -11,6 +11,7 @@ from atworks_agent import (
     AtworksAgentConfig,
     AtworksSessionContext,
     AtworksToolExecutor,
+    FormatBatchDraft,
     JobDraft,
     JobKind,
     RuleDraft,
@@ -347,6 +348,88 @@ async def test_rule_route_discard_records_operator(client_backend):
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/rules/{rule.rule_id}/discard", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["change"]["discarded_by_kind"] == "operator"
+
+
+async def test_formats_route_needs_a_session(client):
+    assert (await client.get("/api/atworks/formats")).status_code in (401, 422)
+
+
+async def test_formats_route_lists_the_library(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.get("/api/atworks/formats", headers={"X-Session-Id": sid})
+    assert r.status_code == 200
+    names = [row["name"] for row in r.json()["formats"]]
+    assert "email" in names
+
+
+async def test_format_batches_route_needs_a_session(client):
+    assert (await client.get("/api/atworks/format-batches")).status_code in (401, 422)
+
+
+async def test_format_batches_route_lists_staged_batches(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    batch = await backend.stage_format_batch(
+        session, FormatBatchDraft(formats=[{
+            "name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+            "pass_examples": ["123-4567"], "fail_examples": ["abc"],
+        }]), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.get("/api/atworks/format-batches", headers={"X-Session-Id": sid})
+    assert r.status_code == 200
+    assert [row["batch_id"] for row in r.json()["format_batches"]] == [batch.batch_id]
+
+
+async def test_apply_format_batch_route_marks_then_consumes_approval(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    batch = await backend.stage_format_batch(
+        session, FormatBatchDraft(formats=[{
+            "name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+            "pass_examples": ["123-4567"], "fail_examples": ["abc"],
+        }]), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/format-batches/{batch.batch_id}/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True and body["change"]["status"] == "applied"
+    assert body["change"]["new_count"] == 1
+
+    names = [row["name"] for row in (await client.get(
+        "/api/atworks/formats", headers={"X-Session-Id": sid}
+    )).json()["formats"]]
+    assert "phone-digits" in names
+
+    # the mark is spent on the first click — a second click (or a chat turn) finds no mark left.
+    r2 = await client.post(f"/api/atworks/format-batches/{batch.batch_id}/apply", headers={"X-Session-Id": sid})
+    if r2.status_code == 200:
+        assert r2.json()["ok"] is False
+    else:
+        assert r2.status_code == 400
+
+
+async def test_apply_unknown_format_batch_returns_ok_false(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post("/api/atworks/format-batches/batch-9999/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is False
+
+
+async def test_format_batch_route_discard_records_operator(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    batch = await backend.stage_format_batch(
+        session, FormatBatchDraft(formats=[{
+            "name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+            "pass_examples": ["123-4567"], "fail_examples": ["abc"],
+        }]), ActorKind.AGENT
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/format-batches/{batch.batch_id}/discard", headers={"X-Session-Id": sid})
     body = r.json()
     assert r.status_code == 200 and body["ok"] is True
     assert body["change"]["discarded_by_kind"] == "operator"

@@ -18,7 +18,14 @@ from atworks_agent import (
     AtworksSessionState,
 )
 from atworks_agent.aggregation import summarize_insights
-from atworks_agent.serialization import api_record, job_record, rule_record, run_record
+from atworks_agent.serialization import (
+    api_record,
+    format_batch_record,
+    format_record,
+    job_record,
+    rule_record,
+    run_record,
+)
 from atworks_agent_runtime import AtworksAgent
 
 from .briefing import Briefings
@@ -187,6 +194,50 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/rules/{rule_id}/discard")
     async def discard_rule(rule_id: str, record: CurrentSession) -> dict:
         return await rule_action(rule_id, "discard_rule", record)
+
+    @router.get("/formats")
+    async def formats(record: CurrentSession) -> dict:
+        return {"formats": [format_record(f) for f in await backend.list_formats(context(record))]}
+
+    @router.get("/format-batches")
+    async def format_batches(record: CurrentSession) -> dict:
+        return {"format_batches": [format_batch_record(b) for b in await backend.get_pending_format_batches(context(record))]}
+
+    async def format_batch_action(batch_id: str, action: str, record: Record) -> dict:
+        # format_batch_action은 rule_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
+        # 클릭 한 번에 소비되고 남지 않는다. provenance는 모델을 지키는 게이트지 버튼을 지키는
+        # 게 아니다: 이 세션이 아직 모르는 batch라도, 호스트가 그 batch를 실제로 소유(ledger)
+        # 하고 있으면 클릭 전에 기억시킨다.
+        if batch_id not in record.state.seen_format_batches:
+            known = next((b for b in await backend.get_pending_format_batches(context(record)) if b.batch_id == batch_id), None)
+            if known is not None:
+                record.state.remember_format_batch(known)
+        if action == "apply_format_batch":
+            record.state.approved_format_batch_ids.add(batch_id)
+        else:
+            record.state.host_action_format_batch_ids.add(batch_id)
+        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
+                                        session=context(record), state=record.state, memory=agent.memory)
+        execution = await executor.execute(action, {"batch_id": batch_id})
+        record.state.approved_format_batch_ids.discard(batch_id)
+        record.state.host_action_format_batch_ids.discard(batch_id)
+        if execution.is_error:
+            raise HTTPException(status_code=400, detail=execution.result_text)
+        if execution.blocked is not None:
+            return {"ok": False, "change": None, "reason": execution.result_text}
+        record.pending_app_events.append(
+            f"Operator {'approved' if action == 'apply_format_batch' else 'dismissed'} format batch {batch_id} from the card."
+        )
+        change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
+        return {"ok": True, "change": change}
+
+    @router.post("/format-batches/{batch_id}/apply")
+    async def approve_format_batch(batch_id: str, record: CurrentSession) -> dict:
+        return await format_batch_action(batch_id, "apply_format_batch", record)
+
+    @router.post("/format-batches/{batch_id}/discard")
+    async def discard_format_batch(batch_id: str, record: CurrentSession) -> dict:
+        return await format_batch_action(batch_id, "discard_format_batch", record)
 
     @router.post("/scheduler/tick")
     async def tick(now: str | None = None) -> dict:
