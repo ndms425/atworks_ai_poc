@@ -247,6 +247,7 @@ class ValidationRule(BaseModel):
     effective_from: datetime | None = None
     confidence: dict[str, float] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
+    guardrail_notes: list[str] = Field(default_factory=list)
     created_at: datetime
     created_by: str
     created_by_kind: ActorKind = ActorKind.OPERATOR

@@ -423,6 +423,12 @@ class RuleLedger:
         self._rules[rule_id] = updated
         return updated
 
+    def add_guardrail_note(self, rule_id: str, note: str) -> ValidationRule:
+        rule = self._rules[rule_id]
+        updated = rule.model_copy(update={"guardrail_notes": [*rule.guardrail_notes, note]})
+        self._rules[rule_id] = updated
+        return updated
+
     def _require_staged(self, rule_id: str, action: str) -> ValidationRule:
         rule = self._rules.get(rule_id)
         if rule is None:

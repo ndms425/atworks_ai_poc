@@ -102,7 +102,14 @@ class AtworksBackend(ABC):
     async def apply_rule(self, session: AtworksSessionContext, rule_id: str) -> ValidationRule:
         """승인된 규칙을 발효시킨다. REST 구현의 의무: 이 호출 시점의 timestamp를
         ``effective_from``에 찍어야 한다 — 그 이전에 실행된 run은 절대 건드리지 않고, 그 이후의
-        실행만 이 규칙을 평가받는다(과거는 안 건드린다는 불변식은 여기서 시작한다)."""
+        실행만 이 규칙을 평가받는다(과거는 안 건드린다는 불변식은 여기서 시작한다).
+
+        이 호출은 host 승인 마크를 통과한 뒤에만 실행되므로(``require_host_approval``), 규칙이
+        ``save_format_as``와 ``pattern``을 함께 가진 raw-pattern 포맷 규칙이면 그 승인은 포맷
+        라이브러리 승격도 함께 승인한 것이다 — 구현은 발효 직후 그 이름으로 포맷 라이브러리에
+        더해야 한다(이름/패턴 충돌이나 라이브러리 만원이면 조용히 건너뛰고 규칙에 guardrail note를
+        남긴다; 승격 실패는 규칙 적용 자체를 실패시키지 않는다). 라이브러리 추가는 inert하므로 어떤
+        run 판정도 바꾸지 않는다."""
 
     @abstractmethod
     async def discard_rule(

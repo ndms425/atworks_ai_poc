@@ -8,6 +8,7 @@ from atworks_agent import (
     FormatBatchDraft,
     FormatDefinition,
     RuleDraft,
+    RuleStatus,
 )
 from atworks_host.mock_backend import MockAtworks
 
@@ -119,6 +120,83 @@ async def test_format_batch_apply_leaves_run_history_and_verdicts_untouched():
     await b.apply_format_batch(SESSION, staged.batch_id)
     after = [r.model_dump(mode="json") for r in await b.list_runs(SESSION, limit=1000)]
     assert before == after
+
+
+# -- Task 5: applying a rule promotes save_format_as into the format library ----------
+
+
+async def test_apply_rule_promotes_save_format_as_into_the_format_library():
+    b = _backend()
+    staged = await b.stage_rule(SESSION, RuleDraft(
+        api_id="api-001", param="amount", kind="format", pattern=r"^\d{3}-\d{4}$",
+        pass_examples=["123-4567"], fail_examples=["abc"], save_format_as="phone-digits",
+    ), ActorKind.AGENT)
+
+    applied = await b.apply_rule(SESSION, staged.rule_id)
+
+    assert applied.status == RuleStatus.APPLIED
+    assert applied.guardrail_notes == []
+    saved = await b.get_format(SESSION, "phone-digits")
+    assert saved is not None
+    assert saved.pattern == r"^\d{3}-\d{4}$"
+    assert saved.pass_examples == ["123-4567"]
+    assert saved.fail_examples == ["abc"]
+    assert saved.created_by == "minseong"
+
+    # the newly-saved format can now be referenced by name from a later stage_rule
+    from atworks_agent.rules import evaluate
+    defn = await b.get_format(SESSION, "phone-digits")
+    draft2 = RuleDraft(api_id="api-003", param="paymentId", kind="format", pattern=defn.pattern,
+                       pass_examples=defn.pass_examples, fail_examples=defn.fail_examples,
+                       format_name="phone-digits", summary="reuse")
+    rule2 = await b.stage_rule(SESSION, draft2, ActorKind.AGENT)
+    assert rule2.format_name == "phone-digits"
+    assert evaluate(rule2, "123-4567") is True
+
+
+async def test_apply_rule_skips_promotion_on_name_collision_without_failing_apply():
+    b = _backend()
+    await b.save_format(SESSION, FormatDefinition(
+        name="phone-digits", pattern=r"^\d{2}-\d{2}$",
+        pass_examples=["12-34"], fail_examples=["x"], created_by="minseong",
+    ))
+    staged = await b.stage_rule(SESSION, RuleDraft(
+        api_id="api-001", param="amount", kind="format", pattern=r"^\d{3}-\d{4}$",
+        pass_examples=["123-4567"], fail_examples=["abc"], save_format_as="phone-digits",
+    ), ActorKind.AGENT)
+
+    applied = await b.apply_rule(SESSION, staged.rule_id)
+
+    # the rule still applies -- promotion skipping never fails apply_rule
+    assert applied.status == RuleStatus.APPLIED
+    assert len(applied.guardrail_notes) == 1
+    assert "phone-digits" in applied.guardrail_notes[0]
+    assert "name exists" in applied.guardrail_notes[0]
+    # the pre-existing library entry is untouched
+    existing = await b.get_format(SESSION, "phone-digits")
+    assert existing.pattern == r"^\d{2}-\d{2}$"
+
+
+async def test_apply_rule_promotion_does_not_change_any_run_verdict():
+    b = _backend()
+    before = {run_id: (run.status, list(run.failed_rules)) for run_id, run in b.runs.items()}
+    staged = await b.stage_rule(SESSION, RuleDraft(
+        api_id="api-001", param="amount", kind="format", pattern=r"^\d{3}-\d{4}$",
+        pass_examples=["123-4567"], fail_examples=["abc"], save_format_as="phone-digits",
+    ), ActorKind.AGENT)
+    await b.apply_rule(SESSION, staged.rule_id)
+    after = {run_id: (run.status, list(run.failed_rules)) for run_id, run in b.runs.items()}
+    assert after == before
+
+
+async def test_apply_rule_without_save_format_as_does_not_touch_the_library():
+    b = _backend()
+    before = {f.name for f in await b.list_formats(SESSION)}
+    staged = await b.stage_rule(SESSION, RuleDraft(api_id="api-001", param="customerId", kind="required"), ActorKind.AGENT)
+    applied = await b.apply_rule(SESSION, staged.rule_id)
+    assert applied.guardrail_notes == []
+    after = {f.name for f in await b.list_formats(SESSION)}
+    assert after == before
 
 
 async def test_discard_format_batch():

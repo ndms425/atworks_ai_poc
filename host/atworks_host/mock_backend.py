@@ -142,7 +142,22 @@ class MockAtworks(AtworksBackend):
         return self.rule_ledger.pending()
 
     async def apply_rule(self, session, rule_id):
-        return self.rule_ledger.apply(rule_id, actor=session.operator)
+        """규칙을 발효시킨다. Task 5 ruling: save_format_as를 가진 raw-pattern 규칙(패턴이 있는
+        규칙)이 승인되면 그 즉시 포맷 라이브러리에도 승격한다 -- apply_rule은 host 승인 마크 뒤에서만
+        불리므로 이 승격도 승인된 것이다. library.add가 (False, reason)을 돌려주면(이름/패턴 충돌,
+        라이브러리 만원) 규칙 적용 자체는 실패시키지 않고 guardrail_notes에 한 줄 남긴다 -- 라이브러리
+        추가는 inert하므로 판정에는 아무 영향이 없다."""
+        applied = self.rule_ledger.apply(rule_id, actor=session.operator)
+        if applied.save_format_as and applied.pattern:
+            added, skip_reason = self.format_library.add(FormatDefinition(
+                name=applied.save_format_as, pattern=applied.pattern,
+                pass_examples=list(applied.pass_examples), fail_examples=list(applied.fail_examples),
+                created_at=datetime.now(UTC), created_by=session.operator,
+            ))
+            if not added:
+                applied = self.rule_ledger.add_guardrail_note(
+                    rule_id, f"format {applied.save_format_as!r} was not saved: {skip_reason}")
+        return applied
 
     async def discard_rule(self, session, rule_id, actor_kind):
         return self.rule_ledger.discard(rule_id, actor=session.operator, actor_kind=actor_kind)
