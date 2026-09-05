@@ -183,6 +183,11 @@ def check_rule_guardrails(draft: RuleDraft, config: AtworksAgentConfig, api: Api
                           f"({', '.join(api.params) or 'none declared'})")
     if draft.kind == "membership" and len(draft.values) > config.max_membership_values:
         violations.append(f"membership list has {len(draft.values)} values; the limit is {config.max_membership_values}")
+    if draft.kind == "format":
+        if len(draft.pass_examples) > config.max_format_examples:
+            violations.append(f"format rule has {len(draft.pass_examples)} pass examples; the limit is {config.max_format_examples}")
+        if len(draft.fail_examples) > config.max_format_examples:
+            violations.append(f"format rule has {len(draft.fail_examples)} fail examples; the limit is {config.max_format_examples}")
     if draft.kind == "format" and draft.format is not None and draft.format not in config.allowed_named_formats:
         violations.append(f"named format {draft.format!r} is not one of {', '.join(config.allowed_named_formats)}")
     return violations

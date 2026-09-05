@@ -188,6 +188,14 @@ def test_check_rule_guardrails_membership_over_limit():
     assert any("3 values" in m and "limit is 2" in m for m in v)
 
 
+def test_check_rule_guardrails_format_examples_over_limit():
+    cfg = AtworksAgentConfig(model="m", max_format_examples=2)
+    draft = _draft(kind="format", op=None, value=None, pattern=r"^\d+$",
+                   pass_examples=["1", "2", "3"], fail_examples=["a"])
+    v = check_rule_guardrails(draft, cfg, None)
+    assert any("pass examples" in m and "limit is 2" in m for m in v)
+
+
 def test_check_rule_guardrails_named_format_not_allowed():
     cfg = AtworksAgentConfig(model="m", allowed_named_formats=("email",))
     draft = _draft(kind="format", op=None, value=None, format="uuid")
