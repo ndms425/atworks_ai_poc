@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
+from .rules import FORMAT_EXAMPLES, NAMED_FORMATS
 from .serialization import job_record, rule_record
 from .tools.presentation import (
     DIGEST_TOOL,
@@ -192,6 +193,11 @@ async def enrich_rule_preview(payload: PresentRulePreviewPayload, context: Enric
     enriched["change_id"] = rule.rule_id   # web-shared의 change_update 훅과 호환 (Task 15)
     enriched["review_required"] = rule.review_required
     enriched["low_confidence"] = sorted(k for k, v in rule.confidence.items() if v < LOW_CONFIDENCE)
+    if rule.kind == "format":
+        if rule.format:
+            enriched["format_hint"] = {"label": rule.format, "example": FORMAT_EXAMPLES.get(rule.format), "pattern": NAMED_FORMATS.get(rule.format)}
+        elif rule.pattern:
+            enriched["format_hint"] = {"label": "정규식", "example": None, "pattern": rule.pattern}
     api = context.state.seen_apis.get(rule.api_id)
     if api is not None:
         enriched["api"] = _record(api)

@@ -4,6 +4,7 @@ import pytest
 
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.rules import (
+    FORMAT_EXAMPLES,
     NAMED_FORMATS,
     RuleDraft,
     RuleGuardrailViolation,
@@ -33,6 +34,13 @@ def test_render_message_for_each_kind():
     assert render_message("required", "contractNo", None, None, [], None, None) == "contractNo required"
     assert render_message("format", "email", None, None, [], "email", None) == "email matches email"
     assert render_message("format", "code", None, None, [], None, "^[A-Z]{3}$") == "code matches /^[A-Z]{3}$/"
+
+
+def test_format_examples_match_their_named_format_pattern():
+    import re
+
+    for name, example in FORMAT_EXAMPLES.items():
+        assert re.fullmatch(NAMED_FORMATS[name], example) is not None, f"{name}: {example!r} does not match its pattern"
 
 
 def test_compare_numeric_and_string():

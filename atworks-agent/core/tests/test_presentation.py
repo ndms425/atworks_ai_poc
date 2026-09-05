@@ -232,6 +232,24 @@ async def test_rule_preview_omits_api_and_impact_when_unknown():
     assert "api" not in payload and "impact" not in payload
 
 
+async def test_rule_preview_format_hint_for_named_format():
+    from atworks_agent.rules import NAMED_FORMATS
+
+    state = AtworksSessionState()
+    state.remember_rule(_rule(kind="format", op=None, value=None, format="email", message="email matches email"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001"}, _ctx(state), "Shown.")
+    payload = outcome.events[0].data["payload"]
+    assert payload["format_hint"] == {"label": "email", "example": "user@example.com", "pattern": NAMED_FORMATS["email"]}
+
+
+async def test_rule_preview_format_hint_for_raw_pattern():
+    state = AtworksSessionState()
+    state.remember_rule(_rule(kind="format", op=None, value=None, pattern="^[A-Z]{3}$", message="code matches /^[A-Z]{3}$/"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001"}, _ctx(state), "Shown.")
+    payload = outcome.events[0].data["payload"]
+    assert payload["format_hint"] == {"label": "정규식", "example": None, "pattern": "^[A-Z]{3}$"}
+
+
 async def test_rule_preview_refuses_unknown_rule():
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "nope"}, _ctx(AtworksSessionState()), "Shown.")
     assert outcome.blocked == "provenance"

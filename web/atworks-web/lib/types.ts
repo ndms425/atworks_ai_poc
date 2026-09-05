@@ -245,6 +245,7 @@ export interface RulePreviewPayload {
   review_required: boolean;
   low_confidence: string[];
   impact?: RuleImpact;
+  format_hint?: { label: string; example?: string | null; pattern?: string | null };
   headline?: string;
   note?: string;
 }

@@ -56,6 +56,16 @@ export default function RulePreviewCard({
           ))}
         </tbody>
       </table>
+      {payload.format_hint ? (
+        <p className="mx-3.5 mb-2 text-[12.5px] text-(--ink-soft)">
+          형식: {payload.format_hint.label}
+          {payload.format_hint.example
+            ? ` · 예: ${payload.format_hint.example}`
+            : payload.format_hint.pattern
+              ? ` · ${payload.format_hint.pattern}`
+              : ""}
+        </p>
+      ) : null}
       {payload.review_required ? (
         <div className="mx-3.5 mb-2 flex items-start gap-2 rounded-[11px] bg-(--warn-soft) px-3 py-2 text-[12.5px] leading-snug text-(--ink)">
           <Icon name="alert" size={14} className="mt-[2px] text-(--warn)" />

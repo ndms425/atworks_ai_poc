@@ -27,6 +27,14 @@ NAMED_FORMATS: dict[str, str] = {
     "number": r"^-?\d+(\.\d+)?$",
 }
 
+FORMAT_EXAMPLES: dict[str, str] = {
+    "email": "user@example.com",
+    "date": "2026-09-05",
+    "iso8601": "2026-09-05T09:00:00+09:00",
+    "uuid": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+    "number": "1234",
+}
+
 _COMPARE = {
     ">=": lambda a, b: a >= b, ">": lambda a, b: a > b, "<=": lambda a, b: a <= b,
     "<": lambda a, b: a < b, "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
