@@ -126,6 +126,23 @@ async def test_execute_job_once_produces_the_whole_matrix():
     assert len(after.run_ids) == 8
 
 
+async def test_execute_job_once_runs_named_parity_targets_legacy_and_renewed():
+    b = _backend()
+    job = await b.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="parity", api_ids=["api-001", "api-004"],
+        target_envs=["legacy", "renewed"]), ActorKind.AGENT)
+    await b.apply_job(SESSION, job.job_id)
+    produced = await b.execute_job_once(SESSION, job.job_id)
+
+    assert len(produced) == 4                       # 2 apis × 2 named targets
+    assert {r.target_env for r in produced} == {"legacy", "renewed"}
+    assert all(r.job_id == job.job_id for r in produced)
+    # api-004's response body carries a real value diff on the renewed target (stub_response)
+    by_env = {(r.api_id, r.target_env): r for r in produced}
+    assert by_env[("api-004", "legacy")].response_body["limit"] == 1000
+    assert by_env[("api-004", "renewed")].response_body["limit"] == 900
+
+
 async def test_stub_verdict_fails_a_negative_amount_binding():
     b = _backend()
     api = b.apis["api-001"]

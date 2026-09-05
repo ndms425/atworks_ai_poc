@@ -26,8 +26,14 @@ class AtworksAgentConfig(BaseAgentConfig):
 
     # -- guardrail (stage·apply 2회 검사) ---------------------------------------------
     max_apis_per_job: int = Field(default=100, ge=1)
-    allowed_target_envs: tuple[str, ...] = ("dev", "stg")
+    # 임의의 named-target allow-list다 — 서버 환경(dev/stg)뿐 아니라 parity 비교의 legacy/renewed
+    # 타깃도 같은 이름 문자열로 들어간다. 가드레일은 stage·execute 양쪽에서 target_envs가 이 집합의
+    # 부분집합인지만 검사한다 (jobs.py); 새 타깃을 여는 것은 이 튜플을 넓히는 것뿐이다.
+    allowed_target_envs: tuple[str, ...] = ("dev", "stg", "legacy", "renewed")
     max_target_envs_per_job: int = Field(default=2, ge=1)      # 한 job이 겨냥할 수 있는 계 수
+    # 이름 → 엔드포인트 URL. Mock은 쓰지 않는다 (이름 문자열만으로 stub_response/stub_verdict를 키잉
+    # 한다); REST 어댑터가 이름을 실제 URL로 매핑할 때 쓴다. 타깃별 인증은 MVP 범위 밖이다.
+    target_endpoints: dict[str, str] = {}
     max_schedules_per_job: int = Field(default=3, ge=1)        # 스케줄 항목 수 (회차 수가 아니다)
     max_test_data_sets: int = Field(default=5, ge=1)           # 테스트 데이터 세트 수
     max_matrix_size: int = Field(default=400, ge=1)            # apis × envs × data 곱의 상한

@@ -33,6 +33,12 @@ def test_matrix_caps_are_config_fields_with_defaults():
             cfg.max_test_data_sets, cfg.max_matrix_size) == (2, 3, 5, 400)
 
 
+def test_allowed_target_envs_default_includes_dev_stg_and_parity_targets():
+    cfg = AtworksAgentConfig(model="m")
+    assert set(cfg.allowed_target_envs) == {"dev", "stg", "legacy", "renewed"}
+    assert cfg.target_endpoints == {}
+
+
 def test_format_rule_caps_are_config_fields_with_defaults():
     cfg = AtworksAgentConfig(model="m")
     assert (cfg.min_format_examples, cfg.max_format_examples,
