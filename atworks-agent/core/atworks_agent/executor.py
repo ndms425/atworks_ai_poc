@@ -30,13 +30,16 @@ from .gates import (
     applied_confirmation,
     apply_guardrail_message,
     check_api_provenance,
+    check_apply_format_batch,
     check_apply_job,
     check_apply_rule,
+    check_discard_format_batch,
     check_discard_job,
     check_discard_rule,
     check_rule_param_provenance,
     guardrail_block_message,
     take_discard_actor_kind,
+    take_format_batch_discard_actor_kind,
     take_rule_discard_actor_kind,
 )
 from .jobs import (
@@ -50,19 +53,30 @@ from .jobs import (
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
 from .rules import (
     NAMED_FORMATS,
+    FormatBatchDraft,
+    FormatBatchGuardrailViolation,
     RuleDraft,
     RuleGuardrailViolation,
     ValidationRule,
+    check_format_batch_guardrails,
     check_rule_guardrails,
 )
 from .scoring import UnknownScorer, rank_runs
 from .selection import resolve_select_where
-from .serialization import api_record, job_record, rank_record, rule_record, run_record
+from .serialization import (
+    api_record,
+    format_batch_record,
+    job_record,
+    rank_record,
+    rule_record,
+    run_record,
+)
 from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL, RULE_PREVIEW_TOOL
 from .types import (
     ActorKind,
     AtworksSessionContext,
     AtworksSessionState,
+    FormatBatch,
     JobSpec,
     RunResult,
     RunStatus,
@@ -135,6 +149,21 @@ def _applied_rule_confirmation(rule_id: str, operator: str) -> str:
     )
 
 
+def _format_batch_guardrail_message(violations: list[str]) -> str:
+    return (
+        "That format batch exceeds this deployment's guardrails: " + "; ".join(violations)
+        + ". Explain the block to the operator and propose a smaller batch."
+    )
+
+
+def _applied_format_batch_confirmation(batch: FormatBatch, operator: str) -> str:
+    return (
+        f"Applied {batch.batch_id} as {operator}: {batch.new_count} new format(s) added to the "
+        f"library, {batch.duplicate_count} duplicate(s) and {batch.invalid_count} invalid entry/entries "
+        "skipped. A library format changes no run until an approved rule references it."
+    )
+
+
 def _coerce_list(value: Any) -> list[Any] | None:
     if isinstance(value, list):
         return value
@@ -176,6 +205,8 @@ class AtworksToolExecutor(BaseToolExecutor):
     def domain_error(self, error: Exception) -> ToolOutcome | None:
         if isinstance(error, RuleGuardrailViolation):
             return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(error.violations))
+        if isinstance(error, FormatBatchGuardrailViolation):
+            return ToolOutcome.held(GUARDRAIL_GATE, _format_batch_guardrail_message(error.violations))
         if isinstance(error, GuardrailViolation):
             return ToolOutcome.held(GUARDRAIL_GATE, guardrail_block_message(error.violations))
         if isinstance(error, (JobNotApplicable, UnknownScorer)):
@@ -256,6 +287,10 @@ class AtworksToolExecutor(BaseToolExecutor):
             "stage_rule": self._stage_rule,
             "apply_rule": self._apply_rule,
             "discard_rule": self._discard_rule,
+            "get_pending_format_batches": self._get_pending_format_batches,
+            "stage_format_batch": self._stage_format_batch,
+            "apply_format_batch": self._apply_format_batch,
+            "discard_format_batch": self._discard_format_batch,
         }
 
     # -- 읽기 -------------------------------------------------------------------------
@@ -606,3 +641,61 @@ class AtworksToolExecutor(BaseToolExecutor):
         )
         self._state.remember_rule(discarded)
         return ToolOutcome(f"Discarded {rule_id}.", [AgentEvent.change_update(rule_record(discarded))])
+
+    # -- 포맷 배치 (bulk seed, deduped, one host approval) ------------------------------
+    # Task 6 owns the tool schema and the format_batch preview card (present_format_batch /
+    # enrich_format_batch); these handlers only stage/apply/discard through the backend and
+    # remember the batch in session state so a later turn (or Task 6's card) can read it.
+
+    async def _stage_format_batch(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        formats: list[dict[str, Any]] = []
+        for item in (_coerce_list(tool_input.get("formats")) or []):
+            if not isinstance(item, dict):
+                continue
+            formats.append({
+                "name": self._sanitize(item.get("name"), 60),
+                "pattern": self._sanitize(item.get("pattern"), 200),
+                "pass_examples": [self._sanitize(v, 120) for v in (_coerce_list(item.get("pass_examples")) or [])],
+                "fail_examples": [self._sanitize(v, 120) for v in (_coerce_list(item.get("fail_examples")) or [])],
+            })
+        raw_summary = tool_input.get("summary")
+        draft = parse_argument(FormatBatchDraft, {
+            "formats": formats,
+            "summary": self._sanitize(raw_summary, 200) if raw_summary is not None else None,
+        })
+        # Mirrors _stage_job/_stage_rule: the guardrail runs here, before the backend call, so
+        # a permissive backend is never handed a batch this deployment's cap rejects.
+        if violations := check_format_batch_guardrails(draft, self._config):
+            return ToolOutcome.held(GUARDRAIL_GATE, _format_batch_guardrail_message(violations))
+        batch = await self._backend.stage_format_batch(self._session, draft, ActorKind.AGENT)
+        self._state.remember_format_batch(batch)
+        return self._fenced({"staged": format_batch_record(batch), "note": (
+            "Staged only — outcomes (new/duplicate/invalid) are computed above. Apply it only "
+            "after the operator approves it on the Formats page; a library format changes no "
+            "run until an approved rule references it."
+        )})
+
+    async def _get_pending_format_batches(self, _: dict[str, Any]) -> ToolOutcome:
+        pending = await self._backend.get_pending_format_batches(self._session)
+        for batch in pending:
+            self._state.remember_format_batch(batch)
+        return self._fenced([format_batch_record(b) for b in pending] or {"note": "Nothing is waiting for approval."})
+
+    async def _apply_format_batch(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        batch_id = str(tool_input.get("batch_id", ""))
+        if held := check_apply_format_batch(self._state, self._config, batch_id):
+            return held
+        applied = await self._backend.apply_format_batch(self._session, batch_id)
+        self._state.remember_format_batch(applied)
+        return ToolOutcome(_applied_format_batch_confirmation(applied, self._session.operator),
+                           [AgentEvent.change_update(format_batch_record(applied))])
+
+    async def _discard_format_batch(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        batch_id = str(tool_input.get("batch_id", ""))
+        if held := check_discard_format_batch(self._state, batch_id):
+            return held
+        discarded = await self._backend.discard_format_batch(
+            self._session, batch_id, take_format_batch_discard_actor_kind(self._state, batch_id)
+        )
+        self._state.remember_format_batch(discarded)
+        return ToolOutcome(f"Discarded {batch_id}.", [AgentEvent.change_update(format_batch_record(discarded))])

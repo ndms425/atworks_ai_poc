@@ -195,3 +195,27 @@ def take_rule_discard_actor_kind(state: AtworksSessionState, rule_id: str) -> Ac
         state.host_action_rule_ids.discard(rule_id)
         return ActorKind.OPERATOR
     return ActorKind.AGENT
+
+
+def check_apply_format_batch(state: AtworksSessionState, config: AtworksAgentConfig, batch_id: str) -> ToolOutcome | None:
+    if batch_id not in state.seen_format_batches:
+        return ToolOutcome.held(PROVENANCE_GATE,
+            f"format batch {batch_id} was not staged or listed this session. Stage it (or call "
+            "get_pending_format_batches) first, then apply it only after the operator approves it.")
+    if config.require_host_approval and batch_id not in state.approved_format_batch_ids:
+        return ToolOutcome.held(APPROVAL_GATE,
+            f"format batch {batch_id} is staged and waiting for approval on the Formats page; "
+            "approving it there is what applies it.")
+    return None
+
+
+def check_discard_format_batch(state: AtworksSessionState, batch_id: str) -> ToolOutcome | None:
+    return None if batch_id in state.seen_format_batches else ToolOutcome.held(
+        PROVENANCE_GATE, f"format batch {batch_id} was not staged or listed this session, so there is nothing to discard.")
+
+
+def take_format_batch_discard_actor_kind(state: AtworksSessionState, batch_id: str) -> ActorKind:
+    if batch_id in state.host_action_format_batch_ids:
+        state.host_action_format_batch_ids.discard(batch_id)
+        return ActorKind.OPERATOR
+    return ActorKind.AGENT

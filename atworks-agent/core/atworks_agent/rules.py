@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .types import ActorKind, ApiSpec, RuleStatus, ValidationRule
+from .types import ActorKind, ApiSpec, FormatBatch, FormatBatchEntry, RuleStatus, ValidationRule
 
 if TYPE_CHECKING:
     from .config import AtworksAgentConfig
@@ -150,9 +150,11 @@ class FormatDefinition(BaseModel):
 
 
 class FormatLibrary:
-    """이름 붙은 포맷 저장소. 내장 5개는 read-only 씨앗. dedup: 이름 또는 동일 패턴."""
+    """이름 붙은 포맷 저장소. 내장 5개는 read-only 씨앗. dedup: 이름 또는 동일 패턴; max_size 도달 시
+    거부(skip_reason "library full") — config.max_format_library가 채워 넣는 상한."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_size: int = 200) -> None:
+        self._max_size = max_size
         self._formats: dict[str, FormatDefinition] = {
             name: FormatDefinition(name=name, pattern=pattern, builtin=True,
                                    pass_examples=[FORMAT_EXAMPLES.get(name)] if FORMAT_EXAMPLES.get(name) else [])
@@ -169,13 +171,134 @@ class FormatLibrary:
         return next((f.name for f in self._formats.values() if f.pattern == pattern), None)
 
     def add(self, defn: FormatDefinition) -> tuple[bool, str | None]:
-        """Returns (added, skip_reason). Dedup by name then by identical pattern."""
+        """Returns (added, skip_reason). Dedup by name then by identical pattern, then the size cap."""
         if defn.name in self._formats:
             return (False, "name exists")
         if (dup := self.has_pattern(defn.pattern)) is not None:
             return (False, f"same pattern as {dup}")
+        if len(self._formats) >= self._max_size:
+            return (False, "library full")
         self._formats[defn.name] = defn
         return (True, None)
+
+
+class FormatBatchFormatInput(BaseModel):
+    """stage_format_batch 입력의 포맷 1건, outcome 계산 이전 모양."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
+    pattern: str = Field(max_length=200)
+    pass_examples: list[str] = Field(default_factory=list)
+    fail_examples: list[str] = Field(default_factory=list)
+
+
+class FormatBatchDraft(BaseModel):
+    """stage_format_batch 입력이 검증·정규화된 뒤의 모양. 백엔드는 이걸 받아 FormatBatch를 만든다."""
+    model_config = ConfigDict(extra="forbid")
+    formats: list[FormatBatchFormatInput] = Field(min_length=1)
+    summary: str | None = Field(default=None, max_length=200)
+    created_by_kind: ActorKind = ActorKind.OPERATOR
+
+
+class FormatBatchGuardrailViolation(ValueError):
+    def __init__(self, violations: list[str]):
+        super().__init__("; ".join(violations))
+        self.violations = violations
+
+
+def check_format_batch_guardrails(draft: FormatBatchDraft, config: AtworksAgentConfig) -> list[str]:
+    violations: list[str] = []
+    if len(draft.formats) > config.max_format_batch:
+        violations.append(f"batch has {len(draft.formats)} formats; the limit is {config.max_format_batch}")
+    return violations
+
+
+def compute_batch_entries(
+    formats: list[FormatBatchFormatInput], library: FormatLibrary, config: AtworksAgentConfig
+) -> list[FormatBatchEntry]:
+    """각 항목의 outcome을 계산한다: 이름/패턴이 라이브러리에 이미 있거나 이 배치의 앞선 항목과
+    겹치면 duplicate(예제 품질과 무관 — 어차피 더해지지 않는다); 그 외 예제 수가
+    config.min_format_examples 미만이거나 verify_examples가 실패를 보고하면 invalid; 그 외 new.
+    배치 내부 중복도 라이브러리 중복과 같은 규칙으로 잡는다 — apply가 순서대로 library.add를 부를
+    때 실제로 일어날 일과 맞춘다."""
+    entries: list[FormatBatchEntry] = []
+    seen_names: set[str] = set()
+    seen_patterns: dict[str, str] = {}
+    for item in formats:
+        base = {"name": item.name, "pattern": item.pattern,
+                "pass_examples": list(item.pass_examples), "fail_examples": list(item.fail_examples)}
+        if item.name in seen_names or library.get(item.name) is not None:
+            entries.append(FormatBatchEntry(**base, outcome="duplicate", reason="name exists"))
+            continue
+        if (dup := seen_patterns.get(item.pattern) or library.has_pattern(item.pattern)) is not None:
+            entries.append(FormatBatchEntry(**base, outcome="duplicate", reason=f"same pattern as {dup}"))
+            continue
+        if (len(item.pass_examples) < config.min_format_examples
+                or len(item.fail_examples) < config.min_format_examples):
+            entries.append(FormatBatchEntry(**base, outcome="invalid",
+                reason=f"needs at least {config.min_format_examples} pass and fail example(s)"))
+            continue
+        if bad := verify_examples(item.pattern, item.pass_examples, item.fail_examples):
+            entries.append(FormatBatchEntry(**base, outcome="invalid", reason=bad[0]))
+            continue
+        entries.append(FormatBatchEntry(**base, outcome="new"))
+        seen_names.add(item.name)
+        seen_patterns[item.pattern] = item.name
+    return entries
+
+
+class FormatBatchLedger:
+    """FormatBatch의 stage/apply/discard. RuleLedger를 미러한다. apply는 outcome이 new인 항목만
+    library.add로 실제 라이브러리에 더한다 — duplicate/invalid는 절대 더하지 않는다."""
+
+    def __init__(self, config: AtworksAgentConfig, library: FormatLibrary):
+        self._config = config
+        self._library = library
+        self._batches: dict[str, FormatBatch] = {}
+        self._sequence = 0
+
+    def stage(self, draft: FormatBatchDraft, *, actor: str, actor_kind: ActorKind = ActorKind.OPERATOR) -> FormatBatch:
+        if v := check_format_batch_guardrails(draft, self._config):
+            raise FormatBatchGuardrailViolation(v)
+        entries = compute_batch_entries(draft.formats, self._library, self._config)
+        self._sequence += 1
+        batch = FormatBatch(
+            batch_id=f"format-batch-{self._sequence:04d}", summary=draft.summary, entries=entries,
+            created_at=datetime.now(UTC), created_by=actor, created_by_kind=actor_kind)
+        self._batches[batch.batch_id] = batch
+        return batch
+
+    def get(self, batch_id): return self._batches.get(batch_id)
+    def pending(self): return [b for b in self._batches.values() if b.status is RuleStatus.STAGED]
+    def applied(self): return [b for b in self._batches.values() if b.status is RuleStatus.APPLIED]
+
+    def apply(self, batch_id: str, *, actor: str) -> FormatBatch:
+        batch = self._require_staged(batch_id, "apply")
+        for entry in batch.entries:
+            if entry.outcome != "new":
+                continue
+            self._library.add(FormatDefinition(
+                name=entry.name, pattern=entry.pattern, pass_examples=list(entry.pass_examples),
+                fail_examples=list(entry.fail_examples), created_at=datetime.now(UTC), created_by=actor,
+            ))
+        updated = batch.model_copy(update={"status": RuleStatus.APPLIED, "applied_at": datetime.now(UTC),
+                                           "applied_by": actor})
+        self._batches[batch_id] = updated
+        return updated
+
+    def discard(self, batch_id: str, *, actor: str, actor_kind: ActorKind = ActorKind.OPERATOR) -> FormatBatch:
+        batch = self._require_staged(batch_id, "discard")
+        updated = batch.model_copy(update={"status": RuleStatus.DISCARDED, "discarded_at": datetime.now(UTC),
+                                           "discarded_by": actor, "discarded_by_kind": actor_kind})
+        self._batches[batch_id] = updated
+        return updated
+
+    def _require_staged(self, batch_id: str, action: str) -> FormatBatch:
+        batch = self._batches.get(batch_id)
+        if batch is None:
+            raise FormatBatchGuardrailViolation([f"no format batch {batch_id} to {action}"])
+        if batch.status is not RuleStatus.STAGED:
+            raise FormatBatchGuardrailViolation([f"format batch {batch_id} is {batch.status.value}, cannot {action}"])
+        return batch
 
 
 class RuleImpact(BaseModel):

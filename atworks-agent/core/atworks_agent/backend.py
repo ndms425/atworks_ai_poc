@@ -8,8 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from .jobs import JobDraft
-from .rules import FormatDefinition, RuleDraft, RuleImpact, ValidationRule
-from .types import ActorKind, ApiSpec, AtworksSessionContext, JobSpec, RunResult
+from .rules import FormatBatchDraft, FormatDefinition, RuleDraft, RuleImpact, ValidationRule
+from .types import ActorKind, ApiSpec, AtworksSessionContext, FormatBatch, JobSpec, RunResult
 
 
 class AtworksBackend(ABC):
@@ -134,6 +134,27 @@ class AtworksBackend(ABC):
     @abstractmethod
     async def save_format(self, session: AtworksSessionContext, defn: FormatDefinition) -> tuple[bool, str | None]:
         """``FormatLibrary.add``와 같은 계약: (added, skip_reason). 이름 또는 동일 패턴으로 dedup한다."""
+
+    # -- 포맷 배치 (propose → approve → apply; 라이브러리 포맷은 inert이라 승인 1회로 충분) ------
+    @abstractmethod
+    async def stage_format_batch(
+        self, session: AtworksSessionContext, draft: FormatBatchDraft, actor_kind: ActorKind
+    ) -> FormatBatch:
+        """각 항목의 outcome(new/duplicate/invalid)을 계산해 FormatBatch로 저장한다. 아직 라이브러리에
+        아무것도 더하지 않는다 — apply만 outcome이 new인 항목을 더한다."""
+
+    @abstractmethod
+    async def get_pending_format_batches(self, session: AtworksSessionContext) -> list[FormatBatch]: ...
+
+    @abstractmethod
+    async def apply_format_batch(self, session: AtworksSessionContext, batch_id: str) -> FormatBatch:
+        """승인된 배치를 적용한다: outcome이 new인 항목만 라이브러리에 더하고 duplicate/invalid는
+        건드리지 않는다. new가 0건이어도 적용은 되고(라이브러리는 안 바뀐다) — 그 결과를 보고한다."""
+
+    @abstractmethod
+    async def discard_format_batch(
+        self, session: AtworksSessionContext, batch_id: str, actor_kind: ActorKind
+    ) -> FormatBatch: ...
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod

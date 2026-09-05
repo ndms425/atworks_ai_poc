@@ -700,3 +700,94 @@ async def test_absent_tools_are_reported_as_absent_even_when_question_form_is_op
     assert out.is_error
     assert "not something this deployment does" in out.result_text
     assert out.blocked is None
+
+
+# -- Task 4: format-batch lifecycle ---------------------------------------------------
+
+
+async def test_stage_format_batch_computes_outcomes(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("stage_format_batch", {"formats": [
+        {"name": "email", "pattern": r"^y$"},
+        {"name": "mail-like", "pattern": r"^[^@\s]+@[^@\s]+\.[^@\s]+$"},
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+         "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ], "summary": "bulk seed"})
+    assert not out.refused
+    batch_id = next(iter(state.seen_format_batches))
+    batch = state.seen_format_batches[batch_id]
+    assert [e.outcome for e in batch.entries] == ["duplicate", "duplicate", "new"]
+    assert "Staged only" in out.result_text
+    payload = _payload(out)
+    assert payload["staged"]["new_count"] == 1 and payload["staged"]["duplicate_count"] == 2
+
+
+async def test_stage_format_batch_guardrail_over_batch_size(backend, config, skills, session, state):
+    tight = config.model_copy(update={"max_format_batch": 1})
+    ex = _exec(backend, tight, skills, session, state)
+    out = await ex.execute("stage_format_batch", {"formats": [
+        {"name": "a", "pattern": r"^a$"}, {"name": "b", "pattern": r"^b$"},
+    ]})
+    assert out.blocked == "guardrail"
+    assert "batch" not in state.seen_format_batches
+
+
+async def test_get_pending_format_batches(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("stage_format_batch", {"formats": [
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]})
+    out = await ex.execute("get_pending_format_batches", {})
+    assert not out.refused
+    pending = _payload(out)
+    assert len(pending) == 1 and pending[0]["batch_id"] == "format-batch-0001"
+
+
+async def test_apply_format_batch_requires_host_mark_and_adds_only_new(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("stage_format_batch", {"formats": [
+        {"name": "email", "pattern": r"^y$"},
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]})
+    held = await ex.execute("apply_format_batch", {"batch_id": "format-batch-0001"})
+    assert held.blocked == "approval"
+    state.approved_format_batch_ids.add("format-batch-0001")
+    out = await ex.execute("apply_format_batch", {"batch_id": "format-batch-0001"})
+    assert not out.refused
+    assert state.seen_format_batches["format-batch-0001"].status.value == "applied"
+    names = {f.name for f in await backend.list_formats(session)}
+    assert "phone-digits" in names and "email" in names
+    assert out.events[0].type == "change_update"
+    assert "1 new format(s)" in out.result_text
+
+
+async def test_apply_format_batch_unknown_id_is_provenance_blocked(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("apply_format_batch", {"batch_id": "format-batch-9999"})
+    assert out.blocked == "provenance"
+
+
+async def test_discard_format_batch(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("stage_format_batch", {"formats": [
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]})
+    out = await ex.execute("discard_format_batch", {"batch_id": "format-batch-0001"})
+    assert not out.refused
+    assert state.seen_format_batches["format-batch-0001"].status.value == "discarded"
+
+
+async def test_discard_format_batch_unknown_id_is_provenance_blocked(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("discard_format_batch", {"batch_id": "format-batch-9999"})
+    assert out.blocked == "provenance"
+
+
+async def test_apply_format_batch_with_zero_new_entries_is_still_applied(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("stage_format_batch", {"formats": [{"name": "email", "pattern": r"^y$"}]})
+    state.approved_format_batch_ids.add("format-batch-0001")
+    out = await ex.execute("apply_format_batch", {"batch_id": "format-batch-0001"})
+    assert not out.refused
+    assert state.seen_format_batches["format-batch-0001"].status.value == "applied"
+    assert "0 new format(s)" in out.result_text

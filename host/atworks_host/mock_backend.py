@@ -11,6 +11,9 @@ from atworks_agent import (
     ApiSpec,
     AtworksAgentConfig,
     AtworksBackend,
+    FormatBatch,
+    FormatBatchDraft,
+    FormatBatchLedger,
     FormatDefinition,
     FormatLibrary,
     JobDraft,
@@ -66,7 +69,8 @@ class MockAtworks(AtworksBackend):
         }
         self.ledger = JobLedger(config, self.apis)
         self.rule_ledger = RuleLedger(config, self.apis)
-        self.format_library = FormatLibrary()
+        self.format_library = FormatLibrary(max_size=config.max_format_library)
+        self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
         self.runs: dict[str, RunResult] = {
             row["run_id"]: RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))
         }
@@ -185,6 +189,18 @@ class MockAtworks(AtworksBackend):
 
     async def save_format(self, session, defn: FormatDefinition) -> tuple[bool, str | None]:
         return self.format_library.add(defn)
+
+    async def stage_format_batch(self, session, draft: FormatBatchDraft, actor_kind: ActorKind) -> FormatBatch:
+        return self.format_batch_ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_pending_format_batches(self, session):
+        return self.format_batch_ledger.pending()
+
+    async def apply_format_batch(self, session, batch_id):
+        return self.format_batch_ledger.apply(batch_id, actor=session.operator)
+
+    async def discard_format_batch(self, session, batch_id, actor_kind):
+        return self.format_batch_ledger.discard(batch_id, actor=session.operator, actor_kind=actor_kind)
 
     async def execute_job_once(self, session, job_id, schedule_index=None) -> list[RunResult]:
         job = self.ledger.get(job_id)

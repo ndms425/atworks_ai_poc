@@ -8,7 +8,7 @@ from commerce_common.skills import Skill, SkillRegistry
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.jobs import JobDraft, JobLedger
-from atworks_agent.rules import FormatLibrary, RuleImpact, RuleLedger
+from atworks_agent.rules import FormatBatchLedger, FormatLibrary, RuleImpact, RuleLedger
 from atworks_agent.types import (
     ActorKind,
     ApiSpec,
@@ -29,7 +29,8 @@ class InMemoryBackend(AtworksBackend):
         }
         self.ledger = JobLedger(config, self.apis)
         self.rule_ledger = RuleLedger(config, self.apis)
-        self.format_library = FormatLibrary()
+        self.format_library = FormatLibrary(max_size=config.max_format_library)
+        self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
         self.runs = [
             RunResult(run_id="run-1", api_id="api-1", executed_at=T0, target_env="dev", status=RunStatus.FAIL, failed_rules=["amount >= 0"], http_status=200),
             RunResult(run_id="run-2", api_id="api-2", executed_at=T0 + timedelta(minutes=5), target_env="dev", status=RunStatus.ERROR, http_status=503),
@@ -113,6 +114,18 @@ class InMemoryBackend(AtworksBackend):
 
     async def save_format(self, session, defn):
         return self.format_library.add(defn)
+
+    async def stage_format_batch(self, session, draft, actor_kind):
+        return self.format_batch_ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_pending_format_batches(self, session):
+        return self.format_batch_ledger.pending()
+
+    async def apply_format_batch(self, session, batch_id):
+        return self.format_batch_ledger.apply(batch_id, actor=session.operator)
+
+    async def discard_format_batch(self, session, batch_id, actor_kind):
+        return self.format_batch_ledger.discard(batch_id, actor=session.operator, actor_kind=actor_kind)
 
     async def execute_job_once(self, session, job_id, schedule_index=None):
         self.executed.append(job_id)

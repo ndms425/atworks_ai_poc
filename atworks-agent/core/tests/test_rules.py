@@ -6,12 +6,16 @@ from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.rules import (
     FORMAT_EXAMPLES,
     NAMED_FORMATS,
+    FormatBatchDraft,
+    FormatBatchGuardrailViolation,
+    FormatBatchLedger,
     FormatDefinition,
     FormatLibrary,
     RuleDraft,
     RuleGuardrailViolation,
     RuleLedger,
     ValidationRule,
+    check_format_batch_guardrails,
     check_rule_guardrails,
     evaluate,
     render_message,
@@ -20,6 +24,7 @@ from atworks_agent.rules import (
 from atworks_agent.types import (  # noqa: F401 -- interface check: importable from types
     ActorKind,
     ApiSpec,
+    FormatBatch,
     RuleStatus,
 )
 
@@ -326,3 +331,132 @@ def test_ledger_apply_rechecks_guardrails_under_current_config():
     ledger._apis = {"api-1": _api(api_id="api-1", params=["other"])}
     with pytest.raises(RuleGuardrailViolation):
         ledger.apply(staged.rule_id, actor="op")
+
+
+# -- Task 4: FormatBatch / FormatBatchLedger -----------------------------------------
+
+
+def _format_batch_ledger(cfg=CFG):
+    return FormatBatchLedger(cfg, FormatLibrary(max_size=cfg.max_format_library))
+
+
+def test_format_library_add_returns_library_full_at_the_cap():
+    lib = FormatLibrary(max_size=5)   # 5 builtins already fill it
+    added, reason = lib.add(FormatDefinition(name="phone-digits", pattern=r"^\d{3}-\d{4}$"))
+    assert added is False and reason == "library full"
+
+
+def test_stage_format_batch_computes_outcomes_duplicate_name_duplicate_pattern_new():
+    ledger = _format_batch_ledger()
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "email", "pattern": r"^y$"},                              # duplicate name (builtin)
+        {"name": "mail-like", "pattern": NAMED_FORMATS["email"]},          # duplicate pattern (builtin)
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+         "pass_examples": ["123-4567"], "fail_examples": ["abc"]},          # new
+    ]), actor="op")
+    assert batch.status is RuleStatus.STAGED
+    outcomes = [e.outcome for e in batch.entries]
+    assert outcomes == ["duplicate", "duplicate", "new"]
+    assert batch.entries[0].reason == "name exists"
+    assert batch.entries[1].reason == "same pattern as email"
+    assert batch.new_count == 1 and batch.duplicate_count == 2 and batch.invalid_count == 0
+
+
+def test_stage_format_batch_marks_a_misclassified_example_invalid():
+    ledger = _format_batch_ledger()
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "bad-one", "pattern": r"^\d+$", "pass_examples": ["123"], "fail_examples": ["999"]},
+    ]), actor="op")
+    assert batch.entries[0].outcome == "invalid"
+    assert "999" in batch.entries[0].reason and "unexpectedly matches" in batch.entries[0].reason
+    assert batch.invalid_count == 1 and batch.new_count == 0
+
+
+def test_stage_format_batch_intra_batch_duplicate_name_is_caught():
+    ledger = _format_batch_ledger()
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+        {"name": "phone-digits", "pattern": r"^\d{4}-\d{4}$", "pass_examples": ["1234-4567"], "fail_examples": ["abc"]},
+    ]), actor="op")
+    assert [e.outcome for e in batch.entries] == ["new", "duplicate"]
+
+
+def test_apply_format_batch_adds_only_the_new_entry_to_the_library():
+    lib = FormatLibrary(max_size=CFG.max_format_library)
+    ledger = FormatBatchLedger(CFG, lib)
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "email", "pattern": r"^y$"},
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]), actor="op")
+    applied = ledger.apply(batch.batch_id, actor="op")
+    assert applied.status is RuleStatus.APPLIED
+    assert lib.get("phone-digits") is not None
+    assert {f.name for f in lib.list()} == {"email", "date", "iso8601", "uuid", "number", "phone-digits"}
+
+
+def test_apply_format_batch_with_zero_new_entries_still_applies_and_adds_nothing():
+    lib = FormatLibrary(max_size=CFG.max_format_library)
+    before = {f.name for f in lib.list()}
+    ledger = FormatBatchLedger(CFG, lib)
+    batch = ledger.stage(FormatBatchDraft(formats=[{"name": "email", "pattern": r"^y$"}]), actor="op")
+    assert batch.new_count == 0
+    applied = ledger.apply(batch.batch_id, actor="op")
+    assert applied.status is RuleStatus.APPLIED
+    assert {f.name for f in lib.list()} == before
+
+
+def test_apply_format_batch_refuses_non_staged_id():
+    ledger = _format_batch_ledger()
+    with pytest.raises(FormatBatchGuardrailViolation):
+        ledger.apply("format-batch-9999", actor="op")
+
+
+def test_discard_format_batch_records_actor_kind():
+    ledger = _format_batch_ledger()
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]), actor="op")
+    discarded = ledger.discard(batch.batch_id, actor="assistant", actor_kind=ActorKind.AGENT)
+    assert discarded.status is RuleStatus.DISCARDED
+    assert discarded.discarded_by_kind is ActorKind.AGENT
+    assert discarded.discarded_by == "assistant"
+
+
+def test_check_format_batch_guardrails_over_the_batch_size_limit():
+    cfg = AtworksAgentConfig(model="m", max_format_batch=1)
+    draft = FormatBatchDraft(formats=[
+        {"name": "a", "pattern": r"^a$"}, {"name": "b", "pattern": r"^b$"},
+    ])
+    v = check_format_batch_guardrails(draft, cfg)
+    assert any("2 formats" in m and "limit is 1" in m for m in v)
+
+
+def test_stage_format_batch_over_the_batch_size_limit_raises():
+    cfg = AtworksAgentConfig(model="m", max_format_batch=1)
+    ledger = _format_batch_ledger(cfg)
+    with pytest.raises(FormatBatchGuardrailViolation):
+        ledger.stage(FormatBatchDraft(formats=[
+            {"name": "a", "pattern": r"^a$"}, {"name": "b", "pattern": r"^b$"},
+        ]), actor="op")
+
+
+def test_format_batch_below_min_format_examples_is_invalid():
+    cfg = AtworksAgentConfig(model="m", min_format_examples=2)
+    ledger = _format_batch_ledger(cfg)
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]), actor="op")
+    assert batch.entries[0].outcome == "invalid"
+    assert "at least 2" in batch.entries[0].reason
+
+
+def test_apply_format_batch_never_touches_runs_or_a_rule_ledger():
+    # Immutability guarantee: a bulk format add is a library-only write. Building a rule ledger
+    # alongside and applying a format batch must not create or mutate any rule/run record.
+    rule_ledger = RuleLedger(CFG)
+    ledger = _format_batch_ledger()
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]), actor="op")
+    ledger.apply(batch.batch_id, actor="op")
+    assert rule_ledger.list() == []

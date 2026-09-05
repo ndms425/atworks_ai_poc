@@ -5,6 +5,7 @@ from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
     AtworksSessionContext,
+    FormatBatchDraft,
     FormatDefinition,
     RuleDraft,
 )
@@ -82,3 +83,50 @@ async def test_stage_rule_resolves_a_saved_format_by_name():
     assert rule.format_name == "phone-digits"
     assert evaluate(rule, "123-4567") is True
     assert evaluate(rule, "abc") is False
+
+
+# -- Task 4: format-batch lifecycle --------------------------------------------------
+
+
+async def test_stage_format_batch_then_apply_adds_only_new_entries():
+    b = _backend()
+    staged = await b.stage_format_batch(SESSION, FormatBatchDraft(formats=[
+        {"name": "email", "pattern": r"^y$"},   # duplicate name (builtin)
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+         "pass_examples": ["123-4567"], "fail_examples": ["abc"]},   # new
+    ]), ActorKind.AGENT)
+    assert [e.outcome for e in staged.entries] == ["duplicate", "new"]
+
+    pending = await b.get_pending_format_batches(SESSION)
+    assert [p.batch_id for p in pending] == [staged.batch_id]
+
+    applied = await b.apply_format_batch(SESSION, staged.batch_id)
+    assert applied.status.value == "applied"
+    names = {f.name for f in await b.list_formats(SESSION)}
+    assert "phone-digits" in names
+    assert len(names) == 6   # 5 builtins + the one new entry; the duplicate never landed
+
+
+async def test_format_batch_apply_leaves_run_history_and_verdicts_untouched():
+    # Immutability guarantee: a library format add is inert until an approved RULE references
+    # it, so bulk-seeding the library must change no run's status/failed_rules.
+    b = _backend()
+    before = [r.model_dump(mode="json") for r in await b.list_runs(SESSION, limit=1000)]
+    staged = await b.stage_format_batch(SESSION, FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+         "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]), ActorKind.AGENT)
+    await b.apply_format_batch(SESSION, staged.batch_id)
+    after = [r.model_dump(mode="json") for r in await b.list_runs(SESSION, limit=1000)]
+    assert before == after
+
+
+async def test_discard_format_batch():
+    b = _backend()
+    staged = await b.stage_format_batch(SESSION, FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
+         "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+    ]), ActorKind.AGENT)
+    discarded = await b.discard_format_batch(SESSION, staged.batch_id, ActorKind.OPERATOR)
+    assert discarded.status.value == "discarded"
+    assert "phone-digits" not in {f.name for f in await b.list_formats(SESSION)}

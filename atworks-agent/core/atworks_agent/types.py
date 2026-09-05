@@ -257,6 +257,51 @@ class ValidationRule(BaseModel):
     discarded_by_kind: ActorKind | None = None
 
 
+class FormatBatchEntry(BaseModel):
+    """FormatBatch 한 줄. outcome은 stage 시점에 계산된다: verify_examples 실패 → invalid(적용
+    제외), 라이브러리에 이름/동일 패턴 이미 있음 → duplicate(건너뜀), 그 외 → new. reason은
+    duplicate/invalid를 설명하며 new는 비운다."""
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
+    pattern: str = Field(max_length=200)
+    pass_examples: list[str] = Field(default_factory=list)
+    fail_examples: list[str] = Field(default_factory=list)
+    outcome: Literal["new", "duplicate", "invalid"]
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class FormatBatch(BaseModel):
+    """대량 포맷 라이브러리 씨앗 요청 1건. ValidationRule의 라이프사이클을 미러(RuleStatus 재사용:
+    STAGED/APPLIED/DISCARDED)한다. 라이브러리 포맷은 승인된 규칙이 참조하기 전까진 inert이므로
+    승인 1회로 안전하다 — apply는 outcome이 new인 항목만 라이브러리에 더하고, duplicate/invalid는
+    보고만 하고 절대 더하지 않는다."""
+    batch_id: str
+    status: RuleStatus = RuleStatus.STAGED
+    summary: str | None = Field(default=None, max_length=200)
+    entries: list[FormatBatchEntry] = Field(default_factory=list)
+    created_at: datetime
+    created_by: str
+    created_by_kind: ActorKind = ActorKind.OPERATOR
+    applied_at: datetime | None = None
+    applied_by: str | None = None
+    discarded_at: datetime | None = None
+    discarded_by: str | None = None
+    discarded_by_kind: ActorKind | None = None
+
+    # -- derived: pure functions of the stored entries, never persisted ------------------
+
+    @property
+    def new_count(self) -> int:
+        return sum(1 for e in self.entries if e.outcome == "new")
+
+    @property
+    def duplicate_count(self) -> int:
+        return sum(1 for e in self.entries if e.outcome == "duplicate")
+
+    @property
+    def invalid_count(self) -> int:
+        return sum(1 for e in self.entries if e.outcome == "invalid")
+
+
 # -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------
 
 class AttachedItem(BaseModel):
@@ -304,6 +349,11 @@ class AtworksSessionState(BaseModel):
     rule_impacts: dict[str, Any] = Field(default_factory=dict)
     approved_rule_ids: set[str] = Field(default_factory=set)
     host_action_rule_ids: set[str] = Field(default_factory=set)
+    # Typed dict[str, FormatBatch] (not dict[str, Any]) so it survives the session JSON
+    # round-trip -- the lesson from the earlier seen_rules bug.
+    seen_format_batches: dict[str, FormatBatch] = Field(default_factory=dict)
+    approved_format_batch_ids: set[str] = Field(default_factory=set)
+    host_action_format_batch_ids: set[str] = Field(default_factory=set)
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)
@@ -319,6 +369,9 @@ class AtworksSessionState(BaseModel):
 
     def remember_rule(self, rule: ValidationRule) -> None:
         remember(self.seen_rules, rule.rule_id, rule)
+
+    def remember_format_batch(self, batch: FormatBatch) -> None:
+        remember(self.seen_format_batches, batch.batch_id, batch)
 
     def remember_groups(self, group_by: str, groups: list[RunGroup], since: datetime | None) -> None:
         for group in groups:

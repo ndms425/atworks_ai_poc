@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .rules import FormatDefinition, ValidationRule
-from .types import ApiSpec, FailedRank, JobSpec, RunResult
+from .types import ApiSpec, FailedRank, FormatBatch, JobSpec, RunResult
 
 
 def api_record(api: ApiSpec) -> dict[str, Any]:
@@ -39,3 +39,14 @@ def rule_record(rule: ValidationRule) -> dict[str, Any]:
 
 def format_record(defn: FormatDefinition) -> dict[str, Any]:
     return defn.model_dump(mode="json", exclude_none=True)
+
+
+def format_batch_record(batch: FormatBatch) -> dict[str, Any]:
+    record = batch.model_dump(mode="json", exclude_none=True)
+    record["change_id"] = batch.batch_id   # web-shared의 change_update 훅과 호환 (Task 15)
+    # FormatBatch의 new_count/duplicate_count/invalid_count는 plain @property라 model_dump에
+    # 실리지 않는다 — 여기서 얹어야 카드가 매번 entries를 다시 세지 않는다.
+    record["new_count"] = batch.new_count
+    record["duplicate_count"] = batch.duplicate_count
+    record["invalid_count"] = batch.invalid_count
+    return record

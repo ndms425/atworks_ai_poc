@@ -232,6 +232,18 @@ class RecordingBackend(AtworksBackend):
     async def save_format(self, session, defn):
         raise NotImplementedError
 
+    async def stage_format_batch(self, session, draft, actor_kind):
+        raise NotImplementedError
+
+    async def get_pending_format_batches(self, session):
+        raise NotImplementedError
+
+    async def apply_format_batch(self, session, batch_id):
+        raise NotImplementedError
+
+    async def discard_format_batch(self, session, batch_id, actor_kind):
+        raise NotImplementedError
+
     async def execute_job_once(self, session, job_id, schedule_index=None):
         self.calls.append("execute_job_once")
         self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "executions": 1})

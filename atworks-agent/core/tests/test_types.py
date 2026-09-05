@@ -8,6 +8,8 @@ from atworks_agent.types import (
     ApiSpec,
     AtworksSessionState,
     Binding,
+    FormatBatch,
+    FormatBatchEntry,
     JobKind,
     JobSchedule,
     JobSpec,
@@ -164,3 +166,23 @@ def test_seen_rules_survives_the_session_json_round_trip():
     known = reloaded.seen_rules["rule-0001"]
     assert isinstance(known, ValidationRule)
     assert known.api_id == "api-001"
+
+
+def test_seen_format_batches_survives_the_session_json_round_trip():
+    # Same lesson as seen_rules above, applied to FormatBatch (Task 4): typed
+    # dict[str, FormatBatch], not dict[str, Any], so gates.check_apply_format_batch's
+    # provenance lookup still sees a real FormatBatch (not a plain dict) after a reload.
+    state = AtworksSessionState()
+    batch = FormatBatch(
+        batch_id="format-batch-0001", summary="bulk seed",
+        entries=[FormatBatchEntry(name="phone-digits", pattern=r"^\d{3}-\d{4}$",
+                                  pass_examples=["123-4567"], fail_examples=["abc"], outcome="new")],
+        created_at=datetime.now(UTC), created_by="op")
+    state.remember_format_batch(batch)
+
+    reloaded = AtworksSessionState.model_validate(json.loads(state.model_dump_json()))
+
+    known = reloaded.seen_format_batches["format-batch-0001"]
+    assert isinstance(known, FormatBatch)
+    assert known.entries[0].outcome == "new"
+    assert known.new_count == 1
