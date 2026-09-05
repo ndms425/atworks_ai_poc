@@ -9,7 +9,14 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from atworks_agent import AtworksBackend, AtworksSessionContext, JobKind, JobSchedule, JobStatus
+from atworks_agent import (
+    AtworksBackend,
+    AtworksSessionContext,
+    JobKind,
+    JobSchedule,
+    JobStatus,
+    ProfileStatus,
+)
 
 from .briefing import Briefings
 from .reports import Reports
@@ -92,7 +99,29 @@ class Scheduler:
             try:
                 current = await self.backend.get_job(self.session, job_id)
                 every = await self.backend.runs_by_ids(self.session, current.run_ids)
-                self.reports.write(current, every)
+                # A re-write (a later scheduled occurrence, or a profile approved before the
+                # job's first run) must still honor every APPLIED comparison profile — the
+                # profile is durable once approved, and can't be re-staged. Listing profiles
+                # is a best-effort lookup: a failure here must not block the report write
+                # itself (the execution already happened), so it falls back to no ignore
+                # paths rather than losing the report entirely — but it is still logged and
+                # noted, never swallowed silently.
+                ignore_paths: list[str] = []
+                per_api_ignore: dict[str, list[str]] = {}
+                try:
+                    profiles = await self.backend.list_profiles(self.session, job_id)
+                    for profile in profiles:
+                        if profile.status is not ProfileStatus.APPLIED:
+                            continue
+                        ignore_paths.extend(profile.ignore_paths)
+                        for api_id, paths in profile.per_api_ignore.items():
+                            per_api_ignore.setdefault(api_id, []).extend(paths)
+                except Exception as profile_error:
+                    logger.exception("job %s failed to list comparison profiles", job_id)
+                    await self.backend.add_guardrail_note(
+                        self.session, job_id, f"profile lookup failed: {type(profile_error).__name__}"
+                    )
+                self.reports.write(current, every, ignore_paths=ignore_paths, per_api_ignore=per_api_ignore or None)
             except Exception as error:
                 # Report failure: log and note it, but do NOT record a second execution.
                 # The execution already happened.

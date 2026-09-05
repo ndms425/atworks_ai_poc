@@ -53,10 +53,23 @@ def _is_ignored(path: str, ignore_paths: Sequence[str]) -> bool:
     return False
 
 
+def _cmp_key(v: Any) -> Any:
+    """리프 값을 (타입, 값) 쌍으로 태깅한다 — 파이썬의 `!=`는 `1 == True`, `1 == 1.0`을 참으로
+    보므로, 원시 값을 그대로 비교하면 JSON bool/number나 int/float가 서로 다른데도 equal로
+    판정된다. 타입 이름을 키에 섞으면 이 두 쌍이 절대 같아지지 않는다. `_MISSING` 센티널은
+    자기 자신으로 남긴다(존재하지 않는 경로는 계속 '없음'으로 구별되어야 한다)."""
+    if v is _MISSING:
+        return v
+    return (type(v).__name__, v)
+
+
 def compare_bodies(a: Any, b: Any, ignore_paths: Sequence[str]) -> BodyDiff:
     ap = {p: v for p, v in _paths(a) if not _is_ignored(p, ignore_paths)}
     bp = {p: v for p, v in _paths(b) if not _is_ignored(p, ignore_paths)}
-    diff = sorted({p for p in set(ap) | set(bp) if ap.get(p, _MISSING) != bp.get(p, _MISSING)})
+    diff = sorted({
+        p for p in set(ap) | set(bp)
+        if _cmp_key(ap.get(p, _MISSING)) != _cmp_key(bp.get(p, _MISSING))
+    })
     return BodyDiff(equal=not diff, diff_paths=diff)
 
 

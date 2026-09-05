@@ -140,7 +140,7 @@ async def test_report_failure_does_not_consume_a_second_slot(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
 
     class BrokenReports(Reports):
-        def write(self, job, runs, *, generator="refresh_runner"):
+        def write(self, job, runs, *, generator="refresh_runner", ignore_paths=(), per_api_ignore=None):
             raise OSError("disk full")
 
     sched = Scheduler(backend, BrokenReports(tmp_path), SESSION)

@@ -132,7 +132,15 @@ class Reports:
             raise ValueError(f"report id escapes the reports directory: {job_id!r}")
         return folder
 
-    def write(self, job: JobSpec, runs: list[RunResult], *, generator: str = "refresh_runner") -> Path:
+    def write(
+        self,
+        job: JobSpec,
+        runs: list[RunResult],
+        *,
+        generator: str = "refresh_runner",
+        ignore_paths: Sequence[str] = (),
+        per_api_ignore: dict[str, list[str]] | None = None,
+    ) -> Path:
         folder = self._folder(job.job_id)
         folder.mkdir(parents=True, exist_ok=True)
         counts: dict = {"total": len(runs), "pass": 0, "fail": 0, "error": 0}
@@ -149,7 +157,7 @@ class Reports:
             "job": job.model_dump(mode="json", exclude_none=True),
             "summary": counts,
             "matrix": _matrix(job, runs),
-            "parity": _parity(job, runs),
+            "parity": _parity(job, runs, ignore_paths, per_api_ignore),
             "runs": [r.model_dump(mode="json", exclude_none=True) for r in runs],
             "provenance": {"generator": generator, "generated_at": datetime.now(UTC).isoformat()},
             "portal_origin": self.portal_origin,

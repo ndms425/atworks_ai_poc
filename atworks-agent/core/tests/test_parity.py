@@ -121,6 +121,30 @@ def test_cluster_diffs_groups_identical_diff_path_sets():
     assert clusters[1].count == 1
 
 
+def test_bool_and_int_are_not_false_equal():
+    result = compare_bodies({"active": 1}, {"active": True}, [])
+    assert result.equal is False
+    assert result.diff_paths == ["$.active"]
+
+
+def test_bool_and_int_zero_false_are_not_false_equal():
+    result = compare_bodies({"flag": 0}, {"flag": False}, [])
+    assert result.equal is False
+    assert result.diff_paths == ["$.flag"]
+
+
+def test_int_and_float_of_the_same_magnitude_are_not_false_equal():
+    result = compare_bodies({"limit": 1000}, {"limit": 1000.0}, [])
+    assert result.equal is False
+    assert result.diff_paths == ["$.limit"]
+
+
+def test_same_type_same_value_int_is_still_equal():
+    result = compare_bodies({"n": 1}, {"n": 1}, [])
+    assert result.equal is True
+    assert result.diff_paths == []
+
+
 def test_cluster_diffs_biggest_first_message():
     rows = [
         {"row_key": "row1", "diff_paths": ["$.meta.serverTime"]},

@@ -8,6 +8,7 @@ from atworks_agent import (
     AtworksSessionContext,
     JobDraft,
     JobKind,
+    JobSchedule,
     ProfileDraft,
     ProfileStatus,
 )
@@ -150,6 +151,71 @@ async def test_apply_profile_skips_rediff_when_backend_has_no_reports_handle(tmp
     applied = await backend.apply_profile(SESSION, staged.profile_id)
 
     assert applied.status is ProfileStatus.APPLIED
+
+
+async def test_scheduled_rewrite_honors_an_applied_profile(tmp_path):
+    """M-final regression: a SECOND scheduled occurrence must still honor an APPLIED comparison
+    profile. Before the fix, `Scheduler._execute_one` called `reports.write` with the default
+    empty ignore paths, so the noise cluster the profile suppressed came back on the next
+    scheduled write even though the profile was already APPLIED (and can't be re-staged)."""
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    backend.reports = reports
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="legacy/renewed 반복 비교",
+        api_ids=["api-002", "api-004", "api-008"], target_envs=["legacy", "renewed"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-05", count=2)]),
+        ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    draft = ProfileDraft(job_id=job.job_id, ignore_paths=["$.serverTime"], summary="ignore volatile serverTime")
+    staged = await backend.stage_profile(SESSION, draft, ActorKind.OPERATOR)
+    applied = await backend.apply_profile(SESSION, staged.profile_id)
+    assert applied.status is ProfileStatus.APPLIED
+
+    # The SECOND scheduled occurrence: driven through the scheduler exactly as production runs
+    # it. Before the fix, this write reverted to the unfiltered parity block.
+    assert await sched.tick(datetime(2026, 9, 6, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    rows = {r["api_id"]: r for r in data["parity"]["rows"]}
+    assert rows["api-002"]["verdict"] == "equal"
+    assert rows["api-008"]["verdict"] == "equal"
+    assert rows["api-004"]["verdict"] == "value_diff"
+    assert rows["api-004"]["diff_paths"] == ["$.limit"]
+    assert data["parity"]["ignore_paths"] == ["$.serverTime"]
+
+
+async def test_profile_applied_before_first_run_is_honored_by_the_first_scheduled_write(tmp_path):
+    """A profile approved before the job ever ran (no report exists yet, so `apply_profile`'s
+    one-shot rediff is a no-op) must still be honored once the FIRST scheduled write happens."""
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    backend.reports = reports
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="approve before first run",
+        api_ids=["api-002", "api-004", "api-008"], target_envs=["legacy", "renewed"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-05", count=1)]),
+        ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+
+    draft = ProfileDraft(job_id=job.job_id, ignore_paths=["$.serverTime"], summary="ignore volatile serverTime")
+    staged = await backend.stage_profile(SESSION, draft, ActorKind.OPERATOR)
+    applied = await backend.apply_profile(SESSION, staged.profile_id)
+    assert applied.status is ProfileStatus.APPLIED
+
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    rows = {r["api_id"]: r for r in data["parity"]["rows"]}
+    assert rows["api-002"]["verdict"] == "equal"
+    assert rows["api-008"]["verdict"] == "equal"
+    assert rows["api-004"]["verdict"] == "value_diff"
+    assert rows["api-004"]["diff_paths"] == ["$.limit"]
 
 
 async def test_list_and_pending_profiles(tmp_path):
