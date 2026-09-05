@@ -6,6 +6,8 @@ from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.rules import (
     FORMAT_EXAMPLES,
     NAMED_FORMATS,
+    FormatDefinition,
+    FormatLibrary,
     RuleDraft,
     RuleGuardrailViolation,
     RuleLedger,
@@ -275,6 +277,45 @@ def test_ledger_apply_rebuilds_raw_pattern_format_rule_with_examples():
                                   pass_examples=["123"], fail_examples=["12a"]), actor="op")
     applied = ledger.apply(staged.rule_id, actor="op")
     assert applied.status is RuleStatus.APPLIED
+
+
+# -- Task 3: FormatDefinition / FormatLibrary ----------------------------------------
+
+
+def test_format_library_seeded_with_five_builtins():
+    lib = FormatLibrary()
+    names = {f.name for f in lib.list()}
+    assert names == {"email", "date", "iso8601", "uuid", "number"}
+    assert all(f.builtin for f in lib.list())
+    for name, pattern in NAMED_FORMATS.items():
+        found = lib.get(name)
+        assert found is not None and found.pattern == pattern
+
+
+def test_format_library_add_stores_a_new_saved_format():
+    lib = FormatLibrary()
+    defn = FormatDefinition(name="phone-digits", pattern=r"^\d{3}-\d{4}$",
+                            pass_examples=["123-4567"], fail_examples=["abc"], created_by="op")
+    added, reason = lib.add(defn)
+    assert added is True and reason is None
+    assert lib.get("phone-digits") is defn
+    assert lib.get("phone-digits").builtin is False
+
+
+def test_format_library_add_dedups_by_name():
+    lib = FormatLibrary()
+    added, reason = lib.add(FormatDefinition(name="email", pattern=r"^x$"))
+    assert added is False and reason == "name exists"
+
+
+def test_format_library_add_dedups_by_identical_pattern():
+    lib = FormatLibrary()
+    added, reason = lib.add(FormatDefinition(name="mail-like", pattern=NAMED_FORMATS["email"]))
+    assert added is False and reason == "same pattern as email"
+
+
+def test_format_library_get_unknown_name_returns_none():
+    assert FormatLibrary().get("nope") is None
 
 
 def test_ledger_apply_rechecks_guardrails_under_current_config():

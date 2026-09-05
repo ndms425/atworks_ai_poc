@@ -237,6 +237,10 @@ class ValidationRule(BaseModel):
     pass_examples: list[str] = Field(default_factory=list)
     fail_examples: list[str] = Field(default_factory=list)
     save_format_as: str | None = Field(default=None, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
+    # Display-only: set when `format` named a library entry (built-in or saved) that the
+    # executor resolved into `pattern`/examples above at stage time. evaluate() never reads
+    # this field -- it stays pattern-based and backend-independent (Task 3 ruling).
+    format_name: str | None = Field(default=None, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
     review_required: bool = False
     message: str = Field(max_length=200)
     status: RuleStatus = RuleStatus.STAGED

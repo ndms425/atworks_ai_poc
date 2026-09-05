@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .rules import ValidationRule
+from .rules import FormatDefinition, ValidationRule
 from .types import ApiSpec, FailedRank, JobSpec, RunResult
 
 
@@ -35,3 +35,7 @@ def rule_record(rule: ValidationRule) -> dict[str, Any]:
     record = rule.model_dump(mode="json", exclude_none=True)
     record["change_id"] = rule.rule_id   # web-shared의 change_update 훅과 호환 (Task 15)
     return record
+
+
+def format_record(defn: FormatDefinition) -> dict[str, Any]:
+    return defn.model_dump(mode="json", exclude_none=True)

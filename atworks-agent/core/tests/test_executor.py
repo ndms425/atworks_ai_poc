@@ -483,6 +483,56 @@ async def test_stage_rule_below_min_format_examples_is_a_named_error(backend, sk
     assert "rule-0001" not in state.seen_rules
 
 
+async def test_stage_rule_named_builtin_format_stages_unchanged(backend, config, skills, session, state):
+    # Task 3: built-in enum names (email/date/iso8601/uuid/number) must keep working exactly
+    # as before -- no library lookup, no format_name, format kept as the enum value.
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "format",
+                                          "format": "email", "summary": "s"})
+    assert not out.refused
+    rule = state.seen_rules["rule-0001"]
+    assert rule.format == "email"
+    assert rule.pattern is None
+    assert rule.format_name is None
+
+
+async def test_stage_rule_resolves_a_saved_library_format_by_name(backend, config, skills, session, state):
+    # Task 3 ruling: a `format` naming a LIBRARY entry (here, a saved one) is resolved at
+    # stage time into pattern/examples; the source name is kept only for display.
+    from atworks_agent.rules import FormatDefinition
+
+    added, reason = await backend.save_format(session, FormatDefinition(
+        name="phone-digits", pattern=r"^\d{3}-\d{4}$",
+        pass_examples=["123-4567"], fail_examples=["abc"], created_by=session.operator,
+    ))
+    assert added is True and reason is None
+
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "format",
+                                          "format": "phone-digits", "summary": "s"})
+    assert not out.refused
+    rule = state.seen_rules["rule-0001"]
+    assert rule.format is None
+    assert rule.pattern == r"^\d{3}-\d{4}$"
+    assert rule.format_name == "phone-digits"
+
+    from atworks_agent.rules import evaluate
+    assert evaluate(rule, "123-4567") is True
+    assert evaluate(rule, "abc") is False
+
+
+async def test_stage_rule_unknown_format_name_is_a_named_error(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "format",
+                                          "format": "no-such-format", "summary": "s"})
+    assert out.is_error
+    assert "unavailable" not in out.result_text
+    assert "rule-0001" not in state.seen_rules
+
+
 async def test_preview_rule_once_per_turn_then_a_different_rule_still_renders(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})

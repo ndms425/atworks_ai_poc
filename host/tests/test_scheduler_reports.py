@@ -223,6 +223,15 @@ class RecordingBackend(AtworksBackend):
     async def simulate_rule(self, session, draft):
         raise NotImplementedError
 
+    async def get_format(self, session, name):
+        raise NotImplementedError
+
+    async def list_formats(self, session):
+        raise NotImplementedError
+
+    async def save_format(self, session, defn):
+        raise NotImplementedError
+
     async def execute_job_once(self, session, job_id, schedule_index=None):
         self.calls.append("execute_job_once")
         self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "executions": 1})

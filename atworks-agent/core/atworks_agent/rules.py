@@ -91,6 +91,10 @@ class RuleDraft(BaseModel):
     pass_examples: list[str] = Field(default_factory=list)
     fail_examples: list[str] = Field(default_factory=list)
     save_format_as: str | None = Field(default=None, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
+    # Set only by the executor when `format` named a library entry it resolved into `pattern`
+    # above (Task 3 ruling): display-only, carried through to ValidationRule.format_name.
+    # evaluate() never reads it -- it stays pattern-based and backend-independent.
+    format_name: str | None = Field(default=None, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
     summary: str | None = Field(default=None, max_length=200)
     confidence: dict[str, float] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
@@ -131,6 +135,47 @@ class RuleDraft(BaseModel):
 
     def message(self) -> str:
         return render_message(self.kind, self.param, self.op, self.value, self.values, self.format, self.pattern)
+
+
+class FormatDefinition(BaseModel):
+    """이름 붙은 포맷 1건. 내장 5개는 builtin=True, read-only 씨앗. 저장된 항목은 operator/agent가
+    save_format_as로 추가한 raw-pattern 규칙에서 온다."""
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,59}$")
+    pattern: str = Field(max_length=200)
+    pass_examples: list[str] = Field(default_factory=list)
+    fail_examples: list[str] = Field(default_factory=list)
+    builtin: bool = False
+    created_at: datetime | None = None
+    created_by: str | None = None
+
+
+class FormatLibrary:
+    """이름 붙은 포맷 저장소. 내장 5개는 read-only 씨앗. dedup: 이름 또는 동일 패턴."""
+
+    def __init__(self) -> None:
+        self._formats: dict[str, FormatDefinition] = {
+            name: FormatDefinition(name=name, pattern=pattern, builtin=True,
+                                   pass_examples=[FORMAT_EXAMPLES.get(name)] if FORMAT_EXAMPLES.get(name) else [])
+            for name, pattern in NAMED_FORMATS.items()
+        }
+
+    def get(self, name: str) -> FormatDefinition | None:
+        return self._formats.get(name)
+
+    def list(self) -> list[FormatDefinition]:
+        return list(self._formats.values())
+
+    def has_pattern(self, pattern: str) -> str | None:
+        return next((f.name for f in self._formats.values() if f.pattern == pattern), None)
+
+    def add(self, defn: FormatDefinition) -> tuple[bool, str | None]:
+        """Returns (added, skip_reason). Dedup by name then by identical pattern."""
+        if defn.name in self._formats:
+            return (False, "name exists")
+        if (dup := self.has_pattern(defn.pattern)) is not None:
+            return (False, f"same pattern as {dup}")
+        self._formats[defn.name] = defn
+        return (True, None)
 
 
 class RuleImpact(BaseModel):
@@ -214,7 +259,7 @@ class RuleLedger:
             rule_id=f"rule-{self._sequence:04d}", api_id=draft.api_id, param=draft.param, kind=draft.kind,
             op=draft.op, value=draft.value, values=list(draft.values), format=draft.format, pattern=draft.pattern,
             pass_examples=list(draft.pass_examples), fail_examples=list(draft.fail_examples),
-            save_format_as=draft.save_format_as,
+            save_format_as=draft.save_format_as, format_name=draft.format_name,
             review_required=draft.review_required, message=draft.message(),
             confidence=dict(draft.confidence), assumptions=list(draft.assumptions),
             created_at=datetime.now(UTC), created_by=actor, created_by_kind=actor_kind)

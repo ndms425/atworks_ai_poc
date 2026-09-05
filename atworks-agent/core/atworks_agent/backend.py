@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from .jobs import JobDraft
-from .rules import RuleDraft, RuleImpact, ValidationRule
+from .rules import FormatDefinition, RuleDraft, RuleImpact, ValidationRule
 from .types import ActorKind, ApiSpec, AtworksSessionContext, JobSpec, RunResult
 
 
@@ -121,6 +121,19 @@ class AtworksBackend(ABC):
         최근 실행 중 draft.param에 대한 입력값을 복원할 수 있는 것만 세어(``known_inputs``) 그 중
         드래프트가 실패시켰을 것을 ``would_fail``로 센다; 복원 불가능한 나머지는
         ``excluded_unknown``이다."""
+
+    # -- 포맷 라이브러리 (내장 5개 + 저장된 항목; format_library.add와 동일한 dedup 규약) ----
+    @abstractmethod
+    async def get_format(self, session: AtworksSessionContext, name: str) -> FormatDefinition | None:
+        """이름 하나로 라이브러리 항목 조회(내장 또는 저장). 없으면 None — 크래시하지 않는다."""
+
+    @abstractmethod
+    async def list_formats(self, session: AtworksSessionContext) -> list[FormatDefinition]:
+        """라이브러리 전체(내장 5개 + 저장된 항목)."""
+
+    @abstractmethod
+    async def save_format(self, session: AtworksSessionContext, defn: FormatDefinition) -> tuple[bool, str | None]:
+        """``FormatLibrary.add``와 같은 계약: (added, skip_reason). 이름 또는 동일 패턴으로 dedup한다."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod

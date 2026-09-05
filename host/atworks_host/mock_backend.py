@@ -11,6 +11,8 @@ from atworks_agent import (
     ApiSpec,
     AtworksAgentConfig,
     AtworksBackend,
+    FormatDefinition,
+    FormatLibrary,
     JobDraft,
     JobLedger,
     JobSpec,
@@ -64,6 +66,7 @@ class MockAtworks(AtworksBackend):
         }
         self.ledger = JobLedger(config, self.apis)
         self.rule_ledger = RuleLedger(config, self.apis)
+        self.format_library = FormatLibrary()
         self.runs: dict[str, RunResult] = {
             row["run_id"]: RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))
         }
@@ -173,6 +176,15 @@ class MockAtworks(AtworksBackend):
                 would_fail += 1
         return RuleImpact(window_runs=window_runs, known_inputs=known_inputs, would_fail=would_fail,
                           excluded_unknown=window_runs - known_inputs)
+
+    async def get_format(self, session, name: str) -> FormatDefinition | None:
+        return self.format_library.get(name)
+
+    async def list_formats(self, session) -> list[FormatDefinition]:
+        return self.format_library.list()
+
+    async def save_format(self, session, defn: FormatDefinition) -> tuple[bool, str | None]:
+        return self.format_library.add(defn)
 
     async def execute_job_once(self, session, job_id, schedule_index=None) -> list[RunResult]:
         job = self.ledger.get(job_id)

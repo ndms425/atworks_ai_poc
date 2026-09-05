@@ -48,7 +48,13 @@ from .jobs import (
     check_job_guardrails,
 )
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
-from .rules import RuleDraft, RuleGuardrailViolation, ValidationRule, check_rule_guardrails
+from .rules import (
+    NAMED_FORMATS,
+    RuleDraft,
+    RuleGuardrailViolation,
+    ValidationRule,
+    check_rule_guardrails,
+)
 from .scoring import UnknownScorer, rank_runs
 from .selection import resolve_select_where
 from .serialization import api_record, job_record, rank_record, rule_record, run_record
@@ -189,6 +195,11 @@ class AtworksToolExecutor(BaseToolExecutor):
                 return ToolOutcome.error(
                     f"a raw pattern format rule needs at least {self._config.min_format_examples} pass "
                     f"example(s) and {self._config.min_format_examples} fail example(s); add more and call again."
+                )
+            if error.kind == "unknown_format":
+                return ToolOutcome.error(
+                    f"{error.field} does not name a known format (built-in or saved); call list_formats "
+                    "or use a raw pattern instead."
                 )
             if error.kind == "object":
                 if error.field == "test_data.values":
@@ -512,10 +523,27 @@ class AtworksToolExecutor(BaseToolExecutor):
         raw_pattern = tool_input.get("pattern")
         raw_format = tool_input.get("format") or None
         raw_save_format_as = tool_input.get("save_format_as")
-        # RuleDraft's own validator only guarantees >=1 pass/fail example for a raw-pattern
-        # format rule; this deployment's floor (config.min_format_examples) can be higher, so
-        # it is enforced here as a named error before the draft is even built.
-        if (
+        format_name: str | None = None
+        if tool_input.get("kind") == "format" and raw_format is not None and raw_format not in NAMED_FORMATS:
+            # Not one of the five built-in enum values: it must name a LIBRARY entry (built-in
+            # or operator-saved). Resolved here, at stage time, into a pattern rule -- the
+            # source name is kept only for display (ValidationRule.format_name) so evaluate()
+            # stays pattern-based and backend-independent (Task 3 ruling). A name the library
+            # does not recognize is a named error, never a crash.
+            defn = await self._backend.get_format(self._session, raw_format)
+            if defn is None:
+                raise InvalidToolArgument("format", kind="unknown_format")
+            format_name = raw_format
+            raw_format = None
+            raw_pattern = defn.pattern
+            pass_examples = list(defn.pass_examples)
+            fail_examples = list(defn.fail_examples)
+        elif (
+            # RuleDraft's own validator only guarantees >=1 pass/fail example for a raw-pattern
+            # format rule; this deployment's floor (config.min_format_examples) can be higher, so
+            # it is enforced here as a named error before the draft is even built. Skipped for a
+            # library-resolved format above: its examples already passed this check when the
+            # format was first authored as a raw-pattern rule.
             tool_input.get("kind") == "format" and raw_format is None and raw_pattern is not None
             and (len(pass_examples) < self._config.min_format_examples
                  or len(fail_examples) < self._config.min_format_examples)
@@ -530,6 +558,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "pass_examples": pass_examples,
             "fail_examples": fail_examples,
             "save_format_as": self._sanitize(raw_save_format_as, 60) if raw_save_format_as is not None else None,
+            "format_name": format_name,
             "summary": self._sanitize(tool_input.get("summary"), 200),
             "confidence": {
                 k: float(v) for k, v in (confidence_input or {}).items() if isinstance(v, (int, float))
