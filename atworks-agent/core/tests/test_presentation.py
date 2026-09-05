@@ -1,10 +1,13 @@
 from datetime import UTC, datetime
 
-from commerce_common.presentation import EnrichmentContext, run_presentation
+import pytest
+from commerce_common.presentation import EnrichmentContext, PresentationRefused, run_presentation
 
 from atworks_agent.config import AtworksAgentConfig
-from atworks_agent.enrichment import PRESENTATION_COMPONENTS
+from atworks_agent.enrichment import PRESENTATION_COMPONENTS, enrich_navigate_screen
+from atworks_agent.gates import PROVENANCE_GATE
 from atworks_agent.rules import RuleImpact, ValidationRule
+from atworks_agent.tools.presentation import NavigateScreenPayload
 from atworks_agent.types import (
     ApiSpec,
     AtworksSessionContext,
@@ -18,6 +21,8 @@ from atworks_agent.types import (
     RunGroup,
     RunResult,
     RunStatus,
+    ScreenFilter,
+    ScreenTarget,
 )
 
 CFG = AtworksAgentConfig(model="m")
@@ -434,3 +439,51 @@ async def test_profile_preview_refuses_unknown_profile():
         PRESENTATION_COMPONENTS["present_profile_preview"], {"profile_id": "nope"}, _ctx(AtworksSessionState()), "Shown.",
     )
     assert outcome.blocked == "provenance"
+
+
+def _api(api_id: str) -> ApiSpec:
+    return ApiSpec(api_id=api_id, method="POST", path="/v1/x", name="x", updated_at=datetime.now(UTC))
+
+
+async def test_navigate_emits_view_and_grounded_focus():
+    state = AtworksSessionState()
+    state.remember_api(_api("api-004"))
+    out = await enrich_navigate_screen(
+        NavigateScreenPayload(view="apis", focus=ScreenTarget(kind="api", ref_id="api-004")), _ctx(state),
+    )
+    assert out["view"] == "apis" and out["focus"] == {"kind": "api", "ref_id": "api-004"}
+
+
+async def test_navigate_refuses_ungrounded_focus():
+    with pytest.raises(PresentationRefused) as e:
+        await enrich_navigate_screen(
+            NavigateScreenPayload(view="apis", focus=ScreenTarget(kind="api", ref_id="api-999")),
+            _ctx(AtworksSessionState()),
+        )
+    assert e.value.gate == PROVENANCE_GATE
+
+
+async def test_navigate_refuses_view_kind_mismatch():
+    state = AtworksSessionState()
+    state.remember_api(_api("api-004"))
+    with pytest.raises(PresentationRefused):
+        await enrich_navigate_screen(
+            NavigateScreenPayload(view="runs", focus=ScreenTarget(kind="api", ref_id="api-004")), _ctx(state),
+        )
+
+
+async def test_navigate_drops_filter_keys_the_view_lacks_with_a_note():
+    out = await enrich_navigate_screen(
+        NavigateScreenPayload(view="jobs", filter=ScreenFilter(status="fail")), _ctx(AtworksSessionState()),
+    )
+    assert out.get("filter") in (None, {}) and "note" in out and "status" in out["note"]
+
+
+async def test_navigate_keeps_runs_status_and_apis_query():
+    a = await enrich_navigate_screen(
+        NavigateScreenPayload(view="runs", filter=ScreenFilter(status="fail")), _ctx(AtworksSessionState()),
+    )
+    b = await enrich_navigate_screen(
+        NavigateScreenPayload(view="apis", filter=ScreenFilter(query="payment")), _ctx(AtworksSessionState()),
+    )
+    assert a["filter"] == {"status": "fail"} and b["filter"] == {"query": "payment"}

@@ -6,6 +6,8 @@ from typing import Literal
 from commerce_common.presentation import PresentationPayload
 from pydantic import BaseModel, Field
 
+from ..types import ScreenFilter, ScreenTarget
+
 DIGEST_TOOL = "present_run_digest"
 GROUPS_TOOL = "present_run_groups"
 PREVIEW_TOOL = "present_job_preview"
@@ -14,6 +16,7 @@ FORMAT_BATCH_TOOL = "present_format_batch"
 PARITY_SUMMARY_TOOL = "present_parity_summary"
 PROFILE_PREVIEW_TOOL = "present_profile_preview"
 QUESTION_TOOL = "present_question_form"
+NAVIGATE_SCREEN_TOOL = "navigate_screen"
 
 
 class DigestItem(BaseModel):
@@ -68,3 +71,10 @@ class PresentProfilePreviewPayload(PresentationPayload):
     profile_id: str
     headline: str | None = Field(default=None, max_length=120)
     note: str | None = Field(default=None, max_length=200)
+
+
+class NavigateScreenPayload(PresentationPayload):
+    """DIRECTIVE: 카드가 아니라 화면을 바꾼다. focus/filter는 enrichment에서 근거·뷰 소유 필터로 검증된다."""
+    view: Literal["home", "apis", "runs", "jobs", "rules"]
+    focus: ScreenTarget | None = None
+    filter: ScreenFilter | None = None

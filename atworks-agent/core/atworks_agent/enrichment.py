@@ -20,16 +20,19 @@ from pydantic import BaseModel
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
 from .rules import FORMAT_EXAMPLES, NAMED_FORMATS
+from .screen import screen_ref_grounded
 from .serialization import format_batch_record, job_record, profile_record, rule_record
 from .tools.presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
+    NAVIGATE_SCREEN_TOOL,
     PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
     PROFILE_PREVIEW_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
+    NavigateScreenPayload,
     PresentFormatBatchPayload,
     PresentJobPreviewPayload,
     PresentParitySummaryPayload,
@@ -41,6 +44,10 @@ from .tools.presentation import (
 from .types import Binding, RunStatus
 
 LOW_CONFIDENCE = 0.5
+
+# Task 3/4/5 shared: which screen kind a view focuses, and which ScreenFilter keys a view owns.
+VIEW_KIND = {"apis": "api", "runs": "run", "jobs": "job", "rules": "rule"}
+VIEW_FILTERS = {"runs": {"status"}, "apis": {"query"}}
 
 
 def _record(model: Any) -> dict[str, Any]:
@@ -269,6 +276,37 @@ async def enrich_profile_preview(payload: PresentProfilePreviewPayload, context:
     return enriched
 
 
+async def enrich_navigate_screen(payload: NavigateScreenPayload, context: EnrichmentContext) -> dict[str, Any]:
+    enriched: dict[str, Any] = {"view": payload.view}
+    notes: list[str] = []
+    if payload.focus is not None:
+        want = VIEW_KIND.get(payload.view)
+        if want is None or payload.focus.kind != want:
+            raise PresentationRefused(
+                f"{payload.view} shows {want or 'no'} items; a {payload.focus.kind} cannot be focused there.",
+                gate=PROVENANCE_GATE,
+            )
+        if not screen_ref_grounded(context.state, payload.focus.kind, payload.focus.ref_id):
+            raise PresentationRefused(
+                "That ref_id was not seen this session and is not on the current screen. Look it up "
+                "(get_api/get_run/…) first.",
+                gate=PROVENANCE_GATE,
+            )
+        enriched["focus"] = {"kind": payload.focus.kind, "ref_id": payload.focus.ref_id}
+    if payload.filter is not None:
+        allowed = VIEW_FILTERS.get(payload.view, set())
+        given = payload.filter.model_dump(exclude_none=True)
+        kept = {k: v for k, v in given.items() if k in allowed}
+        dropped = sorted(set(given) - allowed)
+        if kept:
+            enriched["filter"] = kept
+        if dropped:
+            notes.append(f"{payload.view} has no {', '.join(dropped)} filter; ignored.")
+    if notes:
+        enriched["note"] = " ".join(notes)
+    return enriched
+
+
 async def enrich_question_form(payload: QuestionFormPayload, context: EnrichmentContext) -> dict[str, Any]:
     del context
     enriched = payload.model_dump(exclude_none=True)
@@ -289,6 +327,7 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
         PresentationComponent(name=PARITY_SUMMARY_TOOL, component="parity_summary", payload_model=PresentParitySummaryPayload, enrich=enrich_parity_summary),
         PresentationComponent(name=PROFILE_PREVIEW_TOOL, component="profile_preview", payload_model=PresentProfilePreviewPayload, enrich=enrich_profile_preview),
         PresentationComponent(name=QUESTION_TOOL, component="question_form", payload_model=QuestionFormPayload, enrich=enrich_question_form),
+        PresentationComponent(name=NAVIGATE_SCREEN_TOOL, component="screen_navigate", payload_model=NavigateScreenPayload, enrich=enrich_navigate_screen),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),
     )
 }

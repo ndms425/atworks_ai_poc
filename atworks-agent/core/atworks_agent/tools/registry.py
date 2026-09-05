@@ -14,6 +14,7 @@ from .presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
+    NAVIGATE_SCREEN_TOOL,
     PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
     PROFILE_PREVIEW_TOOL,
@@ -462,6 +463,23 @@ def build_tools(
                             "default and say WHY in `why`; put `default` before `options`. After this call, end the turn "
                             "with present_suggestions and wait — the answers come back as a '[form answers — id]' message."),
             "input_schema": QUESTION_FORM_INPUT_SCHEMA,
+        },
+        {
+            "name": NAVIGATE_SCREEN_TOOL,
+            "description": ("Move the portal: switch view, open/scroll to one item, set the view's own filter "
+                            "(runs: status; apis: query). Changes the screen only — runs, approves, saves nothing. "
+                            "Focus ids must come from a tool result or the current screen."),
+            "input_schema": {"type": "object", "properties": {
+                "view": {"type": "string", "enum": ["home", "apis", "runs", "jobs", "rules"]},
+                "focus": {"type": "object", "properties": {
+                    "kind": {"type": "string", "enum": ["api", "run", "job", "rule"]},
+                    "ref_id": {"type": "string", "maxLength": 64}},
+                    "required": ["kind", "ref_id"], "additionalProperties": False},
+                "filter": {"type": "object", "properties": {
+                    "status": {"type": "string", "enum": ["all", "pass", "fail", "error"]},
+                    "query": {"type": "string", "maxLength": 80}},
+                    "additionalProperties": False}},
+                "required": ["view"], "additionalProperties": False},
         },
         {
             "name": "present_suggestions",

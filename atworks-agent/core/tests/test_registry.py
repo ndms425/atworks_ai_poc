@@ -11,7 +11,7 @@ EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "ran
             "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles", "recommend_ignore_paths",
             "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
             "present_format_batch", "present_parity_summary", "present_profile_preview",
-            "present_question_form", "present_suggestions"]
+            "present_question_form", "navigate_screen", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():
@@ -176,3 +176,15 @@ def test_present_format_batch_schema():
     props = tool["input_schema"]["properties"]
     assert set(props) == {"batch_id", "headline", "note"}
     assert tool["input_schema"]["required"] == ["batch_id"]
+
+
+def test_registry_has_navigate_screen_with_view_enum_and_filter_shape():
+    tools = {t["name"]: t for t in build_tools(AtworksAgentConfig(model="m"), [], ())}
+    s = tools["navigate_screen"]["input_schema"]["properties"]
+    assert s["view"]["enum"] == ["home", "apis", "runs", "jobs", "rules"]
+    assert s["filter"]["properties"]["status"]["enum"] == ["all", "pass", "fail", "error"]
+
+
+def test_navigate_screen_absent_when_screen_directives_disabled():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=False), [])]
+    assert "navigate_screen" not in names
