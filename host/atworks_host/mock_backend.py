@@ -14,11 +14,16 @@ from atworks_agent import (
     JobDraft,
     JobLedger,
     JobSpec,
+    RuleDraft,
+    RuleImpact,
+    RuleLedger,
     RunResult,
     RunStatus,
     SelectWhere,
     TestDataSet,
+    ValidationRule,
     enforce_execution_matrix,
+    evaluate,
     resolve_select_where,
 )
 from atworks_agent.types import Binding
@@ -58,6 +63,7 @@ class MockAtworks(AtworksBackend):
             row["api_id"]: ApiSpec(**row) for row in json.loads((fixtures_dir / "apis.json").read_text(encoding="utf-8"))
         }
         self.ledger = JobLedger(config, self.apis)
+        self.rule_ledger = RuleLedger(config, self.apis)
         self.runs: dict[str, RunResult] = {
             row["run_id"]: RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))
         }
@@ -122,6 +128,52 @@ class MockAtworks(AtworksBackend):
     async def add_guardrail_note(self, session, job_id, note):
         return self.ledger.add_guardrail_note(job_id, note)
 
+    async def stage_rule(self, session, draft: RuleDraft, actor_kind: ActorKind) -> ValidationRule:
+        return self.rule_ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_pending_rules(self, session):
+        return self.rule_ledger.pending()
+
+    async def apply_rule(self, session, rule_id):
+        return self.rule_ledger.apply(rule_id, actor=session.operator)
+
+    async def discard_rule(self, session, rule_id, actor_kind):
+        return self.rule_ledger.discard(rule_id, actor=session.operator, actor_kind=actor_kind)
+
+    async def list_rules(self, session, api_id=None):
+        return self.rule_ledger.list(api_id=api_id)
+
+    async def simulate_rule(self, session, draft: RuleDraft) -> RuleImpact:
+        """읽기 전용: draft를 아직 저장하지 않은 채 evaluate로만 돌려본다. 각 과거 run의 입력값은
+        그 run을 낳은 job의 test_data 세트(test_data_label로 찾는다)에서 draft.param 바인딩을
+        복원한다 — job_id나 test_data_label이 없거나, 그 세트에 param이 없으면 복원 불가로
+        excluded_unknown에 들어간다. ledger에도 runs에도 아무것도 쓰지 않는다."""
+        candidate = ValidationRule(
+            rule_id="__simulated__", api_id=draft.api_id, param=draft.param, kind=draft.kind, op=draft.op,
+            value=draft.value, values=list(draft.values), format=draft.format, pattern=draft.pattern,
+            message=draft.message(), created_at=datetime.now(UTC), created_by=session.operator,
+            created_by_kind=draft.created_by_kind)
+        window_runs = 0
+        known_inputs = 0
+        would_fail = 0
+        for run in self.runs.values():
+            if run.api_id != draft.api_id:
+                continue
+            window_runs += 1
+            if run.job_id is None or run.test_data_label is None:
+                continue
+            job = self.ledger.get(run.job_id)
+            if job is None:
+                continue
+            data_set = next((d for d in job.test_data if d.label == run.test_data_label), None)
+            if data_set is None or draft.param not in data_set.values:
+                continue
+            known_inputs += 1
+            if not evaluate(candidate, data_set.values[draft.param]):
+                would_fail += 1
+        return RuleImpact(window_runs=window_runs, known_inputs=known_inputs, would_fail=would_fail,
+                          excluded_unknown=window_runs - known_inputs)
+
     async def execute_job_once(self, session, job_id, schedule_index=None) -> list[RunResult]:
         job = self.ledger.get(job_id)
         if job is None:
@@ -159,6 +211,20 @@ class MockAtworks(AtworksBackend):
                         continue
                     self._run_seq += 1
                     status, rules, http = stub_verdict(api, env, data)
+                    # additive: an applied rule effective as of now can only add failures on
+                    # top of the legacy stub's verdict, never remove one (fixtures have no
+                    # applied rules, so no fixture verdict changes).
+                    now = datetime.now(UTC)
+                    extra_failed: list[str] = []
+                    for r in self.rule_ledger.applied():
+                        if r.api_id != api_id or r.effective_from is None or r.effective_from > now:
+                            continue
+                        bound = data.values.get(r.param) if data is not None else None
+                        if not evaluate(r, bound):
+                            extra_failed.append(r.message)
+                    if extra_failed:
+                        status = RunStatus.FAIL if status is RunStatus.PASS else status
+                        rules = [*rules, *extra_failed]
                     run = RunResult(
                         run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
                         target_env=env, test_data_label=data.label if data is not None else None,

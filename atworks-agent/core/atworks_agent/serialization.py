@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .rules import ValidationRule
 from .types import ApiSpec, FailedRank, JobSpec, RunResult
 
 
@@ -27,4 +28,10 @@ def job_record(job: JobSpec) -> dict[str, Any]:
     record["total_executions"] = job.total_executions
     record["remaining_executions"] = job.remaining_executions
     record["runs_total"] = job.runs_total
+    return record
+
+
+def rule_record(rule: ValidationRule) -> dict[str, Any]:
+    record = rule.model_dump(mode="json", exclude_none=True)
+    record["change_id"] = rule.rule_id   # web-shared의 change_update 훅과 호환 (Task 15)
     return record

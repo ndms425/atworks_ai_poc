@@ -205,6 +205,24 @@ class RecordingBackend(AtworksBackend):
     async def discard_job(self, session, job_id, actor_kind):
         raise NotImplementedError
 
+    async def stage_rule(self, session, draft, actor_kind):
+        raise NotImplementedError
+
+    async def get_pending_rules(self, session):
+        raise NotImplementedError
+
+    async def apply_rule(self, session, rule_id):
+        raise NotImplementedError
+
+    async def discard_rule(self, session, rule_id, actor_kind):
+        raise NotImplementedError
+
+    async def list_rules(self, session, api_id=None):
+        raise NotImplementedError
+
+    async def simulate_rule(self, session, draft):
+        raise NotImplementedError
+
     async def execute_job_once(self, session, job_id, schedule_index=None):
         self.calls.append("execute_job_once")
         self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "executions": 1})

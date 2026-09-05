@@ -8,6 +8,7 @@ from commerce_common.skills import Skill, SkillRegistry
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.jobs import JobDraft, JobLedger
+from atworks_agent.rules import RuleImpact, RuleLedger
 from atworks_agent.types import (
     ActorKind,
     ApiSpec,
@@ -27,6 +28,7 @@ class InMemoryBackend(AtworksBackend):
             "api-2": ApiSpec(api_id="api-2", method="GET", path="/v1/contracts/{id}", name="계약 조회", group="contract", updated_at=T0 - timedelta(days=20), has_rules=False),
         }
         self.ledger = JobLedger(config, self.apis)
+        self.rule_ledger = RuleLedger(config, self.apis)
         self.runs = [
             RunResult(run_id="run-1", api_id="api-1", executed_at=T0, target_env="dev", status=RunStatus.FAIL, failed_rules=["amount >= 0"], http_status=200),
             RunResult(run_id="run-2", api_id="api-2", executed_at=T0 + timedelta(minutes=5), target_env="dev", status=RunStatus.ERROR, http_status=503),
@@ -83,6 +85,24 @@ class InMemoryBackend(AtworksBackend):
 
     async def add_guardrail_note(self, session, job_id, note):
         return self.ledger.add_guardrail_note(job_id, note)
+
+    async def stage_rule(self, session, draft, actor_kind):
+        return self.rule_ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_pending_rules(self, session):
+        return self.rule_ledger.pending()
+
+    async def apply_rule(self, session, rule_id):
+        return self.rule_ledger.apply(rule_id, actor=session.operator)
+
+    async def discard_rule(self, session, rule_id, actor_kind):
+        return self.rule_ledger.discard(rule_id, actor=session.operator, actor_kind=actor_kind)
+
+    async def list_rules(self, session, api_id=None):
+        return self.rule_ledger.list(api_id=api_id)
+
+    async def simulate_rule(self, session, draft):
+        return RuleImpact()
 
     async def execute_job_once(self, session, job_id, schedule_index=None):
         self.executed.append(job_id)

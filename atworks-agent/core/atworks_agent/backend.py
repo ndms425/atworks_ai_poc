@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from .jobs import JobDraft
+from .rules import RuleDraft, RuleImpact, ValidationRule
 from .types import ActorKind, ApiSpec, AtworksSessionContext, JobSpec, RunResult
 
 
@@ -87,6 +88,39 @@ class AtworksBackend(ABC):
     @abstractmethod
     async def add_guardrail_note(self, session: AtworksSessionContext, job_id: str, note: str) -> JobSpec:
         """job의 guardrail_notes에 note 한 줄을 남긴다. 스케줄러가 실행/리포트 실패를 기록할 때 쓴다."""
+
+    # -- 검증 규칙 (propose → preview → approve → apply; effective_from 이후만 적용) --------
+    @abstractmethod
+    async def stage_rule(
+        self, session: AtworksSessionContext, draft: RuleDraft, actor_kind: ActorKind
+    ) -> ValidationRule: ...
+
+    @abstractmethod
+    async def get_pending_rules(self, session: AtworksSessionContext) -> list[ValidationRule]: ...
+
+    @abstractmethod
+    async def apply_rule(self, session: AtworksSessionContext, rule_id: str) -> ValidationRule:
+        """승인된 규칙을 발효시킨다. REST 구현의 의무: 이 호출 시점의 timestamp를
+        ``effective_from``에 찍어야 한다 — 그 이전에 실행된 run은 절대 건드리지 않고, 그 이후의
+        실행만 이 규칙을 평가받는다(과거는 안 건드린다는 불변식은 여기서 시작한다)."""
+
+    @abstractmethod
+    async def discard_rule(
+        self, session: AtworksSessionContext, rule_id: str, actor_kind: ActorKind
+    ) -> ValidationRule: ...
+
+    @abstractmethod
+    async def list_rules(
+        self, session: AtworksSessionContext, api_id: str | None = None
+    ) -> list[ValidationRule]:
+        """api_id가 주어지면 그 API의 규칙만, 아니면 전체(상태 무관)."""
+
+    @abstractmethod
+    async def simulate_rule(self, session: AtworksSessionContext, draft: RuleDraft) -> RuleImpact:
+        """읽기 전용: 아무 것도 쓰지 않는다 — 규칙 레저에도 실행 이력에도 흔적을 남기지 않는다.
+        최근 실행 중 draft.param에 대한 입력값을 복원할 수 있는 것만 세어(``known_inputs``) 그 중
+        드래프트가 실패시켰을 것을 ``would_fail``로 센다; 복원 불가능한 나머지는
+        ``excluded_unknown``이다."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod
