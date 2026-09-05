@@ -291,7 +291,9 @@ class AtworksSessionState(BaseModel):
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
     seen_rules: dict[str, ValidationRule] = Field(default_factory=dict)
-    # RuleImpact-or-dict, used only within one turn; never reloaded across a session round trip.
+    # Holds the staging turn's RuleImpact for the card; read within the same turn, so a
+    # plain-dict reload (after session persistence round-trips it) is fine — it is not typed
+    # like seen_rules and is never read again on a later turn.
     rule_impacts: dict[str, Any] = Field(default_factory=dict)
     approved_rule_ids: set[str] = Field(default_factory=set)
     host_action_rule_ids: set[str] = Field(default_factory=set)

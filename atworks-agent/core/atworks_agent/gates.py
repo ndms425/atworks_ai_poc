@@ -92,6 +92,10 @@ def apply_guardrail_message(violations: list[str]) -> str:
     return "That job can no longer be applied under this deployment's guardrails: " + "; ".join(violations)
 
 
+def apply_rule_guardrail_message(violations: list[str]) -> str:
+    return "That rule can no longer be applied under this deployment's guardrails: " + "; ".join(violations)
+
+
 def applied_confirmation(job_id: str, kind_value: str, operator: str) -> str:
     return (
         f"Applied {job_id} ({kind_value}) as {operator}. Confirm to the operator that the job is "
@@ -173,7 +177,7 @@ def check_apply_rule(state: AtworksSessionState, config: AtworksAgentConfig, rul
     # rule without ever having seen its API's catalogue, and a missing catalogue must never
     # become a param-provenance violation. The ledger re-checks the param rule with its catalogue.
     if violations := check_rule_guardrails(draft, config, None):
-        return ToolOutcome.held(GUARDRAIL_GATE, apply_guardrail_message(violations))
+        return ToolOutcome.held(GUARDRAIL_GATE, apply_rule_guardrail_message(violations))
     if config.require_host_approval and rule_id not in state.approved_rule_ids:
         return ToolOutcome.held(APPROVAL_GATE,
             f"rule {rule_id} is staged and waiting for approval on the Rules page; approving it there applies it.")

@@ -114,12 +114,19 @@ def evaluate(rule: ValidationRule, value: str | None) -> bool:
     if value is None or value == "":
         return True
     if rule.kind == "compare":
+        op_fn = _COMPARE.get(rule.op)
+        if op_fn is None:
+            return True
         a, b = _as_number(value), _as_number(rule.value or "")
         if a is not None and b is not None:
-            return _COMPARE[rule.op](a, b)
-        return _COMPARE[rule.op](value, rule.value or "")
+            return op_fn(a, b)
+        return op_fn(value, rule.value or "")
     if rule.kind == "membership":
-        return (value in rule.values) if rule.op == "in" else (value not in rule.values)
+        if rule.op == "in":
+            return value in rule.values
+        if rule.op == "not_in":
+            return value not in rule.values
+        return True
     if rule.kind == "format":
         pattern = NAMED_FORMATS.get(rule.format, "") if rule.format else (rule.pattern or "")
         try:

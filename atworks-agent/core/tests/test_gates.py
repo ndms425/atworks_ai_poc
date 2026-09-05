@@ -150,6 +150,7 @@ def test_check_apply_rule_rechecks_guardrails_under_current_config():
     held = check_apply_rule(state, tight_cfg, "rule-0002")
     assert held is not None and held.blocked == "guardrail"
     assert "3 values" in held.result_text and "limit is 1" in held.result_text
+    assert "rule" in held.result_text.lower() and "job" not in held.result_text.lower()
 
 
 def test_check_discard_rule_and_actor_kind():

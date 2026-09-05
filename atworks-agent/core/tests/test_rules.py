@@ -89,6 +89,19 @@ def test_evaluate_never_raises_on_unrecognized_format_bypassing_draft():
     assert evaluate(bad, "555") is False
 
 
+def test_evaluate_never_raises_on_unrecognized_compare_or_membership_op():
+    # Constructed directly (bypassing RuleDraft's validation) so evaluate() must stay total,
+    # same stance as the format case above: skip (pass) when we cannot evaluate.
+    bad_op = rule(kind="compare", op="=>", value="0", message="x")
+    assert evaluate(bad_op, "5") is True
+    none_op = rule(kind="compare", op=None, value="0", message="x")
+    assert evaluate(none_op, "5") is True
+    bad_membership_op = rule(kind="membership", op="contains", value=None, values=["A"], message="x")
+    assert evaluate(bad_membership_op, "A") is True
+    none_membership_op = rule(kind="membership", op=None, value=None, values=["A"], message="x")
+    assert evaluate(none_membership_op, "A") is True
+
+
 # -- Task 2: check_rule_guardrails and RuleLedger ------------------------------------
 
 CFG = AtworksAgentConfig(model="m")
