@@ -223,6 +223,12 @@ class RecordingBackend(AtworksBackend):
     async def simulate_rule(self, session, draft):
         raise NotImplementedError
 
+    async def find_apis_with_param(self, session, param):
+        raise NotImplementedError
+
+    async def recommend_rules_for_api(self, session, api_id):
+        raise NotImplementedError
+
     async def get_format(self, session, name):
         raise NotImplementedError
 

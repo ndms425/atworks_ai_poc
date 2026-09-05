@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .rules import FormatDefinition, ValidationRule
-from .types import ApiSpec, FailedRank, FormatBatch, JobSpec, RunResult
+from .types import ApiSpec, FailedRank, FormatBatch, JobSpec, RuleRecommendation, RunResult
 
 
 def api_record(api: ApiSpec) -> dict[str, Any]:
@@ -39,6 +39,12 @@ def rule_record(rule: ValidationRule) -> dict[str, Any]:
 
 def format_record(defn: FormatDefinition) -> dict[str, Any]:
     return defn.model_dump(mode="json", exclude_none=True)
+
+
+def rule_recommendation_record(rec: RuleRecommendation) -> dict[str, Any]:
+    record = rec.model_dump(mode="json", exclude_none=True)
+    record["rule"] = rule_record(rec.rule)
+    return record
 
 
 def format_batch_record(batch: FormatBatch) -> dict[str, Any]:

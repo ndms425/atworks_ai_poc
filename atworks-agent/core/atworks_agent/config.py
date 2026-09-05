@@ -110,5 +110,6 @@ class AtworksAgentConfig(BaseAgentConfig):
                 "stage_rule", "apply_rule", "discard_rule", "get_pending_rules", "present_rule_preview",
                 "stage_format_batch", "apply_format_batch", "discard_format_batch",
                 "get_pending_format_batches", "present_format_batch",
+                "find_apis_with_param", "recommend_rules_for_api",
             }
         return frozenset(names)

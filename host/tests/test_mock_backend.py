@@ -8,6 +8,7 @@ from atworks_agent import (
     Binding,
     JobDraft,
     JobKind,
+    RuleDraft,
     RunStatus,
     TestDataSet,
 )
@@ -177,3 +178,60 @@ async def test_execute_job_once_enforces_the_matrix_cap_at_execution_time():
     assert len(updated.guardrail_notes) == 1
     assert "matrix resolved to 12 runs" in updated.guardrail_notes[0]
     assert updated.remaining_executions == before - 1
+
+
+async def test_find_apis_with_param_excludes_apis_with_an_applied_format_rule():
+    b = _backend()
+    found = await b.find_apis_with_param(SESSION, "amount")
+    assert {a.api_id for a in found} == {"api-001", "api-004", "api-006"}
+    rule = b.rule_ledger.stage(
+        RuleDraft(api_id="api-001", param="amount", kind="format", format="number"),
+        actor=SESSION.operator, actor_kind=ActorKind.AGENT)
+    b.rule_ledger.apply(rule.rule_id, actor=SESSION.operator)
+    found = await b.find_apis_with_param(SESSION, "amount")
+    assert {a.api_id for a in found} == {"api-004", "api-006"}
+
+
+async def test_find_apis_with_param_unknown_param_finds_nothing():
+    b = _backend()
+    found = await b.find_apis_with_param(SESSION, "nonexistentParam")
+    assert found == []
+
+
+async def test_recommend_rules_for_api_suggests_a_peers_applied_rule():
+    b = _backend()
+    rule = b.rule_ledger.stage(
+        RuleDraft(api_id="api-006", param="amount", kind="compare", op=">=", value="0"),
+        actor=SESSION.operator, actor_kind=ActorKind.AGENT)
+    applied = b.rule_ledger.apply(rule.rule_id, actor=SESSION.operator)
+    recs = await b.recommend_rules_for_api(SESSION, "api-004")
+    assert len(recs) == 1
+    assert recs[0].param == "amount"
+    assert recs[0].from_api_id == "api-006"
+    assert recs[0].rule.rule_id == applied.rule_id
+
+
+async def test_recommend_rules_for_api_nothing_when_no_peer_has_a_rule():
+    b = _backend()
+    recs = await b.recommend_rules_for_api(SESSION, "api-004")
+    assert recs == []
+
+
+async def test_recommend_rules_for_api_skips_a_param_the_target_already_has_a_rule_for():
+    b = _backend()
+    peer = b.rule_ledger.stage(
+        RuleDraft(api_id="api-006", param="amount", kind="compare", op=">=", value="0"),
+        actor=SESSION.operator, actor_kind=ActorKind.AGENT)
+    b.rule_ledger.apply(peer.rule_id, actor=SESSION.operator)
+    own = b.rule_ledger.stage(
+        RuleDraft(api_id="api-004", param="amount", kind="required"),
+        actor=SESSION.operator, actor_kind=ActorKind.AGENT)
+    b.rule_ledger.apply(own.rule_id, actor=SESSION.operator)
+    recs = await b.recommend_rules_for_api(SESSION, "api-004")
+    assert recs == []
+
+
+async def test_recommend_rules_for_api_unknown_api_returns_nothing():
+    b = _backend()
+    recs = await b.recommend_rules_for_api(SESSION, "no-such-api")
+    assert recs == []

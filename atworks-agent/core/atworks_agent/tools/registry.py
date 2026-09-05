@@ -235,6 +235,31 @@ def build_tools(
             "description": "Rules staged and waiting for approval. / 승인 대기 중인 검증 규칙.",
             "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
+        # -- 추천 (읽기 전용, 판정 없음) ---------------------------------------------------
+        {
+            "name": "find_apis_with_param",
+            "description": ("Find APIs that declare a given parameter and do NOT already have an applied format "
+                            "rule for it — candidates for extending a format you just applied to more APIs. Use "
+                            "it after applying a format rule, to offer the operator the same shape on other APIs "
+                            "sharing that parameter name. / 해당 파라미터를 선언했지만 아직 포맷 규칙이 적용되지 "
+                            "않은 API를 찾는다. 방금 적용한 포맷을 다른 API로 넓힐 때 쓴다."),
+            "input_schema": {"type": "object", "properties": {
+                "param": {"type": "string", "maxLength": 80, "description": "Parameter name, e.g. one get_api listed."}},
+                "required": ["param"], "additionalProperties": False},
+        },
+        {
+            "name": "recommend_rules_for_api",
+            "description": ("For each parameter of one API with no applied rule yet, suggest the applied rule(s) "
+                            "peer APIs already carry for a same-named parameter. A parameter with no such peer "
+                            "gets no suggestion — never fabricate a constraint from the parameter name alone. "
+                            "Stage each suggestion individually with stage_rule, referencing the peer's format by "
+                            "name; each is approved on its own. / 규칙이 없는 파라미터마다 같은 이름의 파라미터를 "
+                            "가진 다른 API의 적용된 규칙을 제안한다. 대응 규칙이 없으면 아무것도 제안하지 않는다. "
+                            "제안은 stage_rule로 개별 스테이징하고 각각 승인받는다."),
+            "input_schema": {"type": "object", "properties": {
+                "api_id": {"type": "string", "description": _SESSION_API_ID}},
+                "required": ["api_id"], "additionalProperties": False},
+        },
         # -- 포맷 라이브러리 (bulk seed, deduped, one host approval) ----------------------
         {
             "name": "stage_format_batch",

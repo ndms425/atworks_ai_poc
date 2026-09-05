@@ -43,6 +43,7 @@ from .types import (
     JobSchedule,
     JobSpec,
     JobStatus,
+    RuleRecommendation,
     RuleStatus,
     RunGroup,
     RunResult,

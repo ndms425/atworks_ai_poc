@@ -14,6 +14,7 @@ from atworks_agent.types import (
     ApiSpec,
     AtworksSessionContext,
     AtworksSessionState,
+    RuleRecommendation,
     RunResult,
     RunStatus,
 )
@@ -105,6 +106,25 @@ class InMemoryBackend(AtworksBackend):
 
     async def simulate_rule(self, session, draft):
         return RuleImpact()
+
+    async def find_apis_with_param(self, session, param):
+        applied_format_apis = {r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param}
+        return [a for a in self.apis.values() if param in a.params and a.api_id not in applied_format_apis]
+
+    async def recommend_rules_for_api(self, session, api_id):
+        api = self.apis.get(api_id)
+        if api is None:
+            return []
+        applied = self.rule_ledger.applied()
+        already_ruled_params = {r.param for r in applied if r.api_id == api_id}
+        recommendations = []
+        for param in api.params:
+            if param in already_ruled_params:
+                continue
+            for peer_rule in applied:
+                if peer_rule.api_id != api_id and peer_rule.param == param:
+                    recommendations.append(RuleRecommendation(param=param, from_api_id=peer_rule.api_id, rule=peer_rule))
+        return recommendations
 
     async def get_format(self, session, name):
         return self.format_library.get(name)

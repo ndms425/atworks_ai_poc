@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.executor import AtworksToolExecutor
+from atworks_agent.rules import RuleDraft
 from atworks_agent.types import ApiSpec
 
 from .conftest import T0
@@ -671,6 +672,67 @@ async def test_get_pending_rules(backend, config, skills, session, state):
     assert not out.refused
     pending = _payload(out)
     assert len(pending) == 1 and pending[0]["rule_id"] == "rule-0001"
+
+
+# -- Task 7: recommendation read tools -------------------------------------------------
+
+
+async def test_find_apis_with_param_excludes_apis_with_an_applied_format_rule(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("find_apis_with_param", {"param": "contractNo"})
+    payload = _payload(out)
+    assert [a["api_id"] for a in payload["apis"]] == ["api-1"]
+    assert "api-1" in state.seen_apis
+    rule = backend.rule_ledger.stage(
+        RuleDraft(api_id="api-1", param="contractNo", kind="format", format="uuid"), actor="op")
+    backend.rule_ledger.apply(rule.rule_id, actor="op")
+    out = await ex.execute("find_apis_with_param", {"param": "contractNo"})
+    assert _payload(out) == {"note": "No APIs declare that parameter without an already-applied format rule for it."}
+
+
+async def test_find_apis_with_param_no_match(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("find_apis_with_param", {"param": "nonexistentParam"})
+    assert _payload(out) == {"note": "No APIs declare that parameter without an already-applied format rule for it."}
+
+
+async def test_recommend_rules_for_api_suggests_a_peers_applied_rule_on_the_same_named_param(
+    backend, config, skills, session, state
+):
+    backend.apis["api-3"] = ApiSpec(api_id="api-3", method="GET", path="/v1/payments/{id}", name="결제 상세",
+                                    group="payment", updated_at=T0, has_rules=False, params=["amount"])
+    rule = backend.rule_ledger.stage(
+        RuleDraft(api_id="api-1", param="amount", kind="compare", op=">=", value="0"), actor="op")
+    applied = backend.rule_ledger.apply(rule.rule_id, actor="op")
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("recommend_rules_for_api", {"api_id": "api-3"})
+    recs = _payload(out)
+    assert len(recs) == 1
+    assert recs[0]["param"] == "amount"
+    assert recs[0]["from_api_id"] == "api-1"
+    assert recs[0]["rule"]["rule_id"] == applied.rule_id
+
+
+async def test_recommend_rules_for_api_suggests_nothing_when_no_peer_has_a_rule(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("recommend_rules_for_api", {"api_id": "api-1"})
+    assert _payload(out) == {"note": "No rule-less parameter of this API has a peer with an applied rule to suggest."}
+
+
+async def test_recommend_rules_for_api_skips_params_the_target_already_has_a_rule_for(
+    backend, config, skills, session, state
+):
+    backend.apis["api-3"] = ApiSpec(api_id="api-3", method="GET", path="/v1/payments/{id}", name="결제 상세",
+                                    group="payment", updated_at=T0, has_rules=False, params=["amount"])
+    peer_rule = backend.rule_ledger.stage(
+        RuleDraft(api_id="api-3", param="amount", kind="compare", op=">=", value="0"), actor="op")
+    backend.rule_ledger.apply(peer_rule.rule_id, actor="op")
+    own_rule = backend.rule_ledger.stage(
+        RuleDraft(api_id="api-1", param="amount", kind="required"), actor="op")
+    backend.rule_ledger.apply(own_rule.rule_id, actor="op")
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("recommend_rules_for_api", {"api_id": "api-1"})
+    assert _payload(out) == {"note": "No rule-less parameter of this API has a peer with an applied rule to suggest."}
 
 
 async def test_open_question_form_blocks_staging_rule_this_turn(backend, config, skills, session, state):

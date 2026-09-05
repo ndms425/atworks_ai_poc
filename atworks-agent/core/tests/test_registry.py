@@ -6,6 +6,7 @@ from atworks_agent.tools.registry import build_tools
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
             "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
+            "find_apis_with_param", "recommend_rules_for_api",
             "stage_format_batch", "apply_format_batch", "discard_format_batch", "get_pending_format_batches",
             "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
             "present_format_batch", "present_question_form", "present_suggestions"]
@@ -32,6 +33,11 @@ def test_rules_switch_removes_format_batch_tools_too():
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_rules=False), [])]
     assert not {"stage_format_batch", "apply_format_batch", "discard_format_batch",
                 "get_pending_format_batches", "present_format_batch"} & set(names)
+
+
+def test_rules_switch_removes_recommendation_tools_too():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_rules=False), [])]
+    assert not {"find_apis_with_param", "recommend_rules_for_api"} & set(names)
 
 
 def test_same_config_same_bytes():
@@ -139,6 +145,16 @@ def test_apply_discard_get_format_batch_tools_shapes():
     assert apply_tool["input_schema"]["required"] == ["batch_id"]
     assert discard_tool["input_schema"]["required"] == ["batch_id"]
     assert set(get_tool["input_schema"]["properties"]) == {"status"}
+
+
+def test_find_apis_with_param_and_recommend_rules_for_api_schemas():
+    tools = build_tools(AtworksAgentConfig(model="m"), [])
+    find_tool = next(t for t in tools if t["name"] == "find_apis_with_param")
+    recommend_tool = next(t for t in tools if t["name"] == "recommend_rules_for_api")
+    assert find_tool["input_schema"]["required"] == ["param"]
+    assert find_tool["input_schema"]["additionalProperties"] is False
+    assert recommend_tool["input_schema"]["required"] == ["api_id"]
+    assert recommend_tool["input_schema"]["additionalProperties"] is False
 
 
 def test_present_format_batch_schema():

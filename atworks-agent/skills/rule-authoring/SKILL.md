@@ -38,3 +38,12 @@ past runs are never re-evaluated.
 ## Stage
 - `stage_rule` with `api_id`, `param`, `kind`, the kind's fields, and `summary` in the operator's language.
 - One sentence after staging: it is a draft, and it takes effect only once approved on the Rules page — nothing about past runs changes.
+
+## Offer the format to other APIs (outward recommendation)
+- After a `stage_rule`/`apply_rule` round trip applies a `format` rule, call `find_apis_with_param` with that same `param` name. It returns every API that declares the param and does not already carry an applied format rule for it.
+- If it returns any, offer to extend the same format to them ("이 파라미터, 다른 API에도 있는데 같은 포맷을 적용할까요?") — do not stage anything for them without the operator's say-so; a param name match is not itself a request.
+
+## Recommend rules when the operator does not know the shape (inward recommendation)
+- 기준을 모를 때 ("이 파라미터에 뭘 걸어야 할지 모르겠다" 류) → `recommend_rules_for_api` with the target `api_id`. For each of its rule-less params it returns the applied rule(s) peer APIs already carry on a same-named param — never a fabricated constraint from the param name alone; a param with no peer rule gets no suggestion, and that is a valid, complete answer (say so instead of inventing one).
+- Present each suggestion (param, source API, the rule) and let the operator pick which to adopt.
+- Stage each adopted suggestion individually with `stage_rule`, referencing the peer's format by name — never bulk-copy. Each staged rule goes through its own preview and its own approval (개별 승인) on the Rules page; adopting three suggestions means three separate approvals, not one.

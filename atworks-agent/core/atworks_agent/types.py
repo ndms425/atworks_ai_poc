@@ -258,6 +258,16 @@ class ValidationRule(BaseModel):
     discarded_by_kind: ActorKind | None = None
 
 
+class RuleRecommendation(BaseModel):
+    """recommend_rules_for_api 출력 1건: 대상 API의 규칙 없는 param에 대해, 같은 이름의 param을 가진
+    다른 API에 이미 적용된 규칙 하나를 제안으로 보여준다. 대응하는 peer가 없으면 그 param은 아무것도
+    제안하지 않는다 — param 이름만으로 제약을 지어내지 않는다(no fabrication). 제안은 개별적으로
+    stage_rule을 통해 스테이징되고, 각각 승인받는다."""
+    param: str = Field(max_length=80)
+    from_api_id: str
+    rule: ValidationRule
+
+
 class FormatBatchEntry(BaseModel):
     """FormatBatch 한 줄. outcome은 stage 시점에 계산된다: verify_examples 실패 → invalid(적용
     제외), 라이브러리에 이름/동일 패턴 이미 있음 → duplicate(건너뜀), 그 외 → new. reason은

@@ -68,6 +68,7 @@ from .serialization import (
     format_batch_record,
     job_record,
     rank_record,
+    rule_recommendation_record,
     rule_record,
     run_record,
 )
@@ -287,6 +288,8 @@ class AtworksToolExecutor(BaseToolExecutor):
             "stage_rule": self._stage_rule,
             "apply_rule": self._apply_rule,
             "discard_rule": self._discard_rule,
+            "find_apis_with_param": self._find_apis_with_param,
+            "recommend_rules_for_api": self._recommend_rules_for_api,
             "get_pending_format_batches": self._get_pending_format_batches,
             "stage_format_batch": self._stage_format_batch,
             "apply_format_batch": self._apply_format_batch,
@@ -641,6 +644,26 @@ class AtworksToolExecutor(BaseToolExecutor):
         )
         self._state.remember_rule(discarded)
         return ToolOutcome(f"Discarded {rule_id}.", [AgentEvent.change_update(rule_record(discarded))])
+
+    # -- 추천 (읽기 전용, 판정 없음) -----------------------------------------------------
+
+    async def _find_apis_with_param(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        param = self._sanitize(tool_input.get("param"), 80)
+        apis = await self._backend.find_apis_with_param(self._session, param)
+        for api in apis:
+            self._state.remember_api(api)
+        return self._fenced(
+            {"count": len(apis), "apis": [api_record(a) for a in apis]} if apis
+            else {"note": "No APIs declare that parameter without an already-applied format rule for it."}
+        )
+
+    async def _recommend_rules_for_api(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        api_id = str(tool_input.get("api_id", ""))
+        recommendations = await self._backend.recommend_rules_for_api(self._session, api_id)
+        return self._fenced(
+            [rule_recommendation_record(r) for r in recommendations] if recommendations
+            else {"note": "No rule-less parameter of this API has a peer with an applied rule to suggest."}
+        )
 
     # -- 포맷 배치 (bulk seed, deduped, one host approval) ------------------------------
     # Task 6 owns the tool schema and the format_batch preview card (present_format_batch /

@@ -9,7 +9,15 @@ from typing import Any
 
 from .jobs import JobDraft
 from .rules import FormatBatchDraft, FormatDefinition, RuleDraft, RuleImpact, ValidationRule
-from .types import ActorKind, ApiSpec, AtworksSessionContext, FormatBatch, JobSpec, RunResult
+from .types import (
+    ActorKind,
+    ApiSpec,
+    AtworksSessionContext,
+    FormatBatch,
+    JobSpec,
+    RuleRecommendation,
+    RunResult,
+)
 
 
 class AtworksBackend(ABC):
@@ -162,6 +170,23 @@ class AtworksBackend(ABC):
     async def discard_format_batch(
         self, session: AtworksSessionContext, batch_id: str, actor_kind: ActorKind
     ) -> FormatBatch: ...
+
+    # -- 추천 (읽기 전용, 판정 없음) -----------------------------------------------------
+    @abstractmethod
+    async def find_apis_with_param(self, session: AtworksSessionContext, param: str) -> list[ApiSpec]:
+        """param을 선언한 API 중, 그 API에 이미 적용된(``applied``) format 규칙이 그 param에 대해
+        없는 것만 돌려준다 — 한 API에 포맷을 적용한 뒤 '다른 API에도 이 이름의 param이 있는데
+        확장할까요'를 결정론으로 묻기 위한 카탈로그 스캔. 아무것도 쓰지 않는다."""
+
+    @abstractmethod
+    async def recommend_rules_for_api(
+        self, session: AtworksSessionContext, api_id: str
+    ) -> list[RuleRecommendation]:
+        """대상 API의 param마다: 이미 적용된 규칙이 있으면 건너뛰고, 없으면 같은 이름의 param을 가진
+        *다른* API에 이미 적용된 규칙들을 제안(``RuleRecommendation``)으로 돌려준다. 대응하는 peer가
+        전혀 없는 param은 아무것도 제안하지 않는다 — param 이름만으로 제약을 지어내지 않는다(no
+        fabrication). 각 제안은 operator가 개별적으로 ``stage_rule``에 실어 스테이징하고 승인한다.
+        읽기 전용: 아무것도 쓰지 않는다."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod

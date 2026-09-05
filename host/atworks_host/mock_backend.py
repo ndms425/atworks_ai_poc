@@ -22,6 +22,7 @@ from atworks_agent import (
     RuleDraft,
     RuleImpact,
     RuleLedger,
+    RuleRecommendation,
     RunResult,
     RunStatus,
     SelectWhere,
@@ -195,6 +196,29 @@ class MockAtworks(AtworksBackend):
                 would_fail += 1
         return RuleImpact(window_runs=window_runs, known_inputs=known_inputs, would_fail=would_fail,
                           excluded_unknown=window_runs - known_inputs)
+
+    async def find_apis_with_param(self, session, param: str) -> list[ApiSpec]:
+        applied_format_apis = {
+            r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param
+        }
+        return [a for a in self.apis.values() if param in a.params and a.api_id not in applied_format_apis]
+
+    async def recommend_rules_for_api(self, session, api_id: str) -> list[RuleRecommendation]:
+        api = self.apis.get(api_id)
+        if api is None:
+            return []
+        applied = self.rule_ledger.applied()
+        already_ruled_params = {r.param for r in applied if r.api_id == api_id}
+        recommendations: list[RuleRecommendation] = []
+        for param in api.params:
+            if param in already_ruled_params:
+                continue
+            for peer_rule in applied:
+                if peer_rule.api_id != api_id and peer_rule.param == param:
+                    recommendations.append(
+                        RuleRecommendation(param=param, from_api_id=peer_rule.api_id, rule=peer_rule)
+                    )
+        return recommendations
 
     async def get_format(self, session, name: str) -> FormatDefinition | None:
         return self.format_library.get(name)
