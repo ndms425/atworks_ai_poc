@@ -436,6 +436,67 @@ def test_matrix_row_missing_one_envs_cell_is_not_flagged_as_differing():
     assert "stg" not in row["cells"]
 
 
+async def _parity_report(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="legacy/renewed 값 비교",
+        api_ids=["api-002", "api-004", "api-008"], target_envs=["legacy", "renewed"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+    return backend, reports, job
+
+
+async def test_parity_block_has_per_row_verdicts(tmp_path):
+    _, _, job = await _parity_report(tmp_path)
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+
+    parity = data["parity"]
+    assert parity is not None
+    assert parity["targets"] == ["legacy", "renewed"]
+    rows = {r["api_id"]: r for r in parity["rows"]}
+    assert set(rows) == {"api-002", "api-004", "api-008"}
+    for row in rows.values():
+        assert row["verdict"] in {"equal", "status_diff", "value_diff"}
+
+    api004 = rows["api-004"]
+    assert api004["verdict"] == "value_diff"
+    assert "$.limit" in api004["diff_paths"]
+    assert "$.serverTime" in api004["diff_paths"]
+
+
+async def test_parity_clusters_group_the_servertime_only_rows(tmp_path):
+    _, _, job = await _parity_report(tmp_path)
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+
+    clusters = data["parity"]["clusters"]
+    servertime_only = next(c for c in clusters if c["paths"] == ["$.serverTime"])
+    assert servertime_only["count"] == 2
+    assert set(servertime_only["row_keys"]) == {"api-002|", "api-008|"}
+    assert not any(c["paths"] == ["$.limit", "$.serverTime"] and c["count"] > 1 for c in clusters)
+
+
+async def test_rediff_reapplies_ignore_paths_without_touching_the_backend(tmp_path):
+    backend, reports, job = await _parity_report(tmp_path)
+    runs_before = len(backend.runs)
+
+    path = reports.rediff(job.job_id, ["$.serverTime"])
+
+    assert len(backend.runs) == runs_before   # no new runs, no backend call at all
+    data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    parity = data["parity"]
+    assert parity["ignore_paths"] == ["$.serverTime"]
+    rows = {r["api_id"]: r for r in parity["rows"]}
+    assert rows["api-004"]["verdict"] == "value_diff"
+    assert rows["api-004"]["diff_paths"] == ["$.limit"]
+    assert rows["api-002"]["verdict"] == "equal"
+    assert rows["api-008"]["verdict"] == "equal"
+    assert path == tmp_path / job.job_id / "index.html"
+    html = path.read_text(encoding="utf-8")
+    assert "\\u003c" in html or "parity" in html
+
+
 async def test_report_single_env_job_has_no_comparison_table_data(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
     reports = Reports(tmp_path)
@@ -449,6 +510,7 @@ async def test_report_single_env_job_has_no_comparison_table_data(tmp_path):
     assert data["matrix"]["envs"] == ["dev"]
     assert data["matrix"]["differs_count"] == 0
     assert all(r["differs"] is False for r in data["matrix"]["rows"])
+    assert data["parity"] is None                       # single-target job: no parity block, no crash
 
     template_source = TEMPLATE.read_text(encoding="utf-8")
     assert "envs.length>1" in template_source or "envs.length > 1" in template_source

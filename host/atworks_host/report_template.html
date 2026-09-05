@@ -8,12 +8,18 @@ h1{font-size:18px;margin:0 0 4px} h2{font-size:14px;margin:18px 0 6px} .meta{col
 table{border-collapse:collapse;width:100%;background:#fff}th,td{border-bottom:1px solid #e3e6ee;padding:6px 8px;text-align:left;font-size:13px}
 tr.fail td:nth-child(4){color:#b42318;font-weight:600}tr.error td:nth-child(4){color:#b54708;font-weight:600}
 tr.differs{background:#fff7ed}
+tr.value_diff td:nth-child(3){color:#b54708;font-weight:600}tr.status_diff td:nth-child(3){color:#b42318;font-weight:600}
+.clusters{list-style:none;padding:0;margin:0 0 10px;font-size:12px;color:#5a6072}
+.clusters li{padding:2px 0}.clusters code{background:#f0f1f5;padding:1px 4px;border-radius:4px}
 .prov{margin-top:14px;font-size:11px;color:#8a90a3}
 .hidden{display:none}
 </style></head><body>
 <h1 id="title"></h1><div class="meta" id="meta"></div>
 <div class="tiles"><div class="tile">전체<b id="t-total"></b></div><div class="tile fail">fail<b id="t-fail"></b></div><div class="tile error">error<b id="t-error"></b></div><div class="tile pass">pass<b id="t-pass"></b></div><div class="tile diff hidden" id="t-diff-tile">차이<b id="t-diff"></b>건</div></div>
 <section id="compare" class="hidden"><h2>환경 비교</h2><div class="scroll"><table><thead><tr id="compare-head"></tr></thead><tbody id="compare-rows"></tbody></table></div></section>
+<section id="parity" class="hidden"><h2>값 동등성 비교 (parity)</h2><div class="meta" id="parity-meta"></div>
+<ul class="clusters" id="parity-clusters"></ul>
+<div class="scroll"><table><thead><tr><th>API</th><th>데이터</th><th>판정</th><th>차이 경로</th></tr></thead><tbody id="parity-rows"></tbody></table></div></section>
 <h2>실행 목록</h2>
 <div class="scroll"><table><thead><tr><th>run</th><th>API</th><th>env</th><th>status</th><th>데이터</th><th>failed rules</th><th>HTTP</th><th>executed</th><th>채팅</th></tr></thead><tbody id="rows"></tbody></table></div>
 <div class="prov" id="prov"></div>
@@ -31,6 +37,13 @@ if(m.envs.length>1){
   document.getElementById('compare').classList.remove('hidden');
   document.getElementById('compare-head').innerHTML=`<th>API</th><th>데이터</th>${m.envs.map(e=>`<th>${esc(e)}</th>`).join('')}`;
   document.getElementById('compare-rows').innerHTML=m.rows.map(r=>`<tr class="${r.differs?'differs':''}"><td>${esc(r.api_id)}</td><td>${esc(r.test_data_label??'—')}</td>${m.envs.map(e=>`<td>${esc((r.cells[e]||{}).status??'—')}</td>`).join('')}</tr>`).join('');
+}
+const p=d.parity;
+if(p){
+  document.getElementById('parity').classList.remove('hidden');
+  document.getElementById('parity-meta').textContent=`${esc(p.targets.join(' ↔ '))} · value_diff ${p.value_diff_count} · status_diff ${p.status_diff_count}${p.ignore_paths.length?` · ignored ${p.ignore_paths.join(', ')}`:''}`;
+  document.getElementById('parity-clusters').innerHTML=p.clusters.map(c=>`<li>${c.count}건이 <code>${esc(c.paths.join(', '))}</code> 항목에서만 다름</li>`).join('');
+  document.getElementById('parity-rows').innerHTML=p.rows.map(r=>`<tr class="${esc(r.verdict)}"><td>${esc(r.api_id)}</td><td>${esc(r.test_data_label??'—')}</td><td>${esc(r.verdict)}</td><td>${esc(r.diff_paths.join(', '))}</td></tr>`).join('');
 }
 const order={fail:0,error:1,pass:2};
 document.getElementById('rows').innerHTML=[...d.runs].sort((a,b)=>order[a.status]-order[b.status]).map(r=>`<tr class="${esc(r.status)}"><td>${esc(r.run_id)}</td><td>${esc(r.api_id)}</td><td>${esc(r.target_env)}</td><td>${esc(r.status)}</td><td>${esc(r.test_data_label??'—')}</td><td>${esc((r.failed_rules||[]).join(', '))}</td><td>${esc(r.http_status)}</td><td>${esc(r.executed_at)}</td><td><a href="${esc(d.portal_origin)}/?attach=run:${encodeURIComponent(r.run_id)}" target="_blank" rel="noreferrer">채팅에서 보기</a></td></tr>`).join('');
