@@ -192,3 +192,9 @@ class Reports:
     def all_runs(self, job_id: str) -> list[dict]:
         path = self._folder(job_id) / "data.json"
         return json.loads(path.read_text(encoding="utf-8"))["runs"] if path.exists() else []
+
+    def parity(self, job_id: str) -> dict | None:
+        path = self._folder(job_id) / "data.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8")).get("parity")

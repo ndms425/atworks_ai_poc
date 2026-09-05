@@ -238,6 +238,9 @@ class RecordingBackend(AtworksBackend):
     async def list_profiles(self, session, job_id=None):
         raise NotImplementedError
 
+    async def get_parity_report(self, session, job_id):
+        raise NotImplementedError
+
     async def find_apis_with_param(self, session, param):
         raise NotImplementedError
 

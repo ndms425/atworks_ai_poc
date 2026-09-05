@@ -34,6 +34,7 @@ class InMemoryBackend(AtworksBackend):
         self.profile_ledger = ProfileLedger(config)
         self.format_library = FormatLibrary(max_size=config.max_format_library)
         self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
+        self.parity_reports: dict[str, dict] = {}
         self.runs = [
             RunResult(run_id="run-1", api_id="api-1", executed_at=T0, target_env="dev", status=RunStatus.FAIL, failed_rules=["amount >= 0"], http_status=200),
             RunResult(run_id="run-2", api_id="api-2", executed_at=T0 + timedelta(minutes=5), target_env="dev", status=RunStatus.ERROR, http_status=503),
@@ -123,6 +124,9 @@ class InMemoryBackend(AtworksBackend):
 
     async def list_profiles(self, session, job_id=None):
         return self.profile_ledger.list(job_id=job_id)
+
+    async def get_parity_report(self, session, job_id):
+        return self.parity_reports.get(job_id)
 
     async def find_apis_with_param(self, session, param):
         applied_format_apis = {r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param}

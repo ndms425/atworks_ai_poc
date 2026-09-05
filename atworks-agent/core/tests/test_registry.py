@@ -8,6 +8,7 @@ EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "ran
             "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
             "find_apis_with_param", "recommend_rules_for_api",
             "stage_format_batch", "apply_format_batch", "discard_format_batch", "get_pending_format_batches",
+            "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles", "recommend_ignore_paths",
             "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
             "present_format_batch", "present_question_form", "present_suggestions"]
 

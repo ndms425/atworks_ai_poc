@@ -32,14 +32,17 @@ from .gates import (
     check_api_provenance,
     check_apply_format_batch,
     check_apply_job,
+    check_apply_profile,
     check_apply_rule,
     check_discard_format_batch,
     check_discard_job,
+    check_discard_profile,
     check_discard_rule,
     check_rule_param_provenance,
     guardrail_block_message,
     take_discard_actor_kind,
     take_format_batch_discard_actor_kind,
+    take_profile_discard_actor_kind,
     take_rule_discard_actor_kind,
 )
 from .jobs import (
@@ -51,6 +54,7 @@ from .jobs import (
     check_job_guardrails,
 )
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
+from .profiles import ProfileDraft, ProfileGuardrailViolation, check_profile_guardrails
 from .rules import (
     NAMED_FORMATS,
     FormatBatchDraft,
@@ -67,6 +71,7 @@ from .serialization import (
     api_record,
     format_batch_record,
     job_record,
+    profile_record,
     rank_record,
     rule_recommendation_record,
     rule_record,
@@ -165,6 +170,24 @@ def _applied_format_batch_confirmation(batch: FormatBatch, operator: str) -> str
     )
 
 
+def _profile_guardrail_message(violations: list[str]) -> str:
+    """Mirrors _rule_guardrail_message: gates.apply_profile_guardrail_message is worded for the
+    apply path (check_apply_profile), so stage_profile needs its own staging-time wording."""
+    return (
+        "That comparison profile exceeds this deployment's guardrails: " + "; ".join(violations)
+        + ". Explain the block to the operator and propose fewer ignore paths."
+    )
+
+
+def _applied_profile_confirmation(profile_id: str, operator: str) -> str:
+    return (
+        f"Applied {profile_id} as {operator}. Confirm to the operator that the profile is now "
+        "effective for comparisons from this moment forward (effective_from) and that its "
+        "target job's parity report has been re-diffed with these ignore paths — no new runs "
+        "were made, and past comparison results were not re-judged."
+    )
+
+
 def _coerce_list(value: Any) -> list[Any] | None:
     if isinstance(value, list):
         return value
@@ -206,6 +229,8 @@ class AtworksToolExecutor(BaseToolExecutor):
     def domain_error(self, error: Exception) -> ToolOutcome | None:
         if isinstance(error, RuleGuardrailViolation):
             return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(error.violations))
+        if isinstance(error, ProfileGuardrailViolation):
+            return ToolOutcome.held(GUARDRAIL_GATE, _profile_guardrail_message(error.violations))
         if isinstance(error, FormatBatchGuardrailViolation):
             return ToolOutcome.held(GUARDRAIL_GATE, _format_batch_guardrail_message(error.violations))
         if isinstance(error, GuardrailViolation):
@@ -264,7 +289,9 @@ class AtworksToolExecutor(BaseToolExecutor):
         return outcome
 
     async def dispatch(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
-        if name in ("stage_job", "apply_job", "stage_rule", "apply_rule") and self._asked_form and name not in self._absent:
+        if name in (
+            "stage_job", "apply_job", "stage_rule", "apply_rule", "stage_profile", "apply_profile",
+        ) and self._asked_form and name not in self._absent:
             return ToolOutcome.held(
                 QUESTION_FORM_GATE,
                 "A question form is open this turn. End the turn with present_suggestions "
@@ -294,6 +321,11 @@ class AtworksToolExecutor(BaseToolExecutor):
             "stage_format_batch": self._stage_format_batch,
             "apply_format_batch": self._apply_format_batch,
             "discard_format_batch": self._discard_format_batch,
+            "get_pending_profiles": self._get_pending_profiles,
+            "stage_profile": self._stage_profile,
+            "apply_profile": self._apply_profile,
+            "discard_profile": self._discard_profile,
+            "recommend_ignore_paths": self._recommend_ignore_paths,
         }
 
     # -- 읽기 -------------------------------------------------------------------------
@@ -726,3 +758,88 @@ class AtworksToolExecutor(BaseToolExecutor):
         )
         self._state.remember_format_batch(discarded)
         return ToolOutcome(f"Discarded {batch_id}.", [AgentEvent.change_update(format_batch_record(discarded))])
+
+    # -- 값 비교 프로파일 (propose → approve → apply; effective_from 이후에도 과거 판정은 안 건드림) --
+    # No preview card in this task: Task 8/9 owns present_profile_preview and the profile
+    # provenance = the parity job seen this session (staged/applied/discarded or listed by
+    # get_pending_jobs all call remember_job), mirroring check_api_provenance's own-catalogue
+    # discipline for stage_job.
+
+    async def _stage_profile(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        job_id = str(tool_input.get("job_id", ""))
+        if job_id not in self._state.seen_jobs:
+            return ToolOutcome.held(
+                PROVENANCE_GATE,
+                f"job_id {job_id} was not staged, applied, or listed in this session. Call "
+                "get_pending_jobs (or stage/apply it) first, then propose ignore paths for it.",
+            )
+        ignore_paths = [self._sanitize(p, 200) for p in (_coerce_list(tool_input.get("ignore_paths")) or [])]
+        per_api_ignore_input = tool_input.get("per_api_ignore")
+        if per_api_ignore_input is not None and not isinstance(per_api_ignore_input, dict):
+            raise InvalidToolArgument("per_api_ignore", kind="object")
+        per_api_ignore: dict[str, list[str]] = {
+            self._sanitize(api_id, 80): [self._sanitize(p, 200) for p in (_coerce_list(paths) or [])]
+            for api_id, paths in (per_api_ignore_input or {}).items()
+        }
+        draft = parse_argument(ProfileDraft, {
+            "job_id": job_id,
+            "ignore_paths": ignore_paths,
+            "per_api_ignore": per_api_ignore,
+            "summary": self._sanitize(tool_input.get("summary"), 200),
+        })
+        # Mirrors _stage_rule/_stage_format_batch: the guardrail runs here, before the backend
+        # call, so a permissive backend is never handed a profile this deployment's cap rejects.
+        if violations := check_profile_guardrails(draft, self._config):
+            return ToolOutcome.held(GUARDRAIL_GATE, _profile_guardrail_message(violations))
+        profile = await self._backend.stage_profile(self._session, draft, ActorKind.AGENT)
+        self._state.remember_profile(profile)
+        return self._fenced({"staged": profile_record(profile), "note": (
+            "Staged only — approve it on the Jobs/Profiles page; applying re-diffs the stored "
+            "bodies with these ignore paths, no re-run."
+        )})
+
+    async def _get_pending_profiles(self, _: dict[str, Any]) -> ToolOutcome:
+        pending = await self._backend.get_pending_profiles(self._session)
+        for profile in pending:
+            self._state.remember_profile(profile)
+        return self._fenced([profile_record(p) for p in pending] or {"note": "Nothing is waiting for approval."})
+
+    async def _apply_profile(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        profile_id = str(tool_input.get("profile_id", ""))
+        if held := check_apply_profile(self._state, self._config, profile_id):
+            return held
+        try:
+            applied = await self._backend.apply_profile(self._session, profile_id)
+        except ProfileGuardrailViolation as violation:
+            return ToolOutcome.held(GUARDRAIL_GATE, _profile_guardrail_message(violation.violations))
+        self._state.remember_profile(applied)
+        return ToolOutcome(_applied_profile_confirmation(profile_id, self._session.operator),
+                           [AgentEvent.change_update(profile_record(applied))])
+
+    async def _discard_profile(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        profile_id = str(tool_input.get("profile_id", ""))
+        if held := check_discard_profile(self._state, profile_id):
+            return held
+        discarded = await self._backend.discard_profile(
+            self._session, profile_id, take_profile_discard_actor_kind(self._state, profile_id)
+        )
+        self._state.remember_profile(discarded)
+        return ToolOutcome(f"Discarded {profile_id}.", [AgentEvent.change_update(profile_record(discarded))])
+
+    async def _recommend_ignore_paths(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        """Read-only: ranks the parity report's noise clusters biggest-first so the model can
+        propose which paths to ignore. Deterministic — every cluster and count here is what
+        the report already computed (cluster_diffs), never a fabricated path."""
+        job_id = str(tool_input.get("job_id", ""))
+        parity = await self._backend.get_parity_report(self._session, job_id)
+        if parity is None:
+            return self._fenced({"note": "No parity report for that job yet — run the parity comparison first."})
+        clusters = sorted(parity.get("clusters", []), key=lambda c: -c.get("count", 0))
+        return self._fenced({
+            "job_id": job_id,
+            "clusters": clusters,
+            "note": (
+                "Ignoring a cluster's paths would clear its count rows; propose the biggest "
+                "cluster(s) as a profile via stage_profile."
+            ),
+        })

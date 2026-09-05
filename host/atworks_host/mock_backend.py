@@ -241,6 +241,9 @@ class MockAtworks(AtworksBackend):
     async def list_profiles(self, session, job_id=None):
         return self.profile_ledger.list(job_id=job_id)
 
+    async def get_parity_report(self, session, job_id: str) -> dict | None:
+        return self.reports.parity(job_id) if self.reports is not None else None
+
     async def find_apis_with_param(self, session, param: str) -> list[ApiSpec]:
         applied_format_apis = {
             r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param

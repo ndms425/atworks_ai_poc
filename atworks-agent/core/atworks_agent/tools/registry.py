@@ -36,6 +36,10 @@ def _batch_id() -> dict[str, Any]:
     return {"type": "string", "description": "batch_id staged this conversation or listed by get_pending_format_batches."}
 
 
+def _profile_id() -> dict[str, Any]:
+    return {"type": "string", "description": "profile_id staged this conversation or listed by get_pending_profiles."}
+
+
 def build_tools(
     config: AtworksAgentConfig,
     skill_names: list[str],
@@ -306,6 +310,58 @@ def build_tools(
             "name": "get_pending_format_batches",
             "description": "Format batches staged and waiting for approval. / 승인 대기 중인 포맷 배치.",
             "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        # -- 값 비교 프로파일 (propose → approve → apply; effective_from 이후에도 과거 판정은 안 건드림) --
+        {
+            "name": "stage_profile",
+            "description": ("Stage an ignore-spec (a ComparisonProfile) for a two-target job's value comparison — "
+                            "it judges nothing and re-diffs nothing yet. job_id must be one this conversation staged, "
+                            "applied, or listed. Each ignore path is a $-rooted JSON path (e.g. '$.serverTime', "
+                            "'$.items[0].id'); per_api_ignore adds paths scoped to one api_id only. Approval is "
+                            "host-only, on the Jobs/Profiles page; applying it re-diffs the job's stored response "
+                            "bodies with these ignore paths — no new runs are made, and past comparison results "
+                            "are never re-judged. / 값 비교의 무시 경로 초안을 스테이징한다. 승인은 호스트 전용이고, "
+                            "적용은 저장된 응답 바디를 재-diff할 뿐 새로 실행하지 않는다."),
+            "input_schema": {"type": "object", "properties": {
+                "job_id": {"type": "string", "description": "job_id staged, applied, or listed by get_pending_jobs this session — the two-target job this profile compares."},
+                "ignore_paths": {"type": "array", "maxItems": config.max_ignore_paths,
+                                 "items": {"type": "string", "maxLength": 200},
+                                 "description": "$-rooted JSON paths to ignore across every API in the job, e.g. '$.serverTime'."},
+                "per_api_ignore": {"type": "object", "additionalProperties": {"type": "array", "maxItems": config.max_ignore_paths, "items": {"type": "string", "maxLength": 200}},
+                                   "description": "Optional: extra $-rooted ignore paths keyed by api_id, scoped to that API only."},
+                "summary": {"type": "string", "maxLength": 200, "description": "One line naming what noise this clears."}},
+                "required": ["job_id", "summary"], "additionalProperties": False},
+        },
+        {
+            "name": "apply_profile",
+            "description": ("Apply a comparison profile the operator approved on the Jobs/Profiles page. It is the "
+                            "only tool that makes a profile effective; a profile not marked approved by the host is "
+                            "held. Effective only from this moment forward — past comparison results are never "
+                            "re-judged; the target job's parity report is re-diffed from its stored bodies, no new "
+                            "runs. / Jobs/Profiles 페이지에서 승인된 프로파일만 effective해진다. 과거 비교 결과는 "
+                            "재평가하지 않는다."),
+            "input_schema": {"type": "object", "properties": {"profile_id": _profile_id()}, "required": ["profile_id"], "additionalProperties": False},
+        },
+        {
+            "name": "discard_profile",
+            "description": "Discard a staged comparison profile the operator rejected or replaced.",
+            "input_schema": {"type": "object", "properties": {"profile_id": _profile_id()}, "required": ["profile_id"], "additionalProperties": False},
+        },
+        {
+            "name": "get_pending_profiles",
+            "description": "Comparison profiles staged and waiting for approval. / 승인 대기 중인 비교 프로파일.",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "recommend_ignore_paths",
+            "description": ("Read-only: returns a parity report's noise clusters (paths that differ, and how many "
+                            "rows) ranked biggest-first, so you can propose which paths to ignore. Every path and "
+                            "count here is what the report already computed — never fabricate a path the report "
+                            "did not surface. Propose the biggest cluster(s) as a profile with stage_profile. / "
+                            "리포트가 이미 계산한 노이즈 클러스터를 큰 순서로 돌려준다. 판정 없음, 새 실행 없음."),
+            "input_schema": {"type": "object", "properties": {
+                "job_id": {"type": "string", "description": "job_id whose parity report to read."}},
+                "required": ["job_id"], "additionalProperties": False},
         },
     ]
 

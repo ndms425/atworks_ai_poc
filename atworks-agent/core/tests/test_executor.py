@@ -881,3 +881,142 @@ async def test_apply_format_batch_with_zero_new_entries_is_still_applied(backend
     assert not out.refused
     assert state.seen_format_batches["format-batch-0001"].status.value == "applied"
     assert "0 new format(s)" in out.result_text
+
+
+# -- Task 7: comparison-profile handlers + ignore-path recommendation -----------------
+
+
+async def _staged_job(ex):
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_job", {"kind": "run_now", "summary": "s", "api_ids": ["api-1"], "target_envs": ["dev"]})
+    assert not out.refused
+    return "job-0001"
+
+
+async def test_stage_profile_holds_unknown_job_then_stages(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    held = await ex.execute("stage_profile", {"job_id": "job-0001", "ignore_paths": ["$.serverTime"], "summary": "noisy field"})
+    assert held.blocked == "provenance"
+
+    job_id = await _staged_job(ex)
+    out = await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["$.serverTime"], "summary": "noisy field"})
+    assert not out.refused
+    profile_id = next(iter(state.seen_profiles))
+    assert profile_id == "profile-0001"
+    assert state.seen_profiles[profile_id].job_id == job_id
+    assert state.seen_profiles[profile_id].ignore_paths == ["$.serverTime"]
+    assert "Staged only" in out.result_text
+    payload = _payload(out)
+    assert payload["staged"]["profile_id"] == "profile-0001"
+
+
+async def test_stage_profile_per_api_ignore_is_kept_and_remembered(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    job_id = await _staged_job(ex)
+    out = await ex.execute("stage_profile", {
+        "job_id": job_id, "per_api_ignore": {"api-1": ["$.a.b"]}, "summary": "per-api noise",
+    })
+    assert not out.refused
+    profile = state.seen_profiles["profile-0001"]
+    assert profile.per_api_ignore == {"api-1": ["$.a.b"]}
+
+
+async def test_stage_profile_invalid_ignore_path_is_a_named_error(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    job_id = await _staged_job(ex)
+    out = await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["serverTime"], "summary": "s"})
+    assert out.is_error
+    assert "unavailable" not in out.result_text
+    assert "profile-0001" not in state.seen_profiles
+
+
+async def test_stage_profile_guardrail_over_ignore_path_cap(backend, config, skills, session, state):
+    tight = config.model_copy(update={"max_ignore_paths": 1})
+    ex = _exec(backend, tight, skills, session, state)
+    job_id = await _staged_job(ex)
+    out = await ex.execute("stage_profile", {
+        "job_id": job_id, "ignore_paths": ["$.a", "$.b"], "summary": "s",
+    })
+    assert out.blocked == "guardrail"
+    assert "profile-0001" not in state.seen_profiles
+
+
+async def test_apply_profile_requires_host_mark(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    job_id = await _staged_job(ex)
+    await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["$.serverTime"], "summary": "s"})
+    held = await ex.execute("apply_profile", {"profile_id": "profile-0001"})
+    assert held.blocked == "approval"
+
+    state.approved_profile_ids.add("profile-0001")
+    out = await ex.execute("apply_profile", {"profile_id": "profile-0001"})
+    assert not out.refused
+    assert state.seen_profiles["profile-0001"].status.value == "applied"
+    assert out.events[0].type == "change_update"
+
+
+async def test_apply_profile_unknown_id_is_provenance_blocked(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("apply_profile", {"profile_id": "profile-9999"})
+    assert out.blocked == "provenance"
+
+
+async def test_discard_profile(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    job_id = await _staged_job(ex)
+    await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["$.serverTime"], "summary": "s"})
+    out = await ex.execute("discard_profile", {"profile_id": "profile-0001"})
+    assert not out.refused
+    assert state.seen_profiles["profile-0001"].status.value == "discarded"
+
+
+async def test_discard_profile_unknown_id_is_provenance_blocked(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("discard_profile", {"profile_id": "profile-9999"})
+    assert out.blocked == "provenance"
+
+
+async def test_get_pending_profiles(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    job_id = await _staged_job(ex)
+    await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["$.serverTime"], "summary": "s"})
+    out = await ex.execute("get_pending_profiles", {})
+    assert not out.refused
+    pending = _payload(out)
+    assert len(pending) == 1 and pending[0]["profile_id"] == "profile-0001"
+
+
+async def test_recommend_ignore_paths_ranks_clusters_biggest_first(backend, config, skills, session, state):
+    backend.parity_reports["job-0001"] = {
+        "targets": ["dev", "stg"],
+        "clusters": [
+            {"paths": ["$.a"], "count": 2, "row_keys": ["k1", "k2"]},
+            {"paths": ["$.b"], "count": 7, "row_keys": ["k3"]},
+        ],
+    }
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("recommend_ignore_paths", {"job_id": "job-0001"})
+    assert not out.refused
+    payload = _payload(out)
+    assert [c["count"] for c in payload["clusters"]] == [7, 2]
+    assert payload["clusters"][0]["paths"] == ["$.b"]
+
+
+async def test_recommend_ignore_paths_no_report_yet(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("recommend_ignore_paths", {"job_id": "job-9999"})
+    assert not out.refused
+    assert "No parity report" in _payload(out)["note"]
+
+
+async def test_open_question_form_blocks_staging_profile_this_turn(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    job_id = await _staged_job(ex)
+    form = await ex.execute("present_question_form", {
+        "id": "ignore-pick", "title": "무시할 경로",
+        "questions": [{"id": "path", "label": "경로", "type": "radio", "why": "경로 확인 필요",
+                       "default": "$.serverTime", "options": ["$.serverTime", "$.requestId"]}],
+    })
+    assert not form.refused
+    out = await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["$.serverTime"], "summary": "s"})
+    assert out.blocked == "question_form"

@@ -167,6 +167,10 @@ class AtworksBackend(ABC):
     ) -> list[ComparisonProfile]:
         """job_id가 주어지면 그 job의 프로파일만, 아니면 전체(상태 무관)."""
 
+    @abstractmethod
+    async def get_parity_report(self, session: AtworksSessionContext, job_id: str) -> dict | None:
+        """저장된 parity 블록(targets/rows/clusters/counts)을 job_id로 읽는다 — 판정 없는 읽기, 새 run 없음."""
+
     # -- 포맷 라이브러리 (내장 5개 + 저장된 항목; format_library.add와 동일한 dedup 규약) ----
     @abstractmethod
     async def get_format(self, session: AtworksSessionContext, name: str) -> FormatDefinition | None:
