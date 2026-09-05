@@ -65,6 +65,7 @@ def test_stage_rule_schema_has_enums_from_config_and_is_closed():
     stage = next(t for t in build_tools(cfg, []) if t["name"] == "stage_rule")
     props = stage["input_schema"]["properties"]
     assert {"api_id", "param", "kind", "op", "value", "values", "format", "pattern",
+            "pass_examples", "fail_examples", "save_format_as",
             "summary", "confidence", "assumptions"} <= set(props)
     assert props["kind"]["enum"] == list(cfg.allowed_rule_kinds)
     assert props["op"]["enum"] == list(cfg.allowed_compare_ops) + ["in", "not_in"]
@@ -78,6 +79,13 @@ def test_stage_rule_membership_cap_comes_from_config():
     cfg = AtworksAgentConfig(model="m", max_membership_values=3)
     props = next(t for t in build_tools(cfg, []) if t["name"] == "stage_rule")["input_schema"]["properties"]
     assert props["values"]["maxItems"] == 3
+
+
+def test_stage_rule_format_examples_cap_comes_from_config():
+    cfg = AtworksAgentConfig(model="m", max_format_examples=4)
+    props = next(t for t in build_tools(cfg, []) if t["name"] == "stage_rule")["input_schema"]["properties"]
+    assert props["pass_examples"]["maxItems"] == 4
+    assert props["fail_examples"]["maxItems"] == 4
 
 
 def test_list_runs_filters_are_nested():

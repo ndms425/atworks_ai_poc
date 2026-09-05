@@ -250,6 +250,19 @@ async def test_rule_preview_format_hint_for_raw_pattern():
     assert payload["format_hint"] == {"label": "정규식", "example": None, "pattern": "^[A-Z]{3}$"}
 
 
+async def test_rule_preview_format_hint_includes_examples_for_raw_pattern():
+    state = AtworksSessionState()
+    state.remember_rule(_rule(kind="format", op=None, value=None, pattern="^[A-Z]{3}$",
+                              pass_examples=["ABC"], fail_examples=["ab1"],
+                              message="code matches /^[A-Z]{3}$/"))
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001"}, _ctx(state), "Shown.")
+    payload = outcome.events[0].data["payload"]
+    assert payload["format_hint"] == {
+        "label": "정규식", "example": None, "pattern": "^[A-Z]{3}$",
+        "pass_examples": ["ABC"], "fail_examples": ["ab1"],
+    }
+
+
 async def test_rule_preview_refuses_unknown_rule():
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "nope"}, _ctx(AtworksSessionState()), "Shown.")
     assert outcome.blocked == "provenance"

@@ -455,6 +455,34 @@ async def test_stage_rule_holds_unknown_api_then_stages(backend, config, skills,
     assert "impact" in out.events[1].data["payload"]
 
 
+async def test_stage_rule_raw_pattern_carries_examples_and_save_format_as(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {
+        "api_id": "api-1", "param": "contractNo", "kind": "format", "pattern": "^C-\\d{4}$",
+        "pass_examples": ["C-1234"], "fail_examples": ["C-12"],
+        "save_format_as": "contract-no", "summary": "contract number format",
+    })
+    assert not out.refused
+    rule = state.seen_rules["rule-0001"]
+    assert rule.pass_examples == ["C-1234"]
+    assert rule.fail_examples == ["C-12"]
+    assert rule.save_format_as == "contract-no"
+
+
+async def test_stage_rule_below_min_format_examples_is_a_named_error(backend, skills, session, state):
+    tight = AtworksAgentConfig(model="m", min_format_examples=2)
+    ex = _exec(backend.__class__(tight), tight, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {
+        "api_id": "api-1", "param": "contractNo", "kind": "format", "pattern": "^C-\\d{4}$",
+        "pass_examples": ["C-1234"], "fail_examples": ["C-12"], "summary": "s",
+    })
+    assert out.is_error
+    assert "unavailable" not in out.result_text
+    assert "rule-0001" not in state.seen_rules
+
+
 async def test_preview_rule_once_per_turn_then_a_different_rule_still_renders(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})

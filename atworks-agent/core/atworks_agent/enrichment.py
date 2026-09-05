@@ -194,10 +194,17 @@ async def enrich_rule_preview(payload: PresentRulePreviewPayload, context: Enric
     enriched["review_required"] = rule.review_required
     enriched["low_confidence"] = sorted(k for k, v in rule.confidence.items() if v < LOW_CONFIDENCE)
     if rule.kind == "format":
+        hint: dict[str, Any] | None = None
         if rule.format:
-            enriched["format_hint"] = {"label": rule.format, "example": FORMAT_EXAMPLES.get(rule.format), "pattern": NAMED_FORMATS.get(rule.format)}
+            hint = {"label": rule.format, "example": FORMAT_EXAMPLES.get(rule.format), "pattern": NAMED_FORMATS.get(rule.format)}
         elif rule.pattern:
-            enriched["format_hint"] = {"label": "정규식", "example": None, "pattern": rule.pattern}
+            hint = {"label": "정규식", "example": None, "pattern": rule.pattern}
+        if hint is not None:
+            if rule.pass_examples:
+                hint["pass_examples"] = list(rule.pass_examples)
+            if rule.fail_examples:
+                hint["fail_examples"] = list(rule.fail_examples)
+            enriched["format_hint"] = hint
     api = context.state.seen_apis.get(rule.api_id)
     if api is not None:
         enriched["api"] = _record(api)

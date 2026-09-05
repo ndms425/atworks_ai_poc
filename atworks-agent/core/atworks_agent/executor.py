@@ -185,6 +185,11 @@ class AtworksToolExecutor(BaseToolExecutor):
                 return ToolOutcome.error(f"{error.field} must be an api_id that search_apis or get_api returned this session; call search_apis first.")
             if error.kind == "selection":
                 return ToolOutcome.error("select_where matched no API; widen failed_since, pick another related_to, or name api_ids.")
+            if error.kind == "format_examples":
+                return ToolOutcome.error(
+                    f"a raw pattern format rule needs at least {self._config.min_format_examples} pass "
+                    f"example(s) and {self._config.min_format_examples} fail example(s); add more and call again."
+                )
             if error.kind == "object":
                 if error.field == "test_data.values":
                     return ToolOutcome.error(
@@ -498,17 +503,33 @@ class AtworksToolExecutor(BaseToolExecutor):
         if held := check_rule_param_provenance(self._state, api_id, param):
             return held
         values = [self._sanitize(v, 120) for v in (_coerce_list(tool_input.get("values")) or [])]
+        pass_examples = [self._sanitize(v, 120) for v in (_coerce_list(tool_input.get("pass_examples")) or [])]
+        fail_examples = [self._sanitize(v, 120) for v in (_coerce_list(tool_input.get("fail_examples")) or [])]
         confidence_input = tool_input.get("confidence")
         if confidence_input is not None and not isinstance(confidence_input, dict):
             raise InvalidToolArgument("confidence", kind="object")
         raw_value = tool_input.get("value")
         raw_pattern = tool_input.get("pattern")
+        raw_format = tool_input.get("format") or None
+        raw_save_format_as = tool_input.get("save_format_as")
+        # RuleDraft's own validator only guarantees >=1 pass/fail example for a raw-pattern
+        # format rule; this deployment's floor (config.min_format_examples) can be higher, so
+        # it is enforced here as a named error before the draft is even built.
+        if (
+            tool_input.get("kind") == "format" and raw_format is None and raw_pattern is not None
+            and (len(pass_examples) < self._config.min_format_examples
+                 or len(fail_examples) < self._config.min_format_examples)
+        ):
+            raise InvalidToolArgument("pass_examples", kind="format_examples")
         draft = parse_argument(RuleDraft, {
             "api_id": api_id, "param": param, "kind": tool_input.get("kind"), "op": tool_input.get("op"),
             "value": self._sanitize(raw_value, 120) if raw_value is not None else None,
             "values": values,
-            "format": tool_input.get("format") or None,
+            "format": raw_format,
             "pattern": self._sanitize(raw_pattern, 200) if raw_pattern is not None else None,
+            "pass_examples": pass_examples,
+            "fail_examples": fail_examples,
+            "save_format_as": self._sanitize(raw_save_format_as, 60) if raw_save_format_as is not None else None,
             "summary": self._sanitize(tool_input.get("summary"), 200),
             "confidence": {
                 k: float(v) for k, v in (confidence_input or {}).items() if isinstance(v, (int, float))
