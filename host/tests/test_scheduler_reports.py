@@ -223,6 +223,21 @@ class RecordingBackend(AtworksBackend):
     async def simulate_rule(self, session, draft):
         raise NotImplementedError
 
+    async def stage_profile(self, session, draft, actor_kind):
+        raise NotImplementedError
+
+    async def get_pending_profiles(self, session):
+        raise NotImplementedError
+
+    async def apply_profile(self, session, profile_id):
+        raise NotImplementedError
+
+    async def discard_profile(self, session, profile_id, actor_kind):
+        raise NotImplementedError
+
+    async def list_profiles(self, session, job_id=None):
+        raise NotImplementedError
+
     async def find_apis_with_param(self, session, param):
         raise NotImplementedError
 

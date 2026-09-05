@@ -12,6 +12,7 @@ from atworks_agent import (
     ApiSpec,
     AtworksAgentConfig,
     AtworksBackend,
+    ComparisonProfile,
     FormatBatch,
     FormatBatchDraft,
     FormatBatchLedger,
@@ -20,6 +21,8 @@ from atworks_agent import (
     JobDraft,
     JobLedger,
     JobSpec,
+    ProfileDraft,
+    ProfileLedger,
     RuleDraft,
     RuleImpact,
     RuleLedger,
@@ -34,6 +37,8 @@ from atworks_agent import (
     resolve_select_where,
 )
 from atworks_agent.types import Binding
+
+from .reports import Reports
 
 
 def stub_verdict(api: ApiSpec, env: str, data: TestDataSet | None) -> tuple[RunStatus, list[str], int]:
@@ -84,6 +89,8 @@ class MockAtworks(AtworksBackend):
         }
         self.ledger = JobLedger(config, self.apis)
         self.rule_ledger = RuleLedger(config, self.apis)
+        self.profile_ledger = ProfileLedger(config)
+        self.reports: Reports | None = None
         self.format_library = FormatLibrary(max_size=config.max_format_library)
         self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
         self.runs: dict[str, RunResult] = {
@@ -210,6 +217,30 @@ class MockAtworks(AtworksBackend):
                 would_fail += 1
         return RuleImpact(window_runs=window_runs, known_inputs=known_inputs, would_fail=would_fail,
                           excluded_unknown=window_runs - known_inputs)
+
+    async def stage_profile(self, session, draft: ProfileDraft, actor_kind: ActorKind) -> ComparisonProfile:
+        return self.profile_ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_pending_profiles(self, session):
+        return self.profile_ledger.pending()
+
+    async def apply_profile(self, session, profile_id):
+        """프로파일을 발효시킨다: effective_from을 찍은 뒤(과거 비교는 절대 다시 판정하지 않는다), 리포트
+        저장소가 붙어 있고(self.reports) 대상 job에 이미 리포트가 존재하면 그 parity 블록을 저장된
+        응답 바디로부터 이 프로파일의 ignore path로 재-diff한다 — 새 run은 하나도 만들지 않는다(self.runs
+        는 건드리지 않는다). 아직 리포트가 없는 job이면 재-diff는 조용히 건너뛴다: 프로파일 발효 자체는
+        실패시키지 않는다."""
+        applied = self.profile_ledger.apply(profile_id, actor=session.operator)
+        if self.reports is not None and self.reports.read_html(applied.job_id) is not None:
+            paths = [*applied.ignore_paths, *(p for paths in applied.per_api_ignore.values() for p in paths)]
+            self.reports.rediff(applied.job_id, paths)
+        return applied
+
+    async def discard_profile(self, session, profile_id, actor_kind):
+        return self.profile_ledger.discard(profile_id, actor=session.operator, actor_kind=actor_kind)
+
+    async def list_profiles(self, session, job_id=None):
+        return self.profile_ledger.list(job_id=job_id)
 
     async def find_apis_with_param(self, session, param: str) -> list[ApiSpec]:
         applied_format_apis = {

@@ -8,6 +8,7 @@ from commerce_common.skills import Skill, SkillRegistry
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.jobs import JobDraft, JobLedger
+from atworks_agent.profiles import ProfileLedger
 from atworks_agent.rules import FormatBatchLedger, FormatLibrary, RuleImpact, RuleLedger
 from atworks_agent.types import (
     ActorKind,
@@ -30,6 +31,7 @@ class InMemoryBackend(AtworksBackend):
         }
         self.ledger = JobLedger(config, self.apis)
         self.rule_ledger = RuleLedger(config, self.apis)
+        self.profile_ledger = ProfileLedger(config)
         self.format_library = FormatLibrary(max_size=config.max_format_library)
         self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
         self.runs = [
@@ -106,6 +108,21 @@ class InMemoryBackend(AtworksBackend):
 
     async def simulate_rule(self, session, draft):
         return RuleImpact()
+
+    async def stage_profile(self, session, draft, actor_kind):
+        return self.profile_ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_pending_profiles(self, session):
+        return self.profile_ledger.pending()
+
+    async def apply_profile(self, session, profile_id):
+        return self.profile_ledger.apply(profile_id, actor=session.operator)
+
+    async def discard_profile(self, session, profile_id, actor_kind):
+        return self.profile_ledger.discard(profile_id, actor=session.operator, actor_kind=actor_kind)
+
+    async def list_profiles(self, session, job_id=None):
+        return self.profile_ledger.list(job_id=job_id)
 
     async def find_apis_with_param(self, session, param):
         applied_format_apis = {r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param}

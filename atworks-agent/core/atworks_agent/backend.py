@@ -8,11 +8,13 @@ from datetime import datetime
 from typing import Any
 
 from .jobs import JobDraft
+from .profiles import ProfileDraft
 from .rules import FormatBatchDraft, FormatDefinition, RuleDraft, RuleImpact, ValidationRule
 from .types import (
     ActorKind,
     ApiSpec,
     AtworksSessionContext,
+    ComparisonProfile,
     FormatBatch,
     JobSpec,
     RuleRecommendation,
@@ -136,6 +138,34 @@ class AtworksBackend(ABC):
         최근 실행 중 draft.param에 대한 입력값을 복원할 수 있는 것만 세어(``known_inputs``) 그 중
         드래프트가 실패시켰을 것을 ``would_fail``로 센다; 복원 불가능한 나머지는
         ``excluded_unknown``이다."""
+
+    # -- 값 비교 프로파일 (propose → approve → apply; effective_from 이후에도 과거 판정은 안 건드림) --
+    @abstractmethod
+    async def stage_profile(
+        self, session: AtworksSessionContext, draft: ProfileDraft, actor_kind: ActorKind
+    ) -> ComparisonProfile: ...
+
+    @abstractmethod
+    async def get_pending_profiles(self, session: AtworksSessionContext) -> list[ComparisonProfile]: ...
+
+    @abstractmethod
+    async def apply_profile(self, session: AtworksSessionContext, profile_id: str) -> ComparisonProfile:
+        """승인된 프로파일을 발효시킨다. 구현 의무 둘: (1) 이 호출 시점의 timestamp를
+        ``effective_from``에 찍는다 — 과거 비교 결과는 절대 다시 판정하거나 고치지 않는다(불변식은
+        여기서 시작한다). (2) 대상 job의 저장된 응답 바디로부터 parity 리포트를 이 프로파일의
+        ignore path로 **재-diff**한다 — 새 run은 하나도 만들지 않는다. REST 구현은 자기 쪽 리포트
+        저장소를 동등하게 갱신해야 한다."""
+
+    @abstractmethod
+    async def discard_profile(
+        self, session: AtworksSessionContext, profile_id: str, actor_kind: ActorKind
+    ) -> ComparisonProfile: ...
+
+    @abstractmethod
+    async def list_profiles(
+        self, session: AtworksSessionContext, job_id: str | None = None
+    ) -> list[ComparisonProfile]:
+        """job_id가 주어지면 그 job의 프로파일만, 아니면 전체(상태 무관)."""
 
     # -- 포맷 라이브러리 (내장 5개 + 저장된 항목; format_library.add와 동일한 dedup 규약) ----
     @abstractmethod

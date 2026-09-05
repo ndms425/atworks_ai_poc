@@ -64,6 +64,7 @@ class ChatRequest(BaseModel):
 
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
                briefings: Briefings, on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
+    backend.reports = reports  # lets Mock's apply_profile re-diff the target job's stored report
     app = build_app("atworks-ai host", on_startup=on_startup)
     sessions: SessionStore[AtworksSessionState] = SessionStore(AtworksSessionState)
     CurrentSession = session_dependency(sessions, "/api/atworks/session")
