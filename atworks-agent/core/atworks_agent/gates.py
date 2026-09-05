@@ -32,6 +32,15 @@ STAGED_AND_SHOWN_NOTE = (
     "turn. Apply it only after the operator approves this job."
 )
 
+STAGED_RULE_NOTE = (
+    "Staged only — show it with present_rule_preview and apply it only after the operator "
+    "approves this rule."
+)
+STAGED_AND_SHOWN_RULE_NOTE = (
+    "Staged, and shown to the operator on its preview card; do not present it again this "
+    "turn. Apply it only after the operator approves this rule."
+)
+
 STAGING_FOLLOWTHROUGH_REMINDER = (
     "Host check: the operator's last message asked to run or schedule APIs, but no stage_job "
     "call was made this turn. If the selection and target are grounded in data already gathered "

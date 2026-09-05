@@ -4,6 +4,7 @@ from commerce_common.presentation import EnrichmentContext, run_presentation
 
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.enrichment import PRESENTATION_COMPONENTS
+from atworks_agent.rules import RuleImpact, ValidationRule
 from atworks_agent.types import (
     ApiSpec,
     AtworksSessionContext,
@@ -195,6 +196,45 @@ async def test_job_preview_matrix_ceiling_for_frozen_binding_equals_the_staged_f
     matrix = outcome.events[0].data["payload"]["matrix"]
     assert matrix["max_runs_per_execution"] == matrix["runs_per_execution"]
     assert matrix["max_runs_total"] == matrix["runs_total"]
+
+
+def _rule(**overrides):
+    fields = {
+        "rule_id": "rule-0001", "api_id": "api-1", "param": "amount", "kind": "compare",
+        "op": ">=", "value": "0", "message": "amount >= 0",
+        "confidence": {"value": 0.3}, "assumptions": ["value defaulted to 0"],
+        "created_at": datetime.now(UTC), "created_by": "op",
+    }
+    fields.update(overrides)
+    return ValidationRule(**fields)
+
+
+async def test_rule_preview_joins_staged_record_and_impact():
+    state = AtworksSessionState()
+    state.remember_api(ApiSpec(api_id="api-1", method="POST", path="/v1/refunds", name="환불", updated_at=datetime.now(UTC)))
+    state.remember_rule(_rule())
+    state.rule_impacts["rule-0001"] = RuleImpact(window_runs=10, known_inputs=8, would_fail=2, excluded_unknown=2)
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001", "headline": "h"}, _ctx(state), "Shown.")
+    payload = outcome.events[0].data["payload"]
+    assert payload["rule"]["rule_id"] == "rule-0001" and payload["rule"]["op"] == ">="
+    assert payload["change_id"] == "rule-0001"
+    assert payload["review_required"] is False
+    assert payload["low_confidence"] == ["value"]
+    assert payload["api"]["api_id"] == "api-1"
+    assert payload["impact"] == {"window_runs": 10, "known_inputs": 8, "would_fail": 2, "excluded_unknown": 2}
+
+
+async def test_rule_preview_omits_api_and_impact_when_unknown():
+    state = AtworksSessionState()
+    state.remember_rule(_rule())
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "rule-0001"}, _ctx(state), "Shown.")
+    payload = outcome.events[0].data["payload"]
+    assert "api" not in payload and "impact" not in payload
+
+
+async def test_rule_preview_refuses_unknown_rule():
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_rule_preview"], {"rule_id": "nope"}, _ctx(AtworksSessionState()), "Shown.")
+    assert outcome.blocked == "provenance"
 
 
 def _state_with_groups():

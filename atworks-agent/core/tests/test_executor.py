@@ -445,11 +445,34 @@ async def test_stage_rule_holds_unknown_api_then_stages(backend, config, skills,
     out = await ex.execute("stage_rule", draft)
     assert not out.refused
     kinds = [(e.type, e.data.get("component")) for e in out.events]
-    assert kinds == [("change_update", None)]   # Task 5 adds the rule_preview card
+    assert kinds == [("change_update", None), ("ui", "rule_preview")]
     rule_id = next(iter(state.seen_rules))
     assert rule_id == "rule-0001"
-    assert "Staged" in out.result_text
+    assert "Staged, and shown" in out.result_text
     assert state.rule_impacts[rule_id] is not None
+    assert out.events[1].data["payload"]["rule"]["rule_id"] == "rule-0001"
+    assert out.events[1].data["payload"]["api"]["api_id"] == "api-1"
+    assert "impact" in out.events[1].data["payload"]
+
+
+async def test_preview_rule_once_per_turn_then_a_different_rule_still_renders(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    staged = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                             "op": ">=", "value": "0", "summary": "first"})
+    assert not staged.refused
+    kinds = [(e.type, e.data.get("component")) for e in staged.events]
+    assert kinds == [("change_update", None), ("ui", "rule_preview")]
+
+    repeat = await ex.execute("present_rule_preview", {"rule_id": "rule-0001"})
+    assert not repeat.refused
+    assert repeat.events == []
+    assert repeat.result_text == ex.displayed_text
+
+    other = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "required", "summary": "second"})
+    assert not other.refused
+    other_kinds = [(e.type, e.data.get("component")) for e in other.events]
+    assert other_kinds == [("change_update", None), ("ui", "rule_preview")]
 
 
 async def test_stage_rule_holds_unknown_param(backend, config, skills, session, state):

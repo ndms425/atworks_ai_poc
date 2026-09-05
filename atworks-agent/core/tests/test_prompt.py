@@ -49,3 +49,25 @@ def test_static_prompt_states_the_matrix_contract():
 def test_static_prompt_forbids_computing_group_figures():
     text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
     assert "aggregate_runs" in text and text.index("aggregate_runs") < text.index("# How you work")
+
+
+def test_static_prompt_carries_the_rule_hard_line_before_how_you_work():
+    text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
+    hard_line = ("You draft validation rules as structured objects; you never judge a run against a rule "
+                 "and you never change a past result. A rule applies only after a person approves it on "
+                 "the Rules page, and only to runs executed after that.")
+    assert hard_line in text
+    assert text.index(hard_line) < text.index("# How you work")
+
+
+def test_static_prompt_states_the_rule_contract():
+    text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
+    assert "stage_rule" in text and "apply_rule" in text
+    assert "param must come from get_api" in text
+    assert "prefer a named format over a raw pattern" in text
+
+
+def test_static_prompt_drops_rule_rules_when_switched_off():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_rules=False), SKILLS)
+    assert "stage_rule" not in text and "apply_rule" not in text
+    assert "You draft validation rules as structured objects" not in text

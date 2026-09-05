@@ -10,7 +10,7 @@ from commerce_common.presentation import PresentationExtension
 
 from ..config import AtworksAgentConfig
 from ..question_form import QUESTION_FORM_INPUT_SCHEMA
-from .presentation import DIGEST_TOOL, GROUPS_TOOL, PREVIEW_TOOL, QUESTION_TOOL
+from .presentation import DIGEST_TOOL, GROUPS_TOOL, PREVIEW_TOOL, QUESTION_TOOL, RULE_PREVIEW_TOOL
 
 _STATUS_READER = "the operator"
 _SESSION_API_ID = "api_id that search_apis or get_api returned this session."
@@ -19,6 +19,10 @@ _ISO_DATETIME = "ISO 8601 datetime with offset, e.g. 2026-08-27T00:00:00+09:00."
 
 def _job_id() -> dict[str, Any]:
     return {"type": "string", "description": "job_id staged this conversation or listed by get_pending_jobs."}
+
+
+def _rule_id() -> dict[str, Any]:
+    return {"type": "string", "description": "rule_id staged this conversation or listed by get_pending_rules."}
 
 
 def build_tools(
@@ -167,6 +171,51 @@ def build_tools(
             "description": "Discard a staged job the operator rejected or replaced.",
             "input_schema": {"type": "object", "properties": {"job_id": _job_id()}, "required": ["job_id"], "additionalProperties": False},
         },
+        # -- 검증 규칙 --------------------------------------------------------------------
+        {
+            "name": "stage_rule",
+            "description": ("Stage a validation rule (a structured draft) for one API parameter — it judges "
+                            "nothing. param must be one get_api listed for this api_id. Prefer a named `format` "
+                            "(email, date, iso8601, uuid, number) over a raw `pattern`; a raw pattern is flagged "
+                            "for review. The rule applies only after the operator approves it on the Rules page, "
+                            "and only to runs executed after that — it never re-judges a past run. / 검증 규칙 "
+                            "초안을 스테이징한다. 판정하지 않는다. param은 get_api가 돌려준 것이어야 하고, Rules "
+                            "페이지 승인 후 이후 실행에만 적용된다."),
+            "input_schema": {"type": "object", "properties": {
+                "api_id": {"type": "string", "description": _SESSION_API_ID},
+                "param": {"type": "string", "maxLength": 80, "description": "A parameter get_api listed for this api_id."},
+                "kind": {"type": "string", "enum": list(config.allowed_rule_kinds)},
+                "op": {"type": "string", "enum": list(config.allowed_compare_ops) + ["in", "not_in"],
+                       "description": "compare rule: one of the comparison operators. membership rule: in | not_in."},
+                "value": {"type": "string", "maxLength": 120, "description": "compare rule's bound."},
+                "values": {"type": "array", "maxItems": config.max_membership_values,
+                          "items": {"type": "string", "maxLength": 120}, "description": "membership rule's list."},
+                "format": {"type": "string", "enum": list(config.allowed_named_formats), "description": "format rule: a named format, preferred over pattern."},
+                "pattern": {"type": "string", "maxLength": 200, "description": "format rule: a raw regex, used only when no named format fits. Flagged for review."},
+                "summary": {"type": "string", "maxLength": 200, "description": "One line the preview card shows."},
+                "confidence": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1},
+                              "description": "Per-slot confidence, e.g. for value, values, format."},
+                "assumptions": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 160}}},
+                "required": ["api_id", "param", "kind", "summary"], "additionalProperties": False},
+        },
+        {
+            "name": "apply_rule",
+            "description": ("Apply a rule the operator approved on the Rules page. It is the only tool that "
+                            "makes a rule effective; a rule not marked approved by the host is held. Effective "
+                            "only for runs executed after this moment — past runs are never re-evaluated. / "
+                            "Rules 페이지에서 승인된 규칙만 effective해진다. 과거 실행은 재평가하지 않는다."),
+            "input_schema": {"type": "object", "properties": {"rule_id": _rule_id()}, "required": ["rule_id"], "additionalProperties": False},
+        },
+        {
+            "name": "discard_rule",
+            "description": "Discard a staged rule the operator rejected or replaced.",
+            "input_schema": {"type": "object", "properties": {"rule_id": _rule_id()}, "required": ["rule_id"], "additionalProperties": False},
+        },
+        {
+            "name": "get_pending_rules",
+            "description": "Rules staged and waiting for approval. / 승인 대기 중인 검증 규칙.",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
     ]
 
     presentation: list[dict[str, Any]] = [
@@ -208,6 +257,18 @@ def build_tools(
                 "headline": {"type": "string", "maxLength": 120},
                 "note": {"type": "string", "maxLength": 200}},
                 "required": ["job_id"], "additionalProperties": False},
+        },
+        {
+            "name": RULE_PREVIEW_TOOL,
+            "description": ("Show the approval card for a rule staged or listed earlier; the card fills in the "
+                            "parameter, the condition, low-confidence slots, and the impact on recent runs. A "
+                            "stage call shows this card itself; do not call it for a rule staged this turn." if config.stage_shows_preview else
+                            "Show the approval card for one staged rule. Show every staged rule with it before anything is applied."),
+            "input_schema": {"type": "object", "properties": {
+                "rule_id": _rule_id(),
+                "headline": {"type": "string", "maxLength": 120},
+                "note": {"type": "string", "maxLength": 200}},
+                "required": ["rule_id"], "additionalProperties": False},
         },
         {
             "name": QUESTION_TOOL,

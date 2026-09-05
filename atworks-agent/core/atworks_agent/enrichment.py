@@ -15,16 +15,19 @@ from commerce_common.presentation import (
     PresentationRefused,
     PresentSuggestionsPayload,
 )
+from pydantic import BaseModel
 
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
-from .serialization import job_record
+from .serialization import job_record, rule_record
 from .tools.presentation import (
     DIGEST_TOOL,
     GROUPS_TOOL,
     PREVIEW_TOOL,
     QUESTION_TOOL,
+    RULE_PREVIEW_TOOL,
     PresentJobPreviewPayload,
+    PresentRulePreviewPayload,
     PresentRunDigestPayload,
     PresentRunGroupsPayload,
 )
@@ -176,6 +179,28 @@ async def enrich_job_preview(payload: PresentJobPreviewPayload, context: Enrichm
     return enriched
 
 
+async def enrich_rule_preview(payload: PresentRulePreviewPayload, context: EnrichmentContext) -> dict[str, Any]:
+    rule = context.state.seen_rules.get(payload.rule_id)
+    if rule is None:
+        raise PresentationRefused(
+            "That rule_id was not staged or listed in this session. Stage the rule (or call "
+            "get_pending_rules) first and use its id.",
+            gate=PROVENANCE_GATE,
+        )
+    enriched = payload.model_dump(exclude_none=True)
+    enriched["rule"] = rule_record(rule)
+    enriched["change_id"] = rule.rule_id   # web-shared의 change_update 훅과 호환 (Task 15)
+    enriched["review_required"] = rule.review_required
+    enriched["low_confidence"] = sorted(k for k, v in rule.confidence.items() if v < LOW_CONFIDENCE)
+    api = context.state.seen_apis.get(rule.api_id)
+    if api is not None:
+        enriched["api"] = _record(api)
+    impact = context.state.rule_impacts.get(payload.rule_id)
+    if impact is not None:
+        enriched["impact"] = impact.model_dump(mode="json") if isinstance(impact, BaseModel) else dict(impact)
+    return enriched
+
+
 async def enrich_question_form(payload: QuestionFormPayload, context: EnrichmentContext) -> dict[str, Any]:
     del context
     enriched = payload.model_dump(exclude_none=True)
@@ -191,6 +216,7 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
         PresentationComponent(name=DIGEST_TOOL, component="run_digest", payload_model=PresentRunDigestPayload, enrich=enrich_run_digest),
         PresentationComponent(name=GROUPS_TOOL, component="run_groups", payload_model=PresentRunGroupsPayload, enrich=enrich_run_groups),
         PresentationComponent(name=PREVIEW_TOOL, component="job_preview", payload_model=PresentJobPreviewPayload, enrich=enrich_job_preview),
+        PresentationComponent(name=RULE_PREVIEW_TOOL, component="rule_preview", payload_model=PresentRulePreviewPayload, enrich=enrich_rule_preview),
         PresentationComponent(name=QUESTION_TOOL, component="question_form", payload_model=QuestionFormPayload, enrich=enrich_question_form),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),
     )

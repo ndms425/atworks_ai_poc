@@ -18,6 +18,7 @@ TURNS = [
         {"job_preview", "question_form"},
     ),
     ("이번 주 실패 원인별로 묶어줘", {"run_groups"}),
+    ("환불 금액 refundAmount는 0 이상이어야 한다는 규칙 만들어줘", {"rule_preview"}),
 ]
 
 

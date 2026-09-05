@@ -24,7 +24,9 @@ from .gates import (
     PROVENANCE_GATE,
     QUESTION_FORM_GATE,
     STAGED_AND_SHOWN_NOTE,
+    STAGED_AND_SHOWN_RULE_NOTE,
     STAGED_NOTE,
+    STAGED_RULE_NOTE,
     applied_confirmation,
     apply_guardrail_message,
     check_api_provenance,
@@ -50,7 +52,7 @@ from .rules import RuleDraft, RuleGuardrailViolation, ValidationRule, check_rule
 from .scoring import UnknownScorer, rank_runs
 from .selection import resolve_select_where
 from .serialization import api_record, job_record, rank_record, rule_record, run_record
-from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL
+from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL, RULE_PREVIEW_TOOL
 from .types import (
     ActorKind,
     AtworksSessionContext,
@@ -159,6 +161,7 @@ class AtworksToolExecutor(BaseToolExecutor):
         # instance state never survives past the turn it was built for.
         self._asked_form = False
         self._previewed_jobs: set[str] = set()
+        self._previewed_rules: set[str] = set()
 
     @property
     def memory_subject(self) -> str:
@@ -195,10 +198,12 @@ class AtworksToolExecutor(BaseToolExecutor):
         return None
 
     async def _present(self, spec: PresentationComponent, tool_input: dict[str, Any]) -> ToolOutcome:
-        # A job already shown this turn is not re-rendered: the card is already on
-        # screen, and the round stays "clean" (no note appended) so the turn can still
+        # A job (or rule) already shown this turn is not re-rendered: the card is already
+        # on screen, and the round stays "clean" (no note appended) so the turn can still
         # close on it.
         if spec.name == PREVIEW_TOOL and str(tool_input.get("job_id", "")) in self._previewed_jobs:
+            return ToolOutcome(self.displayed_text)
+        if spec.name == RULE_PREVIEW_TOOL and str(tool_input.get("rule_id", "")) in self._previewed_rules:
             return ToolOutcome(self.displayed_text)
         outcome = await super()._present(spec, tool_input)
         if not outcome.refused:
@@ -206,6 +211,8 @@ class AtworksToolExecutor(BaseToolExecutor):
                 self._asked_form = True
             if spec.name == PREVIEW_TOOL:
                 self._previewed_jobs.add(str(tool_input.get("job_id", "")))
+            if spec.name == RULE_PREVIEW_TOOL:
+                self._previewed_rules.add(str(tool_input.get("rule_id", "")))
         return outcome
 
     async def dispatch(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
@@ -476,10 +483,14 @@ class AtworksToolExecutor(BaseToolExecutor):
     async def _remember_and_preview_rule(self, rule: ValidationRule) -> ToolOutcome:
         self._state.remember_rule(rule)
         events = [AgentEvent.change_update(rule_record(rule))]
-        # Task 5 adds the rule_preview card (RULE_PREVIEW_TOOL / present_rule_preview do not
-        # exist yet): only the change_update fires here, so the note always reads as staged
-        # only, never "shown on its preview card".
-        return self._fenced({"staged": rule_record(rule), "note": STAGED_NOTE}, events)
+        note = STAGED_RULE_NOTE
+        if self._config.stage_shows_preview:
+            preview = await self._present(self.components[RULE_PREVIEW_TOOL], {"rule_id": rule.rule_id})
+            if not preview.refused:
+                events += preview.events
+                note = STAGED_AND_SHOWN_RULE_NOTE
+                self._previewed_rules.add(rule.rule_id)
+        return self._fenced({"staged": rule_record(rule), "note": note}, events)
 
     async def _stage_rule(self, tool_input: dict[str, Any]) -> ToolOutcome:
         api_id = str(tool_input.get("api_id", ""))

@@ -5,7 +5,9 @@ from atworks_agent.tools.registry import build_tools
 
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
-            "present_run_digest", "present_run_groups", "present_job_preview", "present_question_form", "present_suggestions"]
+            "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
+            "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
+            "present_question_form", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():
@@ -18,6 +20,11 @@ def test_fixed_order_and_status_field():
 def test_jobs_switch_removes_tools():
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_jobs=False), [])]
     assert not {"stage_job", "apply_job", "discard_job", "get_pending_jobs", "present_job_preview"} & set(names)
+
+
+def test_rules_switch_removes_tools():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_rules=False), [])]
+    assert not {"stage_rule", "apply_rule", "discard_rule", "get_pending_rules", "present_rule_preview"} & set(names)
 
 
 def test_same_config_same_bytes():
@@ -51,6 +58,26 @@ def test_stage_job_test_data_items_are_bounded_and_closed():
     assert item["required"] == ["label", "values"]
     assert item["properties"]["label"]["maxLength"] == 40
     assert item["properties"]["values"]["additionalProperties"] == {"type": "string", "maxLength": 200}
+
+
+def test_stage_rule_schema_has_enums_from_config_and_is_closed():
+    cfg = AtworksAgentConfig(model="m")
+    stage = next(t for t in build_tools(cfg, []) if t["name"] == "stage_rule")
+    props = stage["input_schema"]["properties"]
+    assert {"api_id", "param", "kind", "op", "value", "values", "format", "pattern",
+            "summary", "confidence", "assumptions"} <= set(props)
+    assert props["kind"]["enum"] == list(cfg.allowed_rule_kinds)
+    assert props["op"]["enum"] == list(cfg.allowed_compare_ops) + ["in", "not_in"]
+    assert props["format"]["enum"] == list(cfg.allowed_named_formats)
+    assert props["values"]["maxItems"] == cfg.max_membership_values
+    assert stage["input_schema"]["additionalProperties"] is False
+    assert stage["input_schema"]["required"] == ["api_id", "param", "kind", "summary"]
+
+
+def test_stage_rule_membership_cap_comes_from_config():
+    cfg = AtworksAgentConfig(model="m", max_membership_values=3)
+    props = next(t for t in build_tools(cfg, []) if t["name"] == "stage_rule")["input_schema"]["properties"]
+    assert props["values"]["maxItems"] == 3
 
 
 def test_list_runs_filters_are_nested():
