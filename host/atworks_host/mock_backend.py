@@ -353,5 +353,5 @@ class MockAtworks(AtworksBackend):
     async def get_context(self, session):
         fails = len(self._filter_runs(None, "fail", None))
         errors = len(self._filter_runs(None, "error", None))
-        return {"project": session.project_id, "allowed_targets": ["dev", "stg"],
+        return {"project": session.project_id, "allowed_targets": list(self._config.allowed_target_envs),
                 "recent_counts": {"fail": fails, "error": errors, "pending_jobs": len(self.ledger.pending())}}

@@ -234,3 +234,20 @@ async def test_list_and_pending_profiles(tmp_path):
     discarded = await backend.discard_profile(SESSION, staged.profile_id, ActorKind.OPERATOR)
     assert discarded.status is ProfileStatus.DISCARDED
     assert await backend.get_pending_profiles(SESSION) == []
+
+
+async def test_get_context_surfaces_the_configured_named_targets():
+    """Regression (live-smoke find): get_context must reflect config.allowed_target_envs so the
+    model learns legacy/renewed are allowed targets — a hardcoded ["dev","stg"] made the model
+    refuse to stage a parity job on the named targets."""
+    from pathlib import Path
+
+    from atworks_agent import AtworksAgentConfig, AtworksSessionContext
+    from atworks_host.mock_backend import MockAtworks
+
+    cfg = AtworksAgentConfig(model="m")
+    backend = MockAtworks(cfg, Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures")
+    session = AtworksSessionContext(session_id="s", project_id="mes", operator="op")
+    ctx = await backend.get_context(session)
+    assert ctx["allowed_targets"] == list(cfg.allowed_target_envs)
+    assert "legacy" in ctx["allowed_targets"] and "renewed" in ctx["allowed_targets"]
