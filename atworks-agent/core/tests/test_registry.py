@@ -10,7 +10,8 @@ EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "ran
             "stage_format_batch", "apply_format_batch", "discard_format_batch", "get_pending_format_batches",
             "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles", "recommend_ignore_paths",
             "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
-            "present_format_batch", "present_question_form", "present_suggestions"]
+            "present_format_batch", "present_parity_summary", "present_profile_preview",
+            "present_question_form", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():
@@ -39,6 +40,18 @@ def test_rules_switch_removes_format_batch_tools_too():
 def test_rules_switch_removes_recommendation_tools_too():
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_rules=False), [])]
     assert not {"find_apis_with_param", "recommend_rules_for_api"} & set(names)
+
+
+def test_parity_tools_present_when_enabled():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_parity=True), [])]
+    assert {"stage_profile", "apply_profile", "discard_profile", "get_pending_profiles",
+            "recommend_ignore_paths", "present_parity_summary", "present_profile_preview"} <= set(names)
+
+
+def test_parity_switch_removes_all_seven_parity_tools():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_parity=False), [])]
+    assert not {"stage_profile", "apply_profile", "discard_profile", "get_pending_profiles",
+                "recommend_ignore_paths", "present_parity_summary", "present_profile_preview"} & set(names)
 
 
 def test_same_config_same_bytes():

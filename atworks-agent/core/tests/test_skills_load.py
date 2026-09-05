@@ -5,11 +5,21 @@ from commerce_common.skills import SkillRegistry
 SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
-def test_five_skills_load_with_index():
+def test_six_skills_load_with_index():
     reg = SkillRegistry.from_dir(SKILLS_DIR)
-    assert reg.names == ["api-lookup", "failed-triage", "job-approval", "rule-authoring", "schedule-run"]
+    assert reg.names == ["api-lookup", "failed-triage", "job-approval", "parity-compare", "rule-authoring", "schedule-run"]
     assert "population" in reg.get_instructions("failed-triage")
     assert "present_question_form" in reg.get_instructions("schedule-run")
+
+
+def test_parity_compare_skill_loads_and_appears_in_index():
+    reg = SkillRegistry.from_dir(SKILLS_DIR)
+    assert "parity-compare" in reg.names
+    assert "parity-compare" in reg.index_block()
+    body = reg.get_instructions("parity-compare")
+    assert "stage_job" in body and "stage_profile" in body and "present_profile_preview" in body
+    assert "recommend_ignore_paths" in body and "present_parity_summary" in body
+    assert "apply_profile" in body and "re-diff" in body
 
 
 def test_rule_authoring_skill_covers_classification_and_staging():

@@ -48,7 +48,7 @@ def test_turn_ok_returns_bool():
 def test_turns_include_the_comparison_utterance():
     """The fourth utterance is the one that could not be staged as one job before this
     change; it must reach either a job preview or the slot-filling form."""
-    assert len(smoke_chat.TURNS) == 7
+    assert len(smoke_chat.TURNS) == 8
     text, want = smoke_chat.TURNS[3]
     assert "개발서버와 이관서버" in text and "비교" in text
     assert want == {"job_preview", "question_form"}
@@ -59,3 +59,11 @@ def test_turns_include_the_bulk_format_utterance():
     text, want = smoke_chat.TURNS[6]
     assert "한번에" in text and "포맷" in text
     assert want == {"format_batch"}
+
+
+def test_turns_include_the_parity_utterance():
+    """The eighth utterance compares two named targets (legacy/renewed) and must reach a job
+    preview (the stage), the slot-filling form, or the parity summary card."""
+    text, want = smoke_chat.TURNS[7]
+    assert "legacy" in text and "renewed" in text and "비교" in text
+    assert want == {"job_preview", "question_form", "parity_summary"}

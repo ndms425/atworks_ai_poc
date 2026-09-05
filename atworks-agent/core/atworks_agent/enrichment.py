@@ -20,16 +20,20 @@ from pydantic import BaseModel
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
 from .rules import FORMAT_EXAMPLES, NAMED_FORMATS
-from .serialization import format_batch_record, job_record, rule_record
+from .serialization import format_batch_record, job_record, profile_record, rule_record
 from .tools.presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
+    PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
+    PROFILE_PREVIEW_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
     PresentFormatBatchPayload,
     PresentJobPreviewPayload,
+    PresentParitySummaryPayload,
+    PresentProfilePreviewPayload,
     PresentRulePreviewPayload,
     PresentRunDigestPayload,
     PresentRunGroupsPayload,
@@ -234,6 +238,37 @@ async def enrich_format_batch(payload: PresentFormatBatchPayload, context: Enric
     return enriched
 
 
+async def enrich_parity_summary(payload: PresentParitySummaryPayload, context: EnrichmentContext) -> dict[str, Any]:
+    parity = await context.backend.get_parity_report(context.session, payload.job_id)
+    if parity is None:
+        raise PresentationRefused(
+            "No parity report exists for that job yet — run the parity comparison first.",
+            gate=PROVENANCE_GATE,
+        )
+    enriched = payload.model_dump(exclude_none=True)
+    # Deterministic — every field here is what the parity report already computed; the model
+    # only picked job_id/title/note.
+    enriched["parity"] = parity
+    enriched["value_diff_count"] = parity.get("value_diff_count")
+    enriched["status_diff_count"] = parity.get("status_diff_count")
+    enriched["clusters"] = parity.get("clusters", [])
+    return enriched
+
+
+async def enrich_profile_preview(payload: PresentProfilePreviewPayload, context: EnrichmentContext) -> dict[str, Any]:
+    profile = context.state.seen_profiles.get(payload.profile_id)
+    if profile is None:
+        raise PresentationRefused(
+            "That profile_id was not staged or listed in this session. Stage it (or call "
+            "get_pending_profiles) first.",
+            gate=PROVENANCE_GATE,
+        )
+    enriched = payload.model_dump(exclude_none=True)
+    enriched["profile"] = profile_record(profile)
+    enriched["change_id"] = profile.profile_id   # web-shared의 change_update 훅과 호환 (Task 15)
+    return enriched
+
+
 async def enrich_question_form(payload: QuestionFormPayload, context: EnrichmentContext) -> dict[str, Any]:
     del context
     enriched = payload.model_dump(exclude_none=True)
@@ -251,6 +286,8 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
         PresentationComponent(name=PREVIEW_TOOL, component="job_preview", payload_model=PresentJobPreviewPayload, enrich=enrich_job_preview),
         PresentationComponent(name=RULE_PREVIEW_TOOL, component="rule_preview", payload_model=PresentRulePreviewPayload, enrich=enrich_rule_preview),
         PresentationComponent(name=FORMAT_BATCH_TOOL, component="format_batch", payload_model=PresentFormatBatchPayload, enrich=enrich_format_batch),
+        PresentationComponent(name=PARITY_SUMMARY_TOOL, component="parity_summary", payload_model=PresentParitySummaryPayload, enrich=enrich_parity_summary),
+        PresentationComponent(name=PROFILE_PREVIEW_TOOL, component="profile_preview", payload_model=PresentProfilePreviewPayload, enrich=enrich_profile_preview),
         PresentationComponent(name=QUESTION_TOOL, component="question_form", payload_model=QuestionFormPayload, enrich=enrich_question_form),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),
     )

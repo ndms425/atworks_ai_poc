@@ -9,6 +9,7 @@ from atworks_agent.types import (
     ApiSpec,
     AtworksSessionContext,
     AtworksSessionState,
+    ComparisonProfile,
     FailedRank,
     FormatBatch,
     FormatBatchEntry,
@@ -357,3 +358,79 @@ async def test_run_groups_unknown_keys_are_provenance_when_all_and_a_note_when_s
                                   {"group_keys": ["amount <= limit", "nope"]}, _ctx(state), "Shown.")
     assert not some.is_error and "Dropped nope" in some.result_text
     assert some.events[0].data["payload"]["shown"] == 1
+
+
+class _StubBackend:
+    """get_parity_report only — enrich_parity_summary's one backend call."""
+    def __init__(self, reports: dict[str, dict]):
+        self._reports = reports
+
+    async def get_parity_report(self, session, job_id):
+        del session
+        return self._reports.get(job_id)
+
+
+def _ctx_with_reports(reports, state=None):
+    return EnrichmentContext(backend=_StubBackend(reports), config=CFG, session=SESSION, state=state or AtworksSessionState())
+
+
+PARITY_FIXTURE = {
+    "targets": ["legacy", "renewed"],
+    "rows": [{"api_id": "api-1", "verdict": "value_diff"}, {"api_id": "api-1", "verdict": "status_diff"}],
+    "clusters": [
+        {"path": "$.serverTime", "count": 5},
+        {"path": "$.requestId", "count": 2},
+    ],
+    "value_diff_count": 1,
+    "status_diff_count": 1,
+    "ignore_paths": [],
+}
+
+
+async def test_parity_summary_surfaces_clusters_and_counts():
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_parity_summary"],
+        {"job_id": "job-0001", "title": "값 비교"},
+        _ctx_with_reports({"job-0001": PARITY_FIXTURE}), "Shown.",
+    )
+    payload = outcome.events[0].data["payload"]
+    assert payload["value_diff_count"] == 1 and payload["status_diff_count"] == 1
+    assert payload["clusters"] == PARITY_FIXTURE["clusters"]
+    assert payload["parity"] == PARITY_FIXTURE
+
+
+async def test_parity_summary_refuses_when_no_report():
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_parity_summary"], {"job_id": "job-0001"},
+        _ctx_with_reports({}), "Shown.",
+    )
+    assert outcome.blocked == "provenance"
+
+
+def _profile(**overrides):
+    fields = {
+        "profile_id": "profile-0001", "job_id": "job-0001",
+        "ignore_paths": ["$.serverTime"], "summary": "타임스탬프 노이즈 제거",
+        "created_at": datetime.now(UTC), "created_by": "op",
+    }
+    fields.update(overrides)
+    return ComparisonProfile(**fields)
+
+
+async def test_profile_preview_joins_staged_record():
+    state = AtworksSessionState()
+    state.remember_profile(_profile())
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_profile_preview"], {"profile_id": "profile-0001", "headline": "h"}, _ctx(state), "Shown.",
+    )
+    payload = outcome.events[0].data["payload"]
+    assert payload["change_id"] == "profile-0001"
+    assert payload["profile"]["profile_id"] == "profile-0001"
+    assert payload["profile"]["ignore_paths"] == ["$.serverTime"]
+
+
+async def test_profile_preview_refuses_unknown_profile():
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_profile_preview"], {"profile_id": "nope"}, _ctx(AtworksSessionState()), "Shown.",
+    )
+    assert outcome.blocked == "provenance"

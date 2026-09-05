@@ -53,6 +53,7 @@ class AtworksAgentConfig(BaseAgentConfig):
     # -- 검증 규칙 (chat-authored, apply-time effective) ------------------------------
     enable_rules: bool = True
     rule_review_policy: JobReviewPolicy = "always"
+    enable_parity: bool = True           # parity profile tools + cards (stage_profile 등, present_parity_summary/present_profile_preview)
     max_membership_values: int = Field(default=50, ge=1)
     max_rules_per_api: int = Field(default=50, ge=1)
     allowed_rule_kinds: tuple[str, ...] = ("compare", "membership", "required", "format")
@@ -105,6 +106,10 @@ class AtworksAgentConfig(BaseAgentConfig):
     def stages_rules(self) -> bool:
         return self.enable_rules
 
+    @property
+    def stages_parity(self) -> bool:
+        return self.enable_parity
+
     def thinking_request_fields(self) -> dict:
         """BaseAgentConfig는 항상 `thinking` 필드를 보낸다. 비-Anthropic 모델은 그 필드를 거부할 수
         있으므로 스위치가 꺼져 있으면 아무것도 보내지 않는다."""
@@ -120,5 +125,10 @@ class AtworksAgentConfig(BaseAgentConfig):
                 "stage_format_batch", "apply_format_batch", "discard_format_batch",
                 "get_pending_format_batches", "present_format_batch",
                 "find_apis_with_param", "recommend_rules_for_api",
+            }
+        if not self.enable_parity:
+            names |= {
+                "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles",
+                "recommend_ignore_paths", "present_parity_summary", "present_profile_preview",
             }
         return frozenset(names)

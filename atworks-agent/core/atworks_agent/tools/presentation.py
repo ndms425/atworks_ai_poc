@@ -11,6 +11,8 @@ GROUPS_TOOL = "present_run_groups"
 PREVIEW_TOOL = "present_job_preview"
 RULE_PREVIEW_TOOL = "present_rule_preview"
 FORMAT_BATCH_TOOL = "present_format_batch"
+PARITY_SUMMARY_TOOL = "present_parity_summary"
+PROFILE_PREVIEW_TOOL = "present_profile_preview"
 QUESTION_TOOL = "present_question_form"
 
 
@@ -50,5 +52,19 @@ class PresentRulePreviewPayload(PresentationPayload):
 class PresentFormatBatchPayload(PresentationPayload):
     """모델은 batch를 고른다; 카드의 모든 값(entries·outcome·counts)은 스테이징 레코드에서 온다."""
     batch_id: str
+    headline: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class PresentParitySummaryPayload(PresentationPayload):
+    """모델은 job을 고른다; 클러스터·카운트는 저장된 parity 리포트에서 온다."""
+    job_id: str
+    title: str | None = Field(default=None, max_length=80)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class PresentProfilePreviewPayload(PresentationPayload):
+    """모델은 profile을 고른다; 카드의 모든 값은 스테이징 레코드에서 온다."""
+    profile_id: str
     headline: str | None = Field(default=None, max_length=120)
     note: str | None = Field(default=None, max_length=200)

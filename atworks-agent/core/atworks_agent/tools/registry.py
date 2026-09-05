@@ -14,7 +14,9 @@ from .presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
+    PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
+    PROFILE_PREVIEW_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
 )
@@ -427,6 +429,31 @@ def build_tools(
                 "headline": {"type": "string", "maxLength": 120},
                 "note": {"type": "string", "maxLength": 200}},
                 "required": ["batch_id"], "additionalProperties": False},
+        },
+        {
+            "name": PARITY_SUMMARY_TOOL,
+            "description": ("Show a parity job's noise clusters and value/status mismatch counts; the card fills "
+                            "in every cluster, path, and count from the stored parity report — you supply only "
+                            "job_id, title, and note. Use it after recommend_ignore_paths or after the parity job "
+                            "has run."),
+            "input_schema": {"type": "object", "properties": {
+                "job_id": {"type": "string", "description": "job_id whose parity report to show."},
+                "title": {"type": "string", "maxLength": 80},
+                "note": {"type": "string", "maxLength": 200}},
+                "required": ["job_id"], "additionalProperties": False},
+        },
+        {
+            "name": PROFILE_PREVIEW_TOOL,
+            "description": ("Show the approval card for a comparison profile (an ignore-spec) staged or listed "
+                            "earlier; the card fills in the ignore paths and the target job from the staging "
+                            "record. Show every staged profile with it before anything is applied. Approving it "
+                            "applies no new judgment: applying re-diffs the job's stored responses, it never "
+                            "re-runs."),
+            "input_schema": {"type": "object", "properties": {
+                "profile_id": _profile_id(),
+                "headline": {"type": "string", "maxLength": 120},
+                "note": {"type": "string", "maxLength": 200}},
+                "required": ["profile_id"], "additionalProperties": False},
         },
         {
             "name": QUESTION_TOOL,

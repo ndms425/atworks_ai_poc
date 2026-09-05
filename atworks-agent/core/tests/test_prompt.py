@@ -24,6 +24,16 @@ def test_static_prompt_drops_job_rules_when_switched_off():
     assert "stage_job" not in text and "apply_job" not in text and "does not run or schedule" in text
 
 
+def test_static_prompt_carries_parity_hard_line_when_enabled():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_parity=True), SKILLS)
+    assert "Value equivalence is judged by the comparison engine, never by you" in text
+
+
+def test_static_prompt_drops_parity_hard_line_when_switched_off():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_parity=False), SKILLS)
+    assert "Value equivalence is judged by the comparison engine" not in text
+
+
 def test_dynamic_context_carries_attachments_and_clock():
     item = AttachedItem(order=1, kind="run", ref_id="run-17", label="POST /x", comment="왜 실패?")
     text = build_dynamic_context(atworks_context={"project": "MES"}, attached_items=[item],
