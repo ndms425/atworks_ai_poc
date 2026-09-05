@@ -63,7 +63,24 @@ custom formats so they are named and reusable across APIs.
   five built-ins as read-only entries; the REST adapter delegates to aTworks. `format` on `stage_rule`
   accepts any built-in or library name; an unknown name is a named argument error.
 
-### 3.2 Conditional / multi-pattern shapes fit as one regex
+### 3.3 Bulk pre-loading of common formats (deduped, one approval)
+
+The operator may want to seed the library in bulk rather than one rule at a time: "여기 고유번호 10가지
+포맷을 공통 포맷으로 추가해줘." This is a **library** operation, not a rule application.
+
+- The chat drafts a **format batch**: a list of `FormatDefinition`s (each name + pattern + pass/fail
+  examples), every one example-verified under §2 at stage time — a pattern that fails its own examples
+  drops from the batch with a note, it does not sink the batch.
+- **Dedup is applied**: a definition whose `name` already exists in the library, or whose `pattern` is
+  identical to an existing entry, is **skipped**; the card reports "N개 중 M개 추가, K개 중복 제외
+  (이름/패턴 일치)" and names the skipped ones. Only the genuinely new formats are added.
+- **One host approval covers the batch**, and that is safe precisely because a library format is inert
+  — it changes no run's verdict until an approved *rule* references it (§1, §3.1). So bulk-adding
+  formats is one reviewable unit (like a job matrix is one approval), while applying a format to an API
+  as a rule stays per-rule (that is what changes verdicts). The batch is staged, shown on the Formats
+  surface, approved once on the Rules page, then the new formats are in the library for reference.
+
+### 3.4 Conditional / multi-pattern shapes fit as one regex
 
 The operator's contract-number case ("6자리면 2-3-1, 10자리면 2-3-4-1") is a single format with an
 alternation: `^\d{2}-\d{3}-\d{1}$|^\d{2}-\d{3}-\d{4}-\d{1}$`. The SSN-masking case is
@@ -71,7 +88,11 @@ alternation: `^\d{2}-\d{3}-\d{1}$|^\d{2}-\d{3}-\d{4}-\d{1}$`. The SSN-masking ca
 examples, the machine verifies, the human approves. No new rule kind is needed; "digits only", "letters
 only", "fixed length", "prefix", and length-conditional shapes are all one `format` rule with a pattern.
 
-## 4. Cross-API recommendation
+## 4. Cross-API recommendation (two directions)
+
+Recommendation reads from what other APIs already have. Two entry points, one deterministic basis.
+
+### 4.1 Outward — "I applied a format here, apply it elsewhere too"
 
 When an operator applies a format to a param, the same shape usually applies to the same-named param on
 other APIs.
@@ -82,10 +103,26 @@ other APIs.
 - The `rule-authoring` skill uses it to offer a recommendation after staging or approving a format
   rule: "이 포맷을 api-005의 contractNo, api-009의 contractId에도 적용할까요?" via suggestion chips or a
   small card.
-- **Each recommended target becomes its own staged rule, approved individually** — no bulk auto-apply,
-  consistent with the one-approval-per-change discipline. The recommendation proposes; the human
-  approves each on the Rules page. Reuse is by library-format reference (§3.1), so the recommended
-  rules carry the same verified pattern.
+
+### 4.2 Inward — "I don't know the criteria; recommend from other APIs"
+
+The operator points at an API and does not know what value-checks to add: "나는 값검증 기준 모르니 이미
+적용된 다른 api들을 참고해서 추천해줘."
+
+- A read tool `recommend_rules_for_api(api_id)` walks each param of the target API that has **no** rule
+  yet, and for each finds the **applied** rules on the **same-named** param across other APIs. It
+  returns those as suggestions: "api-005의 contractNo에 `contract-no` 포맷이 적용돼 있습니다 — 이
+  API의 contractNo에도 적용할까요?" Deterministic: the suggestion is an existing approved rule on a peer,
+  never a rule the model invented.
+- Where no peer has a rule for a param, nothing is suggested for it (the tool does not guess a
+  constraint from a param name alone — that would be the model judging).
+
+### 4.3 Both directions stage per-target, approve individually
+
+**Each recommended target becomes its own staged rule, approved individually** on the Rules page — no
+bulk auto-apply, consistent with the one-approval-per-change discipline (contrast §3.3, where bulk is
+allowed only because library formats are inert). The recommendation proposes; the human approves each.
+Reuse is by library-format reference (§3.1), so recommended rules carry the same verified pattern.
 
 ## 5. Model and schema changes
 
@@ -105,12 +142,16 @@ other APIs.
 
 ## 6. Backend, tools, card, skill
 
-- **Backend** gains `save_format`/`get_format`/`list_formats` (the library) and
-  `find_apis_with_param(session, param)`; `stage_rule` resolves a `format` that names a library entry.
-  `apply_rule` promotes a `save_format_as` definition into the library (approval-gated, host-only).
-- **Tools:** `find_apis_with_param` (read); `stage_rule` extended; the `rule_preview` card shows the
-  pattern, the pass/fail examples, and (when saving) the format name. A `format_library` read is
-  exposed for the Rules page.
+- **Backend** gains `save_format`/`get_format`/`list_formats` (the library),
+  `find_apis_with_param(session, param)`, `recommend_rules_for_api(session, api_id)`, and the format-batch
+  lifecycle `stage_format_batch`/`get_pending_format_batches`/`apply_format_batch`/`discard_format_batch`
+  (mirror of the rule lifecycle; `apply_format_batch` dedups and adds the new formats, host-approved).
+  `stage_rule` resolves a `format` that names a library entry; `apply_rule` promotes a `save_format_as`
+  definition into the library (approval-gated, host-only).
+- **Tools:** `find_apis_with_param` and `recommend_rules_for_api` (read); `stage_format_batch` (write,
+  bulk library seed) rendering a `format_batch` preview card that lists new-vs-skipped-duplicate;
+  `stage_rule` extended; the `rule_preview` card shows the pattern, the pass/fail examples, and (when
+  saving) the format name. A `format_library` read is exposed for the Rules/Formats surface.
 - **Skill `rule-authoring`** procedure extends: for a shape with no built-in format, author a pattern
   AND supply pass/fail examples; prefer an existing library format by name; after approval, offer to
   reuse the format on same-named params via `find_apis_with_param`.
@@ -135,7 +176,10 @@ other APIs.
 - **A separate format-approval lifecycle** — formats are promoted only via a rule's approval in v1.
 - **Fuzzy param similarity** — recommendation matches on exact param name (and simple normalization),
   not semantic similarity, in v1.
-- **Bulk apply** — each recommended rule is approved individually.
+- **Bulk apply of rules to APIs** — each recommended/applied rule is approved individually (only bulk
+  *format library* seeding is one approval, §3.3, because formats are inert until a rule references them).
+- **Model-invented criteria for inward recommendation** — §4.2 suggests only rules a peer API already
+  has; it never fabricates a constraint from a param name.
 - **Cross-field / conditional-on-another-param rules** — single param, single (possibly alternation)
   pattern.
 - Editing a saved format in place — supersede with a new named format instead.
@@ -149,7 +193,13 @@ other APIs.
   `stage_rule` referencing the name resolves the pattern+examples; an unknown format name is a named
   error; built-ins are present and read-only.
 - Recommendation: `find_apis_with_param` returns same-named params lacking a format rule, excludes ones
-  that already have it, is a deterministic catalogue scan; each recommended target stages its own rule.
+  that already have it, is a deterministic catalogue scan; `recommend_rules_for_api` returns, per
+  rule-less param of the target API, the applied rules on same-named peer params and nothing where no
+  peer has one; each recommended target stages its own rule.
+- Bulk format batch: a batch of definitions example-verifies each, drops the ones that fail their own
+  examples with a note, dedups by name and by identical pattern (reporting the skips), and adds only the
+  new ones on one host approval; a batch that resolves to zero new formats is reported, not applied; the
+  library write changes no run verdict (a format is inert until a rule references it).
 - Immutability/host-approval invariants from the base feature still hold (a saved format changes no past
   run; the library write is approval-gated).
 - Web build clean; the card/Formats surfaces render the examples and pattern.
