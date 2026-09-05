@@ -273,15 +273,18 @@ class FormatBatchLedger:
 
     def apply(self, batch_id: str, *, actor: str) -> FormatBatch:
         batch = self._require_staged(batch_id, "apply")
-        for entry in batch.entries:
+        entries = list(batch.entries)
+        for i, entry in enumerate(entries):
             if entry.outcome != "new":
                 continue
-            self._library.add(FormatDefinition(
+            added, skip_reason = self._library.add(FormatDefinition(
                 name=entry.name, pattern=entry.pattern, pass_examples=list(entry.pass_examples),
                 fail_examples=list(entry.fail_examples), created_at=datetime.now(UTC), created_by=actor,
             ))
+            if not added:
+                entries[i] = entry.model_copy(update={"outcome": "duplicate", "reason": skip_reason})
         updated = batch.model_copy(update={"status": RuleStatus.APPLIED, "applied_at": datetime.now(UTC),
-                                           "applied_by": actor})
+                                           "applied_by": actor, "entries": entries})
         self._batches[batch_id] = updated
         return updated
 

@@ -405,6 +405,29 @@ def test_apply_format_batch_with_zero_new_entries_still_applies_and_adds_nothing
     assert {f.name for f in lib.list()} == before
 
 
+def test_apply_format_batch_at_the_cap_marks_the_overflow_entry_not_added():
+    # 5 builtins seed the library; cap of 6 leaves room for exactly one more.
+    cap_cfg = AtworksAgentConfig(model="m", max_format_library=6)
+    lib = FormatLibrary(max_size=cap_cfg.max_format_library)
+    ledger = FormatBatchLedger(cap_cfg, lib)
+    batch = ledger.stage(FormatBatchDraft(formats=[
+        {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$", "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
+        {"name": "zip-code", "pattern": r"^\d{5}$", "pass_examples": ["12345"], "fail_examples": ["abc"]},
+    ]), actor="op")
+    assert [e.outcome for e in batch.entries] == ["new", "new"]  # both look addable at stage time
+
+    applied = ledger.apply(batch.batch_id, actor="op")
+
+    assert applied.status is RuleStatus.APPLIED
+    outcomes = [e.outcome for e in applied.entries]
+    assert outcomes.count("new") == 1 and outcomes.count("duplicate") == 1
+    overflow = applied.entries[outcomes.index("duplicate")]
+    assert overflow.reason is not None and "full" in overflow.reason
+    assert applied.new_count == 1
+    # exactly one of the two actually landed in the library
+    assert sum(1 for name in ("phone-digits", "zip-code") if lib.get(name) is not None) == 1
+
+
 def test_apply_format_batch_refuses_non_staged_id():
     ledger = _format_batch_ledger()
     with pytest.raises(FormatBatchGuardrailViolation):
