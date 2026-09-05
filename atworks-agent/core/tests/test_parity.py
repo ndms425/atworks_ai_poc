@@ -81,6 +81,29 @@ def test_apply_ignore_removes_ignored_leaves_from_a_dict():
     assert result == {"a": 1, "meta": {"other": "x"}}
 
 
+def test_null_present_in_only_one_body_is_a_diff_not_a_false_equal():
+    a = {"x": 1}
+    b = {"x": 1, "a": None}
+    result = compare_bodies(a, b, [])
+    assert result.equal is False
+    assert result.diff_paths == ["$.a"]
+
+
+def test_null_present_in_both_bodies_is_equal():
+    a = {"a": None}
+    b = {"a": None}
+    result = compare_bodies(a, b, [])
+    assert result.equal is True
+    assert result.diff_paths == []
+
+
+def test_apply_ignore_keeps_array_length_and_indices_stable():
+    body = {"arr": [10, 20, 30]}
+    result = apply_ignore(body, ["$.arr[1]"])
+    assert result == {"arr": [10, None, 30]}
+    assert len(result["arr"]) == 3
+
+
 def test_cluster_diffs_groups_identical_diff_path_sets():
     rows = [
         {"row_key": "row1", "diff_paths": ["$.meta.serverTime"]},

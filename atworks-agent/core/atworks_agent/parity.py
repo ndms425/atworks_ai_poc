@@ -11,6 +11,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
+_MISSING = object()
+"""compare_bodies에서 '누락'과 '값이 None'을 구별하기 위한 센티널. dict.get()의 기본값
+None은 실제 JSON null 값과 구별되지 않으므로, 존재하지 않는 경로의 기본값으로 이 객체를
+쓴다 (어느 쪽 dict에도 절대 값으로 나타나지 않는다)."""
+
 
 class BodyDiff(BaseModel):
     equal: bool
@@ -51,12 +56,15 @@ def _is_ignored(path: str, ignore_paths: Sequence[str]) -> bool:
 def compare_bodies(a: Any, b: Any, ignore_paths: Sequence[str]) -> BodyDiff:
     ap = {p: v for p, v in _paths(a) if not _is_ignored(p, ignore_paths)}
     bp = {p: v for p, v in _paths(b) if not _is_ignored(p, ignore_paths)}
-    diff = sorted({p for p in ap.keys() | bp.keys() if ap.get(p) != bp.get(p)})
+    diff = sorted({p for p in set(ap) | set(bp) if ap.get(p, _MISSING) != bp.get(p, _MISSING)})
     return BodyDiff(equal=not diff, diff_paths=diff)
 
 
 def _prune(obj: Any, prefix: str, ignore_paths: Sequence[str]) -> Any:
-    """obj를 top-down으로 훑어, 경로가 ignore_paths에 걸리는 노드는 서브트리째 잘라낸다."""
+    """obj를 top-down으로 훑어, 경로가 ignore_paths에 걸리는 노드를 지운다. dict 키는
+    제거하지만, 배열 원소는 제거 시 뒤 원소들이 앞으로 당겨지며 인덱스-경로 대응이 깨지므로
+    (예: [10,20,30]에서 인덱스 1을 지우면 30이 인덱스 1로 밀려남) None 자리표시자로 바꿔
+    길이와 인덱스를 그대로 유지한다."""
     if isinstance(obj, Mapping):
         return {
             key: _prune(value, f"{prefix}.{key}", ignore_paths)
@@ -64,11 +72,14 @@ def _prune(obj: Any, prefix: str, ignore_paths: Sequence[str]) -> Any:
             if not _is_ignored(f"{prefix}.{key}", ignore_paths)
         }
     if isinstance(obj, list):
-        return [
-            _prune(value, f"{prefix}[{i}]", ignore_paths)
-            for i, value in enumerate(obj)
-            if not _is_ignored(f"{prefix}[{i}]", ignore_paths)
-        ]
+        result = []
+        for i, value in enumerate(obj):
+            path = f"{prefix}[{i}]"
+            if _is_ignored(path, ignore_paths):
+                result.append(None)
+            else:
+                result.append(_prune(value, path, ignore_paths))
+        return result
     return obj
 
 
