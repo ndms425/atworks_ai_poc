@@ -6,6 +6,7 @@
 import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pill, plural, Skeleton, useResource } from "web-shared";
 import { fetchRules } from "@/lib/api";
 import { type RuleAction, useRuleActions } from "@/lib/useRuleActions";
+import FormatsView from "@/components/views/FormatsView";
 import type { ValidationRule } from "@/lib/types";
 
 function RuleRow({
@@ -97,6 +98,7 @@ export default function RulesView({
           ) : null}
         </>
       )}
+      <FormatsView refreshKey={refreshKey} />
     </div>
   );
 }
