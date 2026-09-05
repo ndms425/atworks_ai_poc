@@ -1,0 +1,301 @@
+<title>aTworks AI 기능 지도</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@500;600;700&family=Noto+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #F6F7F9; --panel: #FFFFFF; --ink: #1B2230; --ink-soft: #5B6472; --line: #DCE1E8;
+    --accent: #0F766E; --accent-soft: #E3F4F1;          /* 결정론 코드가 판정 */
+    --human: #B45309; --human-soft: #FBEEDC;            /* 사람이 승인 */
+    --model: #3F51B5; --model-soft: #E8EAF8;            /* 모델이 제안 */
+    --stop: #B91C1C; --stop-soft: #FBE5E5;              /* 취소·미구현 */
+    --code-bg: #EEF1F5;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161C; --panel: #1A2029; --ink: #E7EBF0; --ink-soft: #A3ADBA; --line: #2A3340;
+      --accent: #2DD4BF; --accent-soft: #123A36; --human: #F6B26B; --human-soft: #3C2A10;
+      --model: #9FA8DA; --model-soft: #232A4A; --stop: #F87171; --stop-soft: #3F1B1B; --code-bg: #232A33;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161C; --panel: #1A2029; --ink: #E7EBF0; --ink-soft: #A3ADBA; --line: #2A3340;
+    --accent: #2DD4BF; --accent-soft: #123A36; --human: #F6B26B; --human-soft: #3C2A10;
+    --model: #9FA8DA; --model-soft: #232A4A; --stop: #F87171; --stop-soft: #3F1B1B; --code-bg: #232A33;
+    color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.7 "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; margin: 0; }
+  main { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1, h2, h3 { font-family: "IBM Plex Sans KR", "Noto Sans KR", system-ui, sans-serif; text-wrap: balance; line-height: 1.25; }
+  h1 { font-size: 30px; font-weight: 700; margin: 0 0 8px; }
+  h2 { font-size: 21px; font-weight: 600; margin: 48px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; }
+  p { max-width: 68ch; margin: 0 0 12px; }
+  .lede { color: var(--ink-soft); font-size: 15.5px; max-width: 70ch; }
+  .eyebrow { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); font-weight: 500; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; }
+  pre { background: var(--code-bg); padding: 14px 16px; border-radius: 10px; overflow-x: auto; font-size: 12.5px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  .tag { display: inline-block; font-size: 11.5px; font-weight: 500; padding: 1px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+  .tag.ok { background: var(--accent-soft); color: var(--accent); }
+  .tag.human { background: var(--human-soft); color: var(--human); }
+  .tag.model { background: var(--model-soft); color: var(--model); }
+  .tag.stop { background: var(--stop-soft); color: var(--stop); }
+  .tag.soft { background: var(--code-bg); color: var(--ink-soft); }
+  .principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 20px 0 8px; }
+  .principle { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .principle b { display: block; font-family: "IBM Plex Sans KR", sans-serif; font-size: 14.5px; margin-bottom: 4px; }
+  .principle.model b { color: var(--model); } .principle.code b { color: var(--accent); } .principle.human b { color: var(--human); }
+  .principle p { font-size: 13.5px; color: var(--ink-soft); margin: 0; }
+  figure { margin: 20px 0 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { font-size: 13px; color: var(--ink-soft); margin-top: 10px; }
+  .tablewrap { overflow-x: auto; margin: 12px 0 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-top: 1px solid var(--line); }
+  thead th { border-top: none; background: var(--code-bg); font-weight: 600; font-size: 12.5px; color: var(--ink-soft); }
+  td .mono { font-size: 12px; color: var(--ink-soft); }
+  td.feat { font-weight: 600; white-space: nowrap; }
+  ol.steps { padding-left: 0; list-style: none; counter-reset: s; max-width: 72ch; }
+  ol.steps li { counter-increment: s; position: relative; padding: 10px 0 10px 44px; border-top: 1px solid var(--line); }
+  ol.steps li::before { content: counter(s); position: absolute; left: 0; top: 10px; width: 28px; height: 28px; border-radius: 14px; background: var(--code-bg); color: var(--ink); font: 600 13px/28px "IBM Plex Sans KR", sans-serif; text-align: center; font-variant-numeric: tabular-nums; }
+  ol.steps li b { font-weight: 600; }
+  .callout { border-left: 3px solid var(--accent); background: var(--panel); padding: 12px 16px; border-radius: 0 10px 10px 0; margin: 14px 0; max-width: 72ch; }
+  .callout.human { border-color: var(--human); } .callout.stop { border-color: var(--stop); }
+  .callout p { margin: 0; font-size: 14px; }
+  dl.gloss { display: grid; grid-template-columns: 180px 1fr; gap: 8px 16px; font-size: 14px; max-width: 76ch; }
+  dl.gloss dt { font-weight: 600; } dl.gloss dd { margin: 0; color: var(--ink-soft); }
+  .tree { font-size: 12.5px; line-height: 1.75; }
+  .tree .c { color: var(--ink-soft); }
+  .meta { color: var(--ink-soft); font-size: 13px; }
+  @media (max-width: 640px) { .principles { grid-template-columns: 1fr; } dl.gloss { grid-template-columns: 1fr; } }
+</style>
+
+<main>
+  <div class="eyebrow">atworks-ai-mvp · 초급 개발자용 · 2026-09-06 기준 (HEAD 0abc3d1)</div>
+  <h1>aTworks AI 기능 지도</h1>
+  <p class="lede">aTworks(자바 백엔드의 API 테스트 도구) 옆에 붙은 <b>AI 채팅 서비스</b>가 지금 무엇을 할 수 있고, 무엇을 <em>일부러</em> 안 했고, 무엇이 아직 남았는지를 한 장으로 정리했습니다. 코드를 처음 여는 사람이 "왜 이렇게 짜여 있지?"를 이해하는 데 필요한 만큼만 담았습니다.</p>
+
+  <h2>1. 이 프로젝트를 한 문장으로</h2>
+  <p><b>"모델은 제안만 하고, 판정은 결정론 코드가 하고, 승인은 사람이 한다."</b> 이 원칙이 모든 기능의 뼈대입니다. AI가 "이 실행은 실패야", "이 두 응답은 같아", "승인해도 돼"라고 <em>결정</em>하는 곳은 코드 어디에도 없습니다. AI는 "이렇게 하면 어때요?"라고 <em>초안</em>을 만들고, 그 초안이 유효한지는 파이썬 함수가 검사하고, 실제로 발효시키는 클릭은 사람이 합니다.</p>
+
+  <div class="principles">
+    <div class="principle model"><b>모델이 제안</b><p>"실패 run 중 먼저 볼 것", "이 API들을 두 서버에 돌려 비교", "serverTime은 무시". 자연어를 <em>구조화된 초안</em>(JobSpec, ValidationRule, ComparisonProfile…)으로 번역하는 것까지가 모델의 일.</p></div>
+    <div class="principle code"><b>결정론 코드가 판정</b><p>pass/fail, 값 동등성, 위험도 순위, 클러스터 개수 — 전부 <code>rules.py</code>·<code>parity.py</code>·<code>aggregation.py</code> 같은 순수 함수가 계산. 같은 입력이면 항상 같은 답.</p></div>
+    <div class="principle human"><b>사람이 승인</b><p>실행·저장·발효는 오직 포털의 <b>Approve 버튼</b>(호스트 라우트)만이 한다. 채팅에 "승인해"라고 쳐도 아무 일도 안 일어남 — 이건 버그가 아니라 <em>설계</em>.</p></div>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 760 300" role="img" aria-label="한 요청이 사람, 모델, 결정론 코드, 화면 사이를 도는 안전 루프. 승인 화살표만 사람에게서 나온다." xmlns="http://www.w3.org/2000/svg" style="color: var(--ink);">
+      <defs>
+        <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--human)"/></marker>
+      </defs>
+      <!-- boxes -->
+      <rect x="20" y="110" width="150" height="80" rx="10" fill="var(--human-soft)" stroke="var(--human)" stroke-width="1.5"/>
+      <text x="95" y="143" text-anchor="middle" font-size="14" font-weight="600" fill="var(--human)">사람 (운영자)</text>
+      <text x="95" y="165" text-anchor="middle" font-size="12" fill="currentColor">채팅 · 버튼 클릭</text>
+
+      <rect x="305" y="20" width="150" height="80" rx="10" fill="var(--model-soft)" stroke="var(--model)" stroke-width="1.5"/>
+      <text x="380" y="53" text-anchor="middle" font-size="14" font-weight="600" fill="var(--model)">모델 (LLM)</text>
+      <text x="380" y="75" text-anchor="middle" font-size="12" fill="currentColor">초안 · 도구 호출 · 설명</text>
+
+      <rect x="305" y="200" width="150" height="80" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="380" y="233" text-anchor="middle" font-size="14" font-weight="600" fill="var(--accent)">결정론 코드</text>
+      <text x="380" y="255" text-anchor="middle" font-size="12" fill="currentColor">가드레일 · 판정 · 리포트</text>
+
+      <rect x="590" y="110" width="150" height="80" rx="10" fill="var(--panel)" stroke="currentColor" stroke-width="1.5"/>
+      <text x="665" y="143" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">화면 (포털)</text>
+      <text x="665" y="165" text-anchor="middle" font-size="12" fill="currentColor">카드 · 리포트 · 강조</text>
+
+      <!-- arrows -->
+      <line x1="170" y1="135" x2="305" y2="70" stroke="currentColor" stroke-width="1.5" marker-end="url(#a)"/>
+      <text x="215" y="90" font-size="11.5" fill="currentColor">자연어 요청</text>
+
+      <line x1="380" y1="100" x2="380" y2="200" stroke="currentColor" stroke-width="1.5" marker-end="url(#a)"/>
+      <text x="392" y="140" font-size="11.5" fill="currentColor">stage_* 초안</text>
+      <text x="392" y="156" font-size="11.5" fill="currentColor">(가드레일 검사)</text>
+
+      <line x1="455" y1="240" x2="590" y2="180" stroke="currentColor" stroke-width="1.5" marker-end="url(#a)"/>
+      <text x="480" y="228" font-size="11.5" fill="currentColor">미리보기 카드</text>
+
+      <line x1="590" y1="140" x2="170" y2="150" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#a)"/>
+      <text x="330" y="150" text-anchor="middle" font-size="11.5" fill="currentColor">사람이 본다</text>
+
+      <path d="M95 190 C 95 275, 230 285, 305 265" fill="none" stroke="var(--human)" stroke-width="2.5" marker-end="url(#ah)"/>
+      <text x="120" y="268" font-size="12" font-weight="600" fill="var(--human)">Approve 클릭 = 유일한 상태 변경</text>
+
+      <line x1="455" y1="60" x2="590" y2="120" stroke="currentColor" stroke-width="1.5" marker-end="url(#a)"/>
+      <text x="470" y="82" font-size="11.5" fill="currentColor">이동·강조 지시</text>
+    </svg>
+    <figcaption>모델의 화살표는 전부 "초안"과 "지시"로 끝납니다. 백엔드 상태를 실제로 바꾸는 진한 화살표는 사람의 클릭 한 개뿐입니다.</figcaption>
+  </figure>
+
+  <h2>2. 구현한 기능</h2>
+  <p>여섯 묶음으로 나눴습니다. 각 묶음은 위 원칙을 똑같이 따릅니다 — 표의 <span class="tag model">제안</span> <span class="tag ok">판정</span> <span class="tag human">승인</span> 태그가 누가 무엇을 하는지 알려줍니다.</p>
+
+  <h3>A. 기본 뼈대 — 실행 예약(job)·스케줄러·리포트</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">매트릭스 job</td><td>"이 API들을 dev·stg 두 계에 이 데이터로 돌려줘"를 <b>한 덩어리</b>로 묶은 것. API × 환경 × 테스트데이터 조합을 전부 돕니다.</td><td><span class="tag model">제안</span> 모델이 <code>stage_job</code>으로 초안 → <span class="tag ok">판정</span> <code>check_job_guardrails</code>가 상한(API 100·환경 2·매트릭스 400…) 검사 → <span class="tag human">승인</span> Jobs 페이지 Approve → 스케줄러가 실행</td><td class="mono">atworks_agent/jobs.py<br>host/scheduler.py</td></tr>
+      <tr><td class="feat">스케줄러</td><td>승인된 job을 정해진 회차만큼 실행하는 시계. <b>LLM이 전혀 없음.</b></td><td><code>Scheduler.tick</code>이 due한 회차마다 <code>execute_job_once</code> 호출, 결과를 <code>record_execution</code>으로 기록. 끝에 일일 브리핑도 생성.</td><td class="mono">host/scheduler.py</td></tr>
+      <tr><td class="feat">리포트</td><td>실행 결과를 환경별로 나란히 놓은 정적 HTML. 템플릿 하나 + <code>data.json</code>.</td><td><span class="tag ok">판정</span> <code>reports.py</code>가 최신 run만 골라 표 생성. 값은 전부 run 기록에서, 모델 문장은 0줄. <code>&lt;</code> 이스케이프로 XSS 방어.</td><td class="mono">host/reports.py<br>report_template.html</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>B. 인사이트·브리핑 — 실패를 "묶어서" 보기</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">실패 순위</td><td>"실패 47개 중 뭘 먼저 봐?" — 위험도 순으로 읽기 순서를 줍니다. <b>순서일 뿐 판정이 아님.</b></td><td><span class="tag ok">판정</span> <code>risk_v1</code> 스코어러(결정론)가 점수·이유 계산 → 모델은 <code>present_run_digest</code>로 카드만 채움</td><td class="mono">scoring.py</td></tr>
+      <tr><td class="feat">원인별 묶기</td><td>실패를 "어떤 규칙 위반인가", "어느 API인가"로 그룹핑. 개수·첫 실패 시각은 서버가 셉니다.</td><td><code>aggregate_runs</code> → <code>RunGroup</code> → <code>present_run_groups</code>. 불안정(flaky) 판정도 <code>flaky_v1</code>(전환 횟수)로 결정론.</td><td class="mono">aggregation.py</td></tr>
+      <tr><td class="feat">영향도 스테이징</td><td>"어제부터 깨진 것들 다시 돌려" — 대상 API를 서버가 골라줌.</td><td><code>select_where</code>의 <code>failed_since</code>/<code>related_to</code>를 서버가 해석해 API 목록으로 치환 (<code>selection_basis</code> 문장도 서버가 씀)</td><td class="mono">selection.py</td></tr>
+      <tr><td class="feat">일일 브리핑</td><td>매일 아침 "오늘 봐야 할 것" 한 장. Home 화면 첫 카드.</td><td>스케줄러 tick 끝에 <code>briefings.maybe_generate</code> — LLM 없음, 날짜당 1회(파일 존재가 가드)</td><td class="mono">host/briefing.py</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>C. 검증 규칙 — 자연어를 "규칙 객체"로</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">규칙 저작</td><td>"paymentId는 숫자만" 같은 말을 <code>ValidationRule</code>(compare / membership / required / format 4종)로 번역. HTTP 200이어도 값이 틀리면 <b>fail</b>.</td><td><span class="tag model">제안</span> <code>stage_rule</code> → <span class="tag ok">판정</span> 가드레일 + 영향 시뮬레이션(<code>simulate_rule</code>, 읽기 전용) → <span class="tag human">승인</span> Rules 페이지 → <code>apply_rule</code></td><td class="mono">rules.py<br>host: /rules/{id}/apply</td></tr>
+      <tr><td class="feat">과거 불변 (effective_from)</td><td>규칙을 승인해도 <b>이미 끝난 실행의 결과는 절대 안 바뀜.</b> 승인 시각 이후 실행만 새 규칙으로 평가.</td><td><code>apply_rule</code>이 <code>effective_from</code>을 찍고, <code>execute_job_once</code>는 <code>executed_at &gt;= effective_from</code>인 run에만 적용</td><td class="mono">rules.py · mock_backend.py</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>D. 포맷 라이브러리 — LLM이 만든 정규식을 "증명"시키기</h3>
+  <div class="callout"><p><b>왜 필요했나:</b> 모델이 정규식을 쓰면 그게 그대로 판정기가 됩니다. 틀린 정규식이 판정기가 되는 걸 막으려고, <b>통과 예시·실패 예시를 반드시 함께 내게 하고 코드가 검증</b>합니다. 예시가 하나라도 틀리면 초안 자체가 거부됩니다.</p></div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">예시 검증 패턴</td><td>"전화번호는 숫자만(통과 01012345678, 실패 010-1234)" → 정규식 + 예시</td><td><span class="tag ok">판정</span> <code>verify_examples</code>가 컴파일 후 <code>fullmatch</code>로 전부 검사. 내장 5종(email/date/iso8601/uuid/number)은 예시 불필요</td><td class="mono">rules.py</td></tr>
+      <tr><td class="feat">저장·재사용</td><td>승인된 패턴에 이름을 붙여 라이브러리에 저장, 다음 규칙은 이름만 참조</td><td><code>save_format_as</code> → <code>apply_rule</code> 시 승격(같은 클릭). 이름/패턴 중복·200개 초과는 조용히 건너뛰고 노트</td><td class="mono">FormatLibrary</td></tr>
+      <tr><td class="feat">일괄 등록</td><td>"공통 포맷 10개 한 번에" — 한 번의 승인으로 추가</td><td><span class="tag ok">판정</span> 각 항목 new/duplicate/invalid를 스테이징 때 계산 → <span class="tag human">승인</span> 1회. 안전한 이유: 라이브러리 포맷은 규칙이 참조하기 전엔 <b>아무 판정도 안 바꿈</b>(inert)</td><td class="mono">FormatBatch · /format-batches</td></tr>
+      <tr><td class="feat">추천 (양방향)</td><td>"이 포맷 다른 API에도 적용할까?" / "이 API에 뭘 검증해야 할지 모르겠어, 다른 API 보고 추천해"</td><td><code>find_apis_with_param</code> · <code>recommend_rules_for_api</code> — <b>이미 적용된 규칙만</b> 제안, param 이름만 보고 지어내지 않음. 각 제안은 개별 승인</td><td class="mono">mock_backend.py</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>E. 값 병행 비교 (parity) — 노후 서버 vs 신규 서버</h3>
+  <div class="callout"><p><b>왜 필요했나:</b> 장비를 교체하면 "같은 코드가 새 서버에서 같은 <em>값</em>을 내는가"를 대량으로 봐야 합니다. 기존 리포트는 pass/fail <em>상태</em>만 비교해서 둘 다 200이면 값이 달라도 "일치"로 보였습니다. 이 묶음이 <b>응답 본문</b>을 비교합니다.</p></div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">본문 저장 + 필드 비교</td><td>각 실행의 응답 JSON을 저장하고 두 서버 결과를 필드 단위로 diff</td><td><span class="tag ok">판정</span> <code>compare_bodies</code>(순수 함수). 한쪽에만 있는 필드·<code>null</code>·타입 차이(1 vs true, 1 vs 1.0)도 전부 "다름"</td><td class="mono">parity.py</td></tr>
+      <tr><td class="feat">노이즈 클러스터</td><td>"480개가 serverTime 하나만 달라요" — 차이를 같은 필드 조합으로 묶어 셈</td><td><code>cluster_diffs</code>가 diff 경로 시그니처로 그룹핑, 큰 것부터. 리포트의 parity 섹션에 표시</td><td class="mono">parity.py · reports.py</td></tr>
+      <tr><td class="feat">비교 프로파일 (무시 스펙)</td><td>"serverTime·txId는 매번 달라지니 빼줘" → 무시 경로 목록을 승인 객체로</td><td><span class="tag model">제안</span> <code>stage_profile</code>(추천은 <code>recommend_ignore_paths</code>가 실제 클러스터만) → <span class="tag human">승인</span> /profiles → <code>apply_profile</code>. API별 무시 경로는 그 API 행에만 적용</td><td class="mono">profiles.py · /profiles</td></tr>
+      <tr><td class="feat">재실행 없는 재비교</td><td>프로파일을 적용하면 <b>서버를 다시 부르지 않고</b> 저장된 본문만 다시 diff. 즉시 480개 정리.</td><td><code>Reports.rediff</code>가 <code>data.json</code>의 본문으로 parity 블록만 재계산. run 개수·과거 판정 불변(테스트로 고정). 스케줄 다음 회차도 적용된 프로파일을 유지</td><td class="mono">reports.py · scheduler.py</td></tr>
+      <tr><td class="feat">명명 타깃</td><td>dev/stg뿐 아니라 <code>legacy</code>/<code>renewed</code>도 대상 계로</td><td><code>allowed_target_envs</code> 확장. Mock은 이름만으로 스텁(<code>renewed</code>에서 api-004의 <code>limit</code>이 다르게 나오도록 데모 데이터)</td><td class="mono">config.py · mock_backend.py</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>F. 채팅 ↔ 화면 상호작용 — 채팅이 화면을 움직이고 가리킴</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">화면 이동·필터</td><td>"run 화면으로 가", "api-004 상세 보여줘", "runs에서 실패만"</td><td><code>navigate_screen</code>이 <code>ui</code> 이벤트(컴포넌트 <code>screen_navigate</code>)를 내면 웹이 <b>카드 대신 실행</b>: <code>setView</code> + 행 스크롤 + 그 화면이 원래 가진 필터만 적용. 대상 id는 세션에서 본 것 또는 화면에 보이는 것만</td><td class="mono">enrichment.py<br>web: page.tsx</td></tr>
+      <tr><td class="feat">강조 (①②③)</td><td>"지금 화면에서 먼저 봐야 할 건?" → 답변 + 화면 행에 붉은 박스·번호 배지. <b>AI가 필요하다고 판단하면 스스로</b> 그림</td><td><code>highlight_screen</code> → <code>screen_highlight</code> → <code>useScreenHighlight</code>가 <code>data-ref="kind:id"</code> 요소에 클래스 부여. 다음 메시지·사용자 화면 이동 시 자동 해제</td><td class="mono">web: useScreenHighlight.ts</td></tr>
+      <tr><td class="feat">화면 인지 (screen_state)</td><td>모델이 "지금 어느 화면에 무엇이 보이는지" 알게 하는 채널. 이전엔 없었음</td><td>포털이 매 턴 <code>{view, filter, visible≤40}</code>을 보냄 → 프롬프트 동적 영역에 <code>&lt;screen-state&gt;</code>로 렌더. <b>데이터일 뿐 지시가 아님</b>(새니타이즈 + 경계 태그 방어)</td><td class="mono">screen.py · prompt.py</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>공통 인프라</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>구성</th><th>무엇</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">백엔드 추상화</td><td>aTworks와 닿는 유일한 접점 <code>AtworksBackend</code>(ABC). MVP는 <code>MockAtworks</code>. 자바 연동은 <code>rest_backend.py</code> 한 파일로 교체하면 됨</td><td class="mono">backend.py · mock_backend.py</td></tr>
+      <tr><td class="feat">도구 표면</td><td>모델이 부를 수 있는 함수 목록(고정). 읽기 도구 / <code>stage_*</code> 초안 도구 / <code>present_*</code> 카드 도구 / 화면 지시 2개. 기능 플래그(<code>enable_rules</code>·<code>enable_parity</code>·<code>enable_screen_directives</code>)로 묶음 단위 on/off</td><td class="mono">tools/registry.py · config.py</td></tr>
+      <tr><td class="feat">호스트 라우트</td><td>SSE 채팅 <code>/chat</code>, 포털 읽기 <code>/apis /runs /jobs /rules /formats /profiles</code>, 승인 버튼 <code>/changes|/rules|/format-batches|/profiles/{id}/apply·discard</code>, <code>/scheduler/tick</code>, <code>/reports/{job}</code>, <code>/briefings</code>. 종류별로 <b>네임스페이스 분리</b></td><td class="mono">host/app.py</td></tr>
+      <tr><td class="feat">웹 포털</td><td>Next.js. Home / APIs / Runs / Jobs / Rules(+저장된 포맷, 비교 프로파일 섹션). 채팅 카드 8종(run_digest, run_groups, job_preview, rule_preview, format_batch, parity_summary, profile_preview, question_form)</td><td class="mono">web/atworks-web</td></tr>
+      <tr><td class="feat">스킬 6개</td><td>요청 종류별 절차서. 프롬프트엔 목차만, 필요할 때 <code>load_skill</code>로 로드: failed-triage · schedule-run · job-approval · api-lookup · rule-authoring · parity-compare</td><td class="mono">atworks-agent/skills/</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3. 채팅 한 턴이 실제로 흐르는 순서</h2>
+  <p>"실패 run 중 먼저 볼 것 보여주고 화면에 표시해줘"를 예로.</p>
+  <ol class="steps">
+    <li><b>포털 → 호스트</b> <code>POST /api/atworks/chat</code>에 메시지 + 첨부(ref_id) + <code>screen_state</code>(지금 화면). 세션은 헤더 <code>X-Session-Id</code>로만.</li>
+    <li><b>프롬프트 조립</b> 정적 부분(원칙·도구 설명·스킬 목차, 캐시됨) + 동적 부분(프로젝트 컨텍스트, 첨부, <code>&lt;screen-state&gt;</code>). 동적 부분만 매 턴 바뀜 — 그래서 캐시가 유지됩니다.</li>
+    <li><b>모델이 읽기 도구 호출</b> <code>list_runs</code>(실패만) → <code>rank_failed_runs</code>(<code>risk_v1</code>). 순위·이유는 <b>스코어러 코드</b>가 계산해 돌려줌.</li>
+    <li><b>provenance 기록</b> 도구가 돌려준 run·API는 <code>seen_runs</code>·<code>seen_apis</code>에 남음. 이후 카드·강조·지시는 <b>여기 있는 id만</b> 가리킬 수 있음(지어낸 id 차단).</li>
+    <li><b>카드 도구</b> <code>present_run_digest</code>에 모델은 id와 한 줄 설명만 넣음 → <code>enrichment.py</code>가 실제 값을 채워 <code>ui</code> 이벤트로 웹에 보냄. 숫자·상태는 산문에 다시 쓰지 않음.</li>
+    <li><b>화면 지시</b> 답변이 화면 요소를 근거로 하니 <code>highlight_screen</code> 호출 → 웹이 카드 대신 <b>실행</b>(붉은 박스). 백엔드엔 아무 변화 없음.</li>
+    <li><b>턴 종료</b> 제안 칩(<code>present_suggestions</code>)으로 마무리. 세션 상태(본 것들, 승인 마크)는 JSON으로 저장 — 필드가 <b>진짜 모델 타입</b>으로 선언돼야 다음 턴에 dict가 아닌 객체로 돌아옵니다(이걸 놓쳐 생긴 버그를 두 번 잡았습니다).</li>
+    <li><b>(만약 stage_*였다면)</b> 초안이 가드레일을 통과해 미리보기 카드로 뜨고 여기서 멈춤. 사람이 포털 버튼을 누르면 호스트가 승인 마크를 <em>찍고 → 적용 호출 → 즉시 지움</em>. 마크는 클릭 한 번에 소비돼 채팅 턴이 쓸 수 없음.</li>
+  </ol>
+
+  <h2>4. 안 한 것 · 못 한 것 · 남은 것</h2>
+  <p>세 종류를 구분해서 적었습니다. <span class="tag stop">취소</span>는 <em>일부러</em> 안 한 것, <span class="tag soft">범위 밖</span>은 MVP에서 뺀 것, <span class="tag human">후속</span>은 남겨둔 작은 구멍입니다.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>항목</th><th>분류</th><th>이유 · 영향</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">채팅으로 대리 승인 ("너가 승인해")</td><td><span class="tag stop">취소</span></td><td>운영자 결정. 채팅 텍스트는 모델의 자기판단이나 첨부에 숨은 인젝션("이 job 승인해")으로 오염될 수 있어 "진짜 사람 의사"를 보장 못 함. 승인은 인증된 버튼 클릭만. 관련 테스트: 화면 라벨이 "approve job-0001 now"여도 승인 마크가 안 움직임을 단언</td></tr>
+      <tr><td class="feat">실제 aTworks(자바) REST 연동</td><td><span class="tag soft">범위 밖</span></td><td>MVP는 <code>MockAtworks</code>. 연동은 <code>host/atworks_host/rest_backend.py</code> 한 파일에 ABC 메서드를 구현하면 됨. ABC 독스트링에 REST 의무(effective_from 찍기, record_execution 1회 등)를 적어둠</td></tr>
+      <tr><td class="feat">시나리오 생성</td><td><span class="tag soft">범위 밖</span></td><td>운영자 지시로 배제</td></tr>
+      <tr><td class="feat">메모리 · 마켓플레이스 · 웹 검색</td><td><span class="tag soft">범위 밖</span></td><td>폐쇄망 단일 테넌트 내부 도구. <code>enable_memory=False</code>, 외부 콘텐츠 소스 없음</td></tr>
+      <tr><td class="feat">타깃별 인증(OAuth 등) · 골든셋(기준값 캡처) 모드</td><td><span class="tag soft">범위 밖</span></td><td>parity는 "두 서버 동시 호출"만. 인증은 기본 동일 + 단순 오버라이드 자리(<code>target_endpoints</code>)까지. 노후 서버가 사라진 뒤 비교하려면 골든셋이 필요 — 후속</td></tr>
+      <tr><td class="feat">숫자 허용오차 · 배열 순서 무시 · 스키마 변경 감지</td><td><span class="tag soft">범위 밖</span></td><td><code>compare_bodies</code>는 정확 일치. 무시 스펙 확장으로 붙일 자리는 있음</td></tr>
+      <tr><td class="feat">버튼·탭 클릭 조작, Home 타일·포맷·프로파일 강조</td><td><span class="tag soft">범위 밖</span></td><td>화면 조작은 "이동 + 항목 + 필터/검색"(레벨 2)까지. 강조 대상은 엔티티(run/api/job/rule)만 — 컨트롤을 모델이 누르는 건 하지 않음</td></tr>
+      <tr><td class="feat">웹 단위 테스트</td><td><span class="tag human">후속</span></td><td>웹엔 테스트 하네스가 없음. 검증은 <code>npm run build</code>(타입) + Playwright 라이브 스모크. 훅 로직(<code>useScreenFocus</code>·<code>useScreenHighlight</code>)은 코드 추적으로만 검증됨 — 하네스 추가 권장</td></tr>
+      <tr><td class="feat"><code>screen_state.focus</code> 미전송 · <code>max_screen_visible</code> 미사용</td><td><span class="tag human">후속</span></td><td>포털이 "지금 열린 항목"은 안 보냄(타입·렌더는 준비됨). 40은 양쪽에 상수로 박혀 있어 config 필드는 서버 미러일 뿐</td></tr>
+      <tr><td class="feat">폐쇄망 LiteLLM 배포 검증</td><td><span class="tag human">후속</span></td><td>개발은 OpenRouter(qwen). 폐쇄망은 <code>.env</code> 두 줄(<code>ANTHROPIC_BASE_URL</code>/<code>AUTH_TOKEN</code>)만 바꾸는 설계지만 실제 프록시에서 돌려보진 않음</td></tr>
+      <tr><td class="feat">GitHub 원격</td><td><span class="tag human">후속</span></td><td>SSH(<code>ndms425</code>)로 1회 push 완료. 그 뒤 채팅↔화면 기능 11커밋은 아직 로컬 <code>main</code>에만</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout stop"><p><b>가장 중요한 "안 한 것":</b> 이 프로젝트에서 <em>못</em> 만든 게 아니라 <em>만들지 않기로 한</em> 것이 대리 승인입니다. 기능을 하나 빼서 안전 보장을 지킨 결정이니, 나중에 누가 "채팅에서 바로 승인되게 하자"고 하면 이 표의 첫 줄을 먼저 보여주세요.</p></div>
+
+  <h2>5. 코드를 열 때 지도</h2>
+  <pre class="tree"><code>atworks-agent/core/atworks_agent/     <span class="c"># 역할 패키지 — 여기서부터 읽기</span>
+  types.py        <span class="c"># 모든 데이터 모양 (JobSpec, RunResult, ValidationRule, ComparisonProfile, ScreenState…)</span>
+  config.py       <span class="c"># 상한·플래그. "모든 cap은 여기 필드" 규칙</span>
+  backend.py      <span class="c"># AtworksBackend ABC — aTworks와의 유일한 계약</span>
+  jobs.py rules.py profiles.py parity.py aggregation.py scoring.py   <span class="c"># 결정론 판정기들</span>
+  gates.py        <span class="c"># provenance / guardrail / approval 세 관문</span>
+  executor.py     <span class="c"># 모델이 부른 도구 이름 → 핸들러 (stage_*, apply_* …)</span>
+  enrichment.py   <span class="c"># 카드·지시 payload에 실제 값 채우기 (present_*, screen_*)</span>
+  prompt.py screen.py attachments.py   <span class="c"># 프롬프트 조립, 화면·첨부 블록</span>
+  tools/registry.py                    <span class="c"># 모델에게 보이는 도구 스키마 (config의 순함수)</span>
+atworks-agent/runtime/…/orchestrator.py  <span class="c"># 턴 루프 (모델 호출 ↔ 도구 실행)</span>
+atworks-agent/skills/&lt;name&gt;/SKILL.md    <span class="c"># 절차서 6개</span>
+host/atworks_host/
+  app.py          <span class="c"># FastAPI 라우트. *_action 함수 = 승인 마크 찍고→적용→지우기</span>
+  mock_backend.py <span class="c"># MockAtworks (데모용 스텁 데이터 포함)</span>
+  scheduler.py reports.py briefing.py sessions.py streaming.py
+web/atworks-web/  <span class="c"># Next.js 포털</span>
+  app/page.tsx    <span class="c"># 뷰 전환·채팅 훅·화면 지시 실행·screen_state 조립</span>
+  components/generative/   <span class="c"># 채팅 카드들 (index.tsx가 component 이름으로 분기)</span>
+  components/views/        <span class="c"># Home/APIs/Runs/Jobs/Rules (+Formats, Profiles)</span>
+  lib/useScreenFocus.ts lib/useScreenHighlight.ts
+web/web-shared/   <span class="c"># 공유 훅·전송 (api.ts chatStream, portal/merchant.ts onEvent)</span>
+refs/             <span class="c"># 읽기 전용 참조. 절대 수정 금지. commerce_common은 import만</span>
+docs/superpowers/specs · plans      <span class="c"># 각 기능의 설계서와 실행 계획 (왜 이렇게 했는지)</span></code></pre>
+
+  <h2>6. 어떻게 검증하나</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>무엇</th><th>명령</th><th>지금 상태</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">파이썬 테스트</td><td><code>.venv/Scripts/python.exe -m pytest -q</code> (저장소 루트)</td><td><span class="tag ok">543 통과</span></td></tr>
+      <tr><td class="feat">린트</td><td><code>ruff check atworks-agent host</code></td><td><span class="tag ok">clean</span></td></tr>
+      <tr><td class="feat">웹 빌드(타입 검사)</td><td><code>cd web/atworks-web &amp;&amp; npm run build</code></td><td><span class="tag ok">clean</span></td></tr>
+      <tr><td class="feat">라이브 스모크</td><td>호스트(<code>python -m atworks_host.main</code>, :8010) + 포털(<code>npm run dev</code>, :3110) + Playwright로 실제 채팅 구동·캡처</td><td><span class="tag ok">parity 7/7 · 화면 7/8</span> <span class="meta">(1건은 정보성)</span></td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout human"><p><b>초급 개발자가 꼭 알아야 할 함정:</b> 호스트는 <code>reload=False</code>라 <b>파이썬을 고치면 호스트를 재시작해야</b> 반영됩니다(포털은 자동 반영). 이걸 몰라서 "라우트가 404"인 줄 알았던 일이 이번에 두 번 있었습니다. 그리고 <b>라이브 스모크는 단위 테스트가 못 보는 버그를 잡습니다</b> — 컨텍스트에 허용 타깃이 하드코딩돼 모델이 parity job을 거부하던 버그, 같은 화면 이동 뒤 강조가 안 지워지던 버그가 모두 스모크에서만 드러났습니다.</p></div>
+
+  <h2>7. 용어 사전</h2>
+  <dl class="gloss">
+    <dt>provenance (근거)</dt><dd>모델이 언급·조작하는 id는 이 세션에서 도구 결과로 본 것(<code>seen_*</code>)이어야 한다는 규율. 지어낸 id를 막는 관문.</dd>
+    <dt>guardrail (가드레일)</dt><dd>config의 상한(API 100개, 매트릭스 400, 강조 8개…)을 스테이징과 적용 두 번 검사하는 것. 넉넉한 백엔드라도 이 배포의 규칙을 넘길 수 없게.</dd>
+    <dt>approval mark (승인 마크)</dt><dd><code>approved_*_ids</code>. 오직 호스트의 apply 라우트가 클릭 직전에 찍고 직후에 지움. 채팅 턴은 이 집합에 쓸 수 없음.</dd>
+    <dt>effective_from</dt><dd>규칙·프로파일이 발효된 시각. 그 이전 실행은 절대 재판정하지 않음 — "과거 불변".</dd>
+    <dt>re-diff (재비교)</dt><dd>서버를 다시 부르지 않고 저장된 응답 본문만 다시 비교하는 것. 무시 스펙 조정이 싸고 빠른 이유.</dd>
+    <dt>directive (화면 지시)</dt><dd><code>navigate_screen</code>·<code>highlight_screen</code>이 내는 <code>ui</code> 이벤트. 웹이 카드로 그리지 않고 <em>실행</em>함. 백엔드 상태는 절대 안 바꿈.</dd>
+    <dt>screen_state</dt><dd>포털이 매 턴 보내는 "지금 화면" 요약(뷰·필터·보이는 항목 ≤40). 모델이 화면을 인지하는 유일한 채널. 데이터일 뿐 지시가 아님.</dd>
+    <dt>stage / apply</dt><dd><code>stage_*</code>는 초안을 만들 뿐 아무것도 바꾸지 않음. <code>apply_*</code>만 상태를 바꾸며 승인 마크 뒤에서만 통과.</dd>
+  </dl>
+
+  <p class="meta" style="margin-top:40px">설계서: <code>docs/superpowers/specs/</code> · 실행 계획: <code>docs/superpowers/plans/</code> · 결정 기록: <code>CLAUDE.md</code>. 이 문서는 2026-09-06 기준이며 코드가 우선합니다.</p>
+</main>
