@@ -59,14 +59,22 @@ def _matrix(job: JobSpec, runs: list[RunResult]) -> dict:
     return {"envs": envs, "rows": rows, "differs_count": sum(1 for r in rows if r["differs"])}
 
 
-def _parity(job: JobSpec, runs: list[RunResult], ignore_paths: Sequence[str] = ()) -> dict | None:
+def _parity(
+    job: JobSpec,
+    runs: list[RunResult],
+    ignore_paths: Sequence[str] = (),
+    per_api_ignore: dict[str, list[str]] | None = None,
+) -> dict | None:
     """The value-level comparison, present only for a two-target job (`a_env`/`b_env`).
     Reuses `_latest_selection` so a row's cells are the same runs `_matrix` would show. A row
     needs a run on BOTH target envs to be judged at all; missing `response_body` on either side
     falls back to a status-only verdict (no fabricated body diff). `clusters` groups only the
-    `value_diff` rows — a `status_diff`/`equal` row carries no `diff_paths` to cluster on."""
+    `value_diff` rows — a `status_diff`/`equal` row carries no `diff_paths` to cluster on.
+    `per_api_ignore` paths are scoped per row's own api_id — never merged across APIs, or a path
+    meant for one API would silently suppress a real diff on every other API too."""
     if len(job.target_envs) != 2:
         return None
+    per_api_ignore = per_api_ignore or {}
     a_env, b_env = job.target_envs
     latest, order = _latest_selection(runs)
     rows: list[dict] = []
@@ -82,7 +90,8 @@ def _parity(job: JobSpec, runs: list[RunResult], ignore_paths: Sequence[str] = (
             verdict = "status_diff"
             diff_paths = []
         else:
-            body_diff = compare_bodies(a_run.response_body, b_run.response_body, ignore_paths)
+            row_ignore = [*ignore_paths, *per_api_ignore.get(api_id, [])]
+            body_diff = compare_bodies(a_run.response_body, b_run.response_body, row_ignore)
             verdict = "equal" if body_diff.equal else "value_diff"
             diff_paths = body_diff.diff_paths
         rows.append({
@@ -104,6 +113,7 @@ def _parity(job: JobSpec, runs: list[RunResult], ignore_paths: Sequence[str] = (
         "status_diff_count": sum(1 for r in rows if r["verdict"] == "status_diff"),
         "clusters": [c.model_dump(mode="json") for c in clusters],
         "ignore_paths": list(ignore_paths),
+        "per_api_ignore": {k: list(v) for k, v in per_api_ignore.items()},
     }
 
 
@@ -146,7 +156,9 @@ class Reports:
         }
         return self._write_report(folder, data)
 
-    def rediff(self, job_id: str, ignore_paths: Sequence[str]) -> Path:
+    def rediff(
+        self, job_id: str, ignore_paths: Sequence[str], per_api_ignore: dict[str, list[str]] | None = None
+    ) -> Path:
         """Recompute ONLY the parity block, from bodies already stored in `data.json` — no
         backend call, no new run. Lets an operator narrow noise (a volatile field) without
         re-hitting either server. `matrix`/`summary`/`runs` are untouched; the stored job and
@@ -155,7 +167,7 @@ class Reports:
         data = json.loads((folder / "data.json").read_text(encoding="utf-8"))
         job = JobSpec.model_validate(data["job"])
         runs = [RunResult.model_validate(r) for r in data["runs"]]
-        data["parity"] = _parity(job, runs, ignore_paths)
+        data["parity"] = _parity(job, runs, ignore_paths, per_api_ignore)
         data["provenance"] = {**data["provenance"], "generated_at": datetime.now(UTC).isoformat()}
         return self._write_report(folder, data)
 

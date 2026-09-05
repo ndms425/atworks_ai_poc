@@ -70,6 +70,52 @@ async def test_apply_profile_rediffs_stored_report_without_new_runs(tmp_path):
     assert after["parity"]["ignore_paths"] == ["$.serverTime"]
 
 
+async def test_apply_profile_per_api_ignore_does_not_leak_to_other_apis(tmp_path):
+    """M4.4 regression: a per-API ignore path scoped to one api_id must not suppress the same
+    path's real diff on a different api_id. api-002 and api-008 both differ only on the volatile
+    $.serverTime field between legacy/renewed (per fixtures/apis.json + MockAtworks.stub_response);
+    applying a profile whose per_api_ignore only names api-002 must clear api-002's diff while
+    leaving api-008's $.serverTime value_diff untouched."""
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path)
+    backend.reports = reports
+
+    job = await _parity_job(backend, reports)
+
+    initial = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    initial_rows = {r["api_id"]: r for r in initial["parity"]["rows"]}
+    assert initial_rows["api-002"]["verdict"] == "value_diff"
+    assert initial_rows["api-002"]["diff_paths"] == ["$.serverTime"]
+    assert initial_rows["api-008"]["verdict"] == "value_diff"
+    assert initial_rows["api-008"]["diff_paths"] == ["$.serverTime"]
+
+    run_count_before = len(backend.runs)
+
+    draft = ProfileDraft(
+        job_id=job.job_id, ignore_paths=[], per_api_ignore={"api-002": ["$.serverTime"]},
+        summary="ignore serverTime on api-002 only")
+    staged = await backend.stage_profile(SESSION, draft, ActorKind.OPERATOR)
+    applied = await backend.apply_profile(SESSION, staged.profile_id)
+
+    assert applied.status is ProfileStatus.APPLIED
+    assert applied.effective_from is not None
+    assert len(backend.runs) == run_count_before   # no new runs
+
+    after = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
+    rows = {r["api_id"]: r for r in after["parity"]["rows"]}
+
+    # api-002: its own per-API ignore path clears its only diff.
+    assert rows["api-002"]["verdict"] == "equal"
+    assert "$.serverTime" not in rows["api-002"]["diff_paths"]
+
+    # api-008: the per-API path was scoped to api-002 and must NOT leak here.
+    assert rows["api-008"]["verdict"] == "value_diff"
+    assert "$.serverTime" in rows["api-008"]["diff_paths"]
+
+    assert after["parity"]["ignore_paths"] == []
+    assert after["parity"]["per_api_ignore"] == {"api-002": ["$.serverTime"]}
+
+
 async def test_apply_profile_does_not_crash_when_no_report_exists(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
     reports = Reports(tmp_path)

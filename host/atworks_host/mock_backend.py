@@ -232,8 +232,7 @@ class MockAtworks(AtworksBackend):
         실패시키지 않는다."""
         applied = self.profile_ledger.apply(profile_id, actor=session.operator)
         if self.reports is not None and self.reports.read_html(applied.job_id) is not None:
-            paths = [*applied.ignore_paths, *(p for paths in applied.per_api_ignore.values() for p in paths)]
-            self.reports.rediff(applied.job_id, paths)
+            self.reports.rediff(applied.job_id, applied.ignore_paths, applied.per_api_ignore)
         return applied
 
     async def discard_profile(self, session, profile_id, actor_kind):
