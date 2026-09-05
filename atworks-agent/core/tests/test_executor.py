@@ -523,6 +523,32 @@ async def test_stage_rule_resolves_a_saved_library_format_by_name(backend, confi
     assert evaluate(rule, "abc") is False
 
 
+async def test_stage_rule_resolving_a_saved_format_clears_save_format_as(backend, config, skills, session, state):
+    # Fix round 1: referencing an existing library format must not also carry a "save this
+    # under a new name" instruction -- the pattern already exists, so re-saving it is
+    # meaningless and confusing. Resolution must clear save_format_as, even when the caller
+    # supplied one alongside `format`.
+    from atworks_agent.rules import FormatDefinition
+
+    added, reason = await backend.save_format(session, FormatDefinition(
+        name="phone-digits", pattern=r"^\d{3}-\d{4}$",
+        pass_examples=["123-4567"], fail_examples=["abc"], created_by=session.operator,
+    ))
+    assert added is True and reason is None
+
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {
+        "api_id": "api-1", "param": "amount", "kind": "format",
+        "format": "phone-digits", "save_format_as": "other-name", "summary": "s",
+    })
+    assert not out.refused
+    rule = state.seen_rules["rule-0001"]
+    assert rule.format_name == "phone-digits"
+    assert rule.pattern == r"^\d{3}-\d{4}$"
+    assert rule.save_format_as is None
+
+
 async def test_stage_rule_unknown_format_name_is_a_named_error(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     await ex.execute("search_apis", {"query": ""})

@@ -538,6 +538,10 @@ class AtworksToolExecutor(BaseToolExecutor):
             raw_pattern = defn.pattern
             pass_examples = list(defn.pass_examples)
             fail_examples = list(defn.fail_examples)
+            # Referencing an existing library format must not also carry a "save this under a
+            # new name" instruction -- the pattern already exists, so re-saving is meaningless
+            # and confusing (Task 3 fix round 1 ruling). Clear it before the draft is built.
+            raw_save_format_as = None
         elif (
             # RuleDraft's own validator only guarantees >=1 pass/fail example for a raw-pattern
             # format rule; this deployment's floor (config.min_format_examples) can be higher, so
