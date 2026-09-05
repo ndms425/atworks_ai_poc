@@ -3,10 +3,12 @@
 
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { AssistantPanel as PanelShell, type MerchantChat, type Prefill } from "web-shared";
+import { actOnRule } from "@/lib/api";
 import { humanizeFormAnswers } from "@/lib/formAnswers";
-import type { AttachedItem, JobSpec } from "@/lib/types";
+import type { RuleAction } from "@/lib/useRuleActions";
+import type { AttachedItem, JobSpec, ValidationRule } from "@/lib/types";
 import GenerativeBlock from "./generative";
 
 const COPY = {
@@ -50,6 +52,13 @@ export default function AssistantPanel({
     }),
     [chat],
   );
+  // /changes/ 가 아니라 /rules/{id}/{action}으로 나간다 (rule_action은 job_action의 미러지 같은
+  // 경로가 아니다) — web-shared의 useMerchantChat.actOnChange가 {ok, change}에서 change를 꺼내는
+  // 것과 같은 방식으로 여기서도 꺼낸다.
+  const onRuleAction = useCallback(async (ruleId: string, action: RuleAction): Promise<ValidationRule | null> => {
+    const data = await actOnRule(ruleId, action);
+    return data?.change ?? null;
+  }, []);
   return (
     <PanelShell
       chat={shown}
@@ -60,6 +69,7 @@ export default function AssistantPanel({
           block={segment.block}
           status={segment.status}
           onChangeAction={chat.actOnChange}
+          onRuleAction={onRuleAction}
           onPrefill={onPrefill}
           onSend={(text) => void chat.send(text)}
           onAttach={onAttach}

@@ -199,6 +199,56 @@ export interface RunGroupsPayload {
   items: RunGroup[];
 }
 
+export type RuleKind = "compare" | "membership" | "required" | "format";
+
+export interface ValidationRule {
+  rule_id: string;
+  api_id: string;
+  param: string;
+  kind: RuleKind;
+  op?: string | null;
+  value?: string | null;
+  values: string[];
+  format?: string | null;
+  pattern?: string | null;
+  review_required: boolean;
+  message: string;
+  status: "staged" | "applied" | "discarded";
+  change_id: string;
+  effective_from?: string | null;
+  confidence?: Record<string, number>;
+  assumptions?: string[];
+  created_at: string;
+  created_by: string;
+  created_by_kind: "operator" | "agent";
+  applied_at?: string | null;
+  applied_by?: string | null;
+  discarded_at?: string | null;
+  discarded_by?: string | null;
+  discarded_by_kind?: "operator" | "agent" | null;
+}
+
+/** simulate_rule의 읽기 전용 결과 — 아무것도 저장하지 않는다. */
+export interface RuleImpact {
+  window_runs: number;
+  known_inputs: number;
+  would_fail: number;
+  excluded_unknown: number;
+}
+
+export interface RulePreviewPayload {
+  rule_id: string;
+  change_id: string;
+  rule: ValidationRule;
+  change?: ValidationRule;
+  api?: ApiSpec;
+  review_required: boolean;
+  low_confidence: string[];
+  impact?: RuleImpact;
+  headline?: string;
+  note?: string;
+}
+
 export interface Briefing {
   date: string;
   generated_at: string;
