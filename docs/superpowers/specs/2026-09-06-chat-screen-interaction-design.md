@@ -58,7 +58,9 @@ attachment / `ref_id` system (`attachments.py`, `?attach=` deep link).
 
 - `view`는 포털의 `PortalView` 그대로. `focus`는 그 화면에서 열어/스크롤할 항목 하나.
 - **`filter` 어휘는 각 뷰가 이미 가진 것만이다** — 새 필터를 발명하지 않는다:
-  - `runs` → `status` (RunsView의 기존 `Filter` 값: all/pass/fail/error/non_pass)
+  - `runs` → `status` (RunsView의 기존 `Filter` 값 그대로: `all` / `pass` / `fail` / `error` — `non_pass`는
+    RunsView에 없으므로 받지 않는다; 모델이 "실패·에러"를 원하면 `fail`이나 `error` 하나를 고르거나 둘을
+    산문으로 안내한다)
   - `apis` → `query` (ApisView의 `SearchField` 검색어)
   - `jobs`, `rules`, `home` → 필터 없음(`focus`만 유효). 뷰에 없는 필터가 오면 무시하고 note로 알린다.
 - enrichment: `focus.ref_id`는 provenance 게이트(§2). `kind`와 `view`가 맞아야 한다(`run`은 runs에,
