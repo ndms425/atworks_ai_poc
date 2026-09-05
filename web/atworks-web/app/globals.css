@@ -53,3 +53,31 @@ body {
   font-size: 14px;
   line-height: 1.4;
 }
+
+/*
+ * Task 8: numbered screen-highlight boxes. `.ac-highlight` is applied by useScreenHighlight to a
+ * `[data-ref]` row (or, for a `<tr>` which can't reliably host `position: relative` + `::before`
+ * across browsers, that row's first `<td>` — see the hook) — an outline plus a small numbered
+ * red badge pinned to its top-left corner. No `--font-sans` token exists in this codebase (only
+ * `--font-body`, used on body above), so the badge falls back to the same stack.
+ */
+.ac-highlight {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+  position: relative;
+}
+.ac-highlight::before {
+  content: attr(data-highlight-n);
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--danger);
+  color: #fff;
+  font: 600 11px/18px var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  text-align: center;
+  padding: 0 5px;
+  z-index: 1;
+}

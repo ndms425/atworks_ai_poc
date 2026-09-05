@@ -6,12 +6,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantRail, Inspector, type PortalNavItem, PortalShell, type Prefill, useMerchantChat, useSession } from "web-shared";
 import AssistantPanel from "@/components/AssistantPanel";
+import ScreenHighlightOverlay from "@/components/ScreenHighlightOverlay";
 import ApisView from "@/components/views/ApisView";
 import HomeView from "@/components/views/HomeView";
 import JobsView from "@/components/views/JobsView";
 import RulesView from "@/components/views/RulesView";
 import RunsView from "@/components/views/RunsView";
 import { actOnRule, api, UNREACHABLE } from "@/lib/api";
+import { useScreenHighlight } from "@/lib/useScreenHighlight";
 import type { RuleAction } from "@/lib/useRuleActions";
 import type {
   AttachedItem,
@@ -77,6 +79,20 @@ export default function PortalPage() {
     onScreenDirective,
   });
 
+  useScreenHighlight(highlights?.targets ?? null, { view, refreshKey });
+
+  // A nav-bar click by the operator clears stale boxes. A same-turn `navigate` directive already
+  // set navigatedByDirectiveRef right before its setView, so that one view-change is swallowed
+  // here instead — the `highlight` directive that follows in the same turn lands after this
+  // effect runs and survives. (Harmless on the very first render: highlights is null then.)
+  useEffect(() => {
+    if (navigatedByDirectiveRef.current) {
+      navigatedByDirectiveRef.current = false;
+      return;
+    }
+    setHighlights(null);
+  }, [view]);
+
   // The mounted view reports what it actually shows; this pushes that (plus the current view)
   // onto api.screenState, which rides every chat turn as `screen_state`. Clearing screenIntent
   // here (rather than a callback the view calls back) is the "consumed" signal from ruling 1.
@@ -104,6 +120,7 @@ export default function PortalPage() {
   const send = useCallback(
     (text: string) => {
       sentRef.current = api.pendingAttachments as AttachedItem[];
+      setHighlights(null);
       return chat.send(text);
     },
     [chat.send],
@@ -238,6 +255,7 @@ export default function PortalPage() {
           </>
         ) : null}
       </PortalShell>
+      {highlights ? <ScreenHighlightOverlay payload={highlights} onDismiss={() => setHighlights(null)} /> : null}
       {activityOpen ? (
         <Inspector
           turnCount={chat.turnCount}
