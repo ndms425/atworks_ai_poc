@@ -153,6 +153,19 @@ def test_check_apply_rule_rechecks_guardrails_under_current_config():
     assert "rule" in held.result_text.lower() and "job" not in held.result_text.lower()
 
 
+def test_check_apply_rule_with_previously_staged_raw_pattern_format_rule():
+    # A raw-pattern format rule persists its pass/fail examples; check_apply_rule rebuilds a
+    # RuleDraft from the remembered rule and must carry those through, or RuleDraft's own
+    # example-requirement for raw patterns raises even though the rule was validly staged.
+    state = AtworksSessionState()
+    pattern_rule = ValidationRule(rule_id="rule-0003", api_id="api-1", param="code", kind="format",
+                                  pattern="^[A-Z]{3}$", pass_examples=["ABC"], fail_examples=["abc"],
+                                  message="x", created_at=datetime.now(UTC), created_by="op")
+    state.remember_rule(pattern_rule)
+    state.approved_rule_ids.add("rule-0003")
+    assert check_apply_rule(state, CFG, "rule-0003") is None
+
+
 def test_check_discard_rule_and_actor_kind():
     state = AtworksSessionState()
     assert check_discard_rule(state, "rule-x").blocked == PROVENANCE_GATE

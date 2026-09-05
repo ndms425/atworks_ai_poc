@@ -172,7 +172,8 @@ def check_apply_rule(state: AtworksSessionState, config: AtworksAgentConfig, rul
     if known is None:
         return ToolOutcome.held(PROVENANCE_GATE, f"rule {rule_id} was not staged or listed this session.")
     draft = RuleDraft(api_id=known.api_id, param=known.param, kind=known.kind, op=known.op, value=known.value,
-                      values=list(known.values), format=known.format, pattern=known.pattern)
+                      values=list(known.values), format=known.format, pattern=known.pattern,
+                      pass_examples=list(known.pass_examples), fail_examples=list(known.fail_examples))
     # api stays None here on purpose, exactly like check_apply_job: this session may know the
     # rule without ever having seen its API's catalogue, and a missing catalogue must never
     # become a param-provenance violation. The ledger re-checks the param rule with its catalogue.
