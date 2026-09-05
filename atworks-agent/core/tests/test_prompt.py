@@ -97,6 +97,16 @@ def test_static_prompt_drops_format_hard_line_when_rules_switched_off():
     assert "Bulk-add formats with stage_format_batch" not in text
 
 
+def test_static_prompt_carries_screen_hard_line_when_enabled():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_screen_directives=True), SKILLS)
+    assert "highlight_screen" in text and "①②③" in text
+
+
+def test_static_prompt_drops_screen_hard_line_when_switched_off():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_screen_directives=False), SKILLS)
+    assert "①②③" not in text
+
+
 def test_dynamic_context_carries_screen_state_and_is_byte_stable_without_it():
     from atworks_agent import ScreenState, ScreenTarget
     from atworks_agent.prompt import build_dynamic_context

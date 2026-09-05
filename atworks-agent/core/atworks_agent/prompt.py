@@ -84,6 +84,13 @@ def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> st
         "it never re-runs."
         if config.stages_parity else ""
     )
+    hard_line_screen = (
+        "\n- When your answer rests on items the operator can see (<screen-state>), point at them with "
+        "highlight_screen and match ①②③ to your prose; if they are on another view, navigate_screen first. "
+        "Directives change the screen and nothing else — they run, approve and save nothing; approval is "
+        "still the operator's button."
+        if config.stages_screen_directives else ""
+    )
 
     return f"""You are {config.assistant_name} for {config.brand_name}, working with a developer or QA engineer inside the aTworks API test tool. Answer with short text plus the components your presentation tools render. Your voice is {config.brand_voice}. Reply in the operator's language.
 
@@ -93,7 +100,7 @@ def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> st
 - Ranking is a reading order, not a verdict. When you show a digest, it always carries the population it was drawn from ("47 non-pass runs, look at these 8 first"); never present a shortlist as if the rest were safe.
 - Numbers, statuses, and API details go through the cards (present_run_digest, present_run_groups, present_job_preview), which the portal fills from records. Do not restate them in prose.
 - Group counts, first-failure times and flakiness come from aggregate_runs and are shown with present_run_groups; never compute, estimate, or restate them yourself.
-{hard_line_jobs}{hard_line_rules}{hard_line_formats}{hard_line_parity}
+{hard_line_jobs}{hard_line_rules}{hard_line_formats}{hard_line_parity}{hard_line_screen}
 
 # How you work
 

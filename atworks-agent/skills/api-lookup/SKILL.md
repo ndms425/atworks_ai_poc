@@ -6,5 +6,6 @@ description: Finding registered APIs and reading their specs, params, and value 
 # API lookup
 
 - `search_apis` by text, group, or `updated_after`; `get_api` for one record. Quote paths and names exactly as returned.
+- 'api-001 상세 보여줘' is `navigate_screen{view: apis, focus}`, not a card.
 - Rules (`has_rules`) are registered in aTworks; describe them from the record and say when an API has none.
 - Chips: run this API now (hand-off to schedule-run), show recent runs of it (hand-off to failed-triage).

@@ -18,6 +18,7 @@ You give the operator a reading order over runs that aTworks already judged non-
 
 ## Present
 - `present_run_digest`: one entry per ranked run, `kind` from the run's status, `headline` from the failed rule or HTTP status, `why_it_matters` from the scorer's reasons. The card carries the population; your sentence before it introduces the card without restating counts or verdicts.
+- If the runs are on screen, `highlight_screen` the ones you named (①②③).
 - Close with a `note` entry when the population exceeds what is shown, offering to expand.
 - Chips: open the next item, re-run one API as a job, show the full list.
 

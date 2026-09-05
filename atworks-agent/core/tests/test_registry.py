@@ -198,3 +198,10 @@ def test_registry_highlight_max_items_tracks_config():
 def test_highlight_screen_absent_when_screen_directives_disabled():
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=False), [])]
     assert "highlight_screen" not in names
+
+
+def test_screen_directive_tools_pair_toggles_together():
+    off_names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=False), [])]
+    assert "navigate_screen" not in off_names and "highlight_screen" not in off_names
+    on_names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=True), [])]
+    assert "navigate_screen" in on_names and "highlight_screen" in on_names
