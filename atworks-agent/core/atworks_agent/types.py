@@ -42,6 +42,7 @@ class RunResult(BaseModel):
     failed_rules: list[str] = Field(default_factory=list)
     http_status: int | None = None
     duration_ms: int | None = None
+    response_body: dict[str, Any] | None = None
     job_id: str | None = None
 
 

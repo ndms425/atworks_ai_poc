@@ -12,7 +12,7 @@ from atworks_agent import (
     RunStatus,
     TestDataSet,
 )
-from atworks_host.mock_backend import MockAtworks, stub_verdict
+from atworks_host.mock_backend import MockAtworks, stub_response, stub_verdict
 
 KST = timezone(timedelta(hours=9))
 SESSION = AtworksSessionContext(session_id="s", project_id="mes", operator="minseong", now=datetime(2026, 9, 3, 14, tzinfo=KST))
@@ -153,6 +153,59 @@ async def test_stub_verdict_differs_between_dev_and_stg_for_api_007():
     api = b.apis["api-007"]
     assert stub_verdict(api, "dev", None)[0] is RunStatus.PASS
     assert stub_verdict(api, "stg", None) == (RunStatus.ERROR, [], 503)
+
+
+async def test_execute_job_once_attaches_a_response_body_to_every_run():
+    b = _backend()
+    job = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    await b.apply_job(SESSION, job.job_id)
+    produced = await b.execute_job_once(SESSION, job.job_id)
+    assert len(produced) == 1
+    body = produced[0].response_body
+    assert body is not None
+    assert body["path"] == b.apis["api-001"].path
+    assert body["serverTime"].startswith("2026-09-05T00:00:")
+
+
+async def test_stub_response_is_deterministic_for_a_fixed_seq():
+    b = _backend()
+    api = b.apis["api-001"]
+    data = TestDataSet(label="S1", values={"amount": "1000"})
+    assert stub_response(api, "dev", data, 5) == stub_response(api, "dev", data, 5)
+
+
+async def test_stub_response_server_time_is_volatile_noise_across_seq():
+    b = _backend()
+    api = b.apis["api-001"]
+    data = TestDataSet(label="S1", values={"amount": "1000"})
+    first = stub_response(api, "dev", data, 1)
+    second = stub_response(api, "dev", data, 2)
+    assert first["serverTime"] != second["serverTime"]
+    # everything but the volatile serverTime field is unchanged
+    assert {k: v for k, v in first.items() if k != "serverTime"} == {k: v for k, v in second.items() if k != "serverTime"}
+
+
+async def test_stub_response_api_004_has_a_real_value_diff_on_renewed():
+    b = _backend()
+    api = b.apis["api-004"]
+    data = TestDataSet(label="S1", values={"paymentId": "P1", "amount": "1000"})
+    dev_body = stub_response(api, "dev", data, 9)
+    renewed_body = stub_response(api, "renewed", data, 9)
+    assert dev_body["limit"] == 1000
+    assert renewed_body["limit"] == 900
+    # same seq -> serverTime and everything else match; only the real diff differs
+    diffs = {k for k in dev_body if dev_body[k] != renewed_body.get(k)}
+    assert diffs == {"limit"}
+
+
+async def test_stub_response_normal_api_matches_across_envs_except_server_time():
+    b = _backend()
+    api = b.apis["api-001"]
+    data = TestDataSet(label="S1", values={"amount": "1000"})
+    dev_body = stub_response(api, "dev", data, 3)
+    stg_body = stub_response(api, "stg", data, 7)   # different seq too
+    diffs = {k for k in dev_body if dev_body[k] != stg_body.get(k)}
+    assert diffs == {"serverTime"}
 
 
 async def test_execute_job_once_enforces_the_matrix_cap_at_execution_time():

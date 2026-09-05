@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from atworks_agent import (
     ActorKind,
@@ -60,6 +61,19 @@ def stub_verdict(api: ApiSpec, env: str, data: TestDataSet | None) -> tuple[RunS
     if api.api_id == "api-007" and env == "stg":
         return RunStatus.ERROR, [], 503
     return RunStatus.PASS, [], 200
+
+
+def stub_response(api: ApiSpec, env: str, data: TestDataSet | None, seq: int) -> dict:
+    """Deterministic per-target response body for parity demos. A volatile field (serverTime)
+    differs every call (noise); a `_renewed`-only value difference on some APIs is a REAL diff."""
+    body: dict[str, Any] = {
+        "path": api.path, "serverTime": f"2026-09-05T00:00:{seq % 60:02d}",  # volatile → noise
+        "echo": {k: v for k, v in (data.values.items() if data else [])},
+    }
+    # a real, deterministic value difference on the renewed server for one payment API:
+    if api.api_id == "api-004":
+        body["limit"] = 1000 if env != "renewed" else 900   # renewed changed the value → real diff
+    return body
 
 
 class MockAtworks(AtworksBackend):
@@ -296,7 +310,8 @@ class MockAtworks(AtworksBackend):
                         run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
                         target_env=env, test_data_label=data.label if data is not None else None,
                         status=status, failed_rules=rules, http_status=http,
-                        duration_ms=100 + self._run_seq % 50, job_id=job_id)
+                        duration_ms=100 + self._run_seq % 50,
+                        response_body=stub_response(api, env, data, self._run_seq), job_id=job_id)
                     self.runs[run.run_id] = run
                     produced.append(run)
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
