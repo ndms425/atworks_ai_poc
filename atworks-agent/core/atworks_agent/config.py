@@ -44,6 +44,15 @@ class AtworksAgentConfig(BaseAgentConfig):
     default_scorer: str = "risk_v1"
     max_rank_items: int = Field(default=8, ge=1, le=20)
 
+    # -- 검증 규칙 (chat-authored, apply-time effective) ------------------------------
+    enable_rules: bool = True
+    rule_review_policy: JobReviewPolicy = "always"
+    max_membership_values: int = Field(default=50, ge=1)
+    max_rules_per_api: int = Field(default=50, ge=1)
+    allowed_rule_kinds: tuple[str, ...] = ("compare", "membership", "required", "format")
+    allowed_compare_ops: tuple[str, ...] = (">=", ">", "<=", "<", "==", "!=")
+    allowed_named_formats: tuple[str, ...] = ("email", "date", "iso8601", "uuid", "number")
+
     # -- 집계 (aggregate_runs · /runs/insights · 브리핑) --------------------------------
     max_aggregate_runs: int = Field(default=2000, ge=1)           # list_runs limit for aggregation
     max_aggregate_window_days: int = Field(default=30, ge=1)      # since is clamped to now - N days
@@ -79,6 +88,10 @@ class AtworksAgentConfig(BaseAgentConfig):
     def stages_jobs(self) -> bool:
         return self.enable_jobs
 
+    @property
+    def stages_rules(self) -> bool:
+        return self.enable_rules
+
     def thinking_request_fields(self) -> dict:
         """BaseAgentConfig는 항상 `thinking` 필드를 보낸다. 비-Anthropic 모델은 그 필드를 거부할 수
         있으므로 스위치가 꺼져 있으면 아무것도 보내지 않는다."""
@@ -88,4 +101,8 @@ class AtworksAgentConfig(BaseAgentConfig):
         names: set[str] = set()
         if not self.enable_jobs:
             names |= {"stage_job", "apply_job", "discard_job", "get_pending_jobs", "present_job_preview"}
+        if not self.enable_rules:
+            names |= {
+                "stage_rule", "apply_rule", "discard_rule", "get_pending_rules", "present_rule_preview",
+            }
         return frozenset(names)

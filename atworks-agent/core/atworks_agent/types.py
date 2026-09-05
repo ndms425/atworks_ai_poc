@@ -92,6 +92,12 @@ class JobStatus(StrEnum):
     DISCARDED = "discarded"
 
 
+class RuleStatus(StrEnum):
+    STAGED = "staged"
+    APPLIED = "applied"
+    DISCARDED = "discarded"
+
+
 class ActorKind(StrEnum):
     OPERATOR = "operator"
     AGENT = "agent"
