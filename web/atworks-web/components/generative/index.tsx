@@ -5,13 +5,17 @@
 
 import { type ChangeAction, type GenerativeBlockProps, UnknownBlock } from "web-shared";
 import type { FormatBatchAction } from "@/lib/useFormatBatchActions";
+import type { ProfileAction } from "@/lib/useProfileActions";
 import type { RuleAction } from "@/lib/useRuleActions";
 import type {
   AttachedItem,
+  ComparisonProfile,
   FormatBatch,
   FormatBatchPayload,
   JobPreviewPayload,
   JobSpec,
+  ParitySummaryPayload,
+  ProfilePreviewPayload,
   QuestionFormPayload,
   RulePreviewPayload,
   RunDigestPayload,
@@ -20,6 +24,8 @@ import type {
 } from "@/lib/types";
 import FormatBatchCard from "./FormatBatchCard";
 import JobPreviewCard from "./JobPreviewCard";
+import ParitySummaryCard from "./ParitySummaryCard";
+import ProfilePreviewCard from "./ProfilePreviewCard";
 import QuestionFormCard from "./QuestionFormCard";
 import RulePreviewCard from "./RulePreviewCard";
 import RunDigestCard from "./RunDigestCard";
@@ -31,6 +37,7 @@ export default function GenerativeBlock({
   onChangeAction,
   onRuleAction,
   onFormatBatchAction,
+  onProfileAction,
   onPrefill,
   onSend,
   onAttach,
@@ -40,6 +47,8 @@ export default function GenerativeBlock({
   onRuleAction?: (id: string, action: RuleAction) => Promise<ValidationRule | null>;
   /** /changes/ 도 /rules/ 도 아니라 /format-batches/{id}/{action}으로 나간다. */
   onFormatBatchAction?: (id: string, action: FormatBatchAction) => Promise<FormatBatch | null>;
+  /** /changes/ 도 /rules/ 도 /format-batches/ 도 아니라 /profiles/{id}/{action}으로 나간다. */
+  onProfileAction?: (id: string, action: ProfileAction) => Promise<ComparisonProfile | null>;
   onPrefill?: (text: string) => void;
   onSend?: (text: string) => void;
   onAttach?: (item: Omit<AttachedItem, "order">) => void;
@@ -55,6 +64,10 @@ export default function GenerativeBlock({
       return <RulePreviewCard payload={block.payload as RulePreviewPayload} onRuleAct={onRuleAction} />;
     case "format_batch":
       return <FormatBatchCard payload={block.payload as FormatBatchPayload} onFormatBatchAct={onFormatBatchAction} />;
+    case "parity_summary":
+      return <ParitySummaryCard payload={block.payload as ParitySummaryPayload} />;
+    case "profile_preview":
+      return <ProfilePreviewCard payload={block.payload as ProfilePreviewPayload} onProfileAct={onProfileAction} />;
     case "question_form":
       return <QuestionFormCard payload={block.payload as QuestionFormPayload} onSubmit={onSend} />;
     default:

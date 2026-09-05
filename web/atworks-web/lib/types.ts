@@ -312,6 +312,74 @@ export interface FormatBatchPayload {
   note?: string;
 }
 
+/** Mirrors atworks_agent.types.ComparisonProfile — serialization.profile_record adds change_id. */
+export interface ComparisonProfile {
+  profile_id: string;
+  change_id: string;
+  job_id: string;
+  ignore_paths: string[];
+  per_api_ignore: Record<string, string[]>;
+  status: "staged" | "applied" | "discarded";
+  summary: string;
+  effective_from?: string | null;
+  created_at: string;
+  created_by: string;
+  created_by_kind?: "operator" | "agent";
+  applied_at?: string | null;
+  applied_by?: string | null;
+  discarded_at?: string | null;
+  discarded_by?: string | null;
+  discarded_by_kind?: "operator" | "agent" | null;
+}
+
+export type ParityVerdict = "equal" | "status_diff" | "value_diff";
+
+export interface ParityRow {
+  api_id: string;
+  test_data_label?: string | null;
+  verdict: ParityVerdict;
+  diff_paths: string[];
+  a_run_id?: string;
+  b_run_id?: string;
+}
+
+/** Mirrors atworks_agent.parity.DiffCluster. */
+export interface DiffCluster {
+  paths: string[];
+  count: number;
+  row_keys: string[];
+}
+
+/** The report's `parity` block — mirrors host/atworks_host/reports.py `_parity`. */
+export interface ParityBlock {
+  targets: string[];
+  rows: ParityRow[];
+  clusters: DiffCluster[];
+  value_diff_count: number;
+  status_diff_count: number;
+  ignore_paths: string[];
+  per_api_ignore?: Record<string, string[]>;
+}
+
+export interface ParitySummaryPayload {
+  job_id: string;
+  title?: string;
+  note?: string;
+  parity: ParityBlock;
+  clusters: DiffCluster[];
+  value_diff_count: number;
+  status_diff_count: number;
+}
+
+export interface ProfilePreviewPayload {
+  profile_id: string;
+  change_id: string;
+  headline?: string;
+  note?: string;
+  profile: ComparisonProfile;
+  change?: ComparisonProfile;
+}
+
 export interface Briefing {
   date: string;
   generated_at: string;

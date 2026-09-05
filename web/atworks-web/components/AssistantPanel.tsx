@@ -5,11 +5,12 @@
 
 import { useCallback, useMemo } from "react";
 import { AssistantPanel as PanelShell, type MerchantChat, type Prefill } from "web-shared";
-import { actOnFormatBatch, actOnRule } from "@/lib/api";
+import { actOnFormatBatch, actOnProfile, actOnRule } from "@/lib/api";
 import { humanizeFormAnswers } from "@/lib/formAnswers";
 import type { FormatBatchAction } from "@/lib/useFormatBatchActions";
+import type { ProfileAction } from "@/lib/useProfileActions";
 import type { RuleAction } from "@/lib/useRuleActions";
-import type { AttachedItem, FormatBatch, JobSpec, ValidationRule } from "@/lib/types";
+import type { AttachedItem, ComparisonProfile, FormatBatch, JobSpec, ValidationRule } from "@/lib/types";
 import GenerativeBlock from "./generative";
 
 const COPY = {
@@ -67,6 +68,13 @@ export default function AssistantPanel({
     const data = await actOnFormatBatch(batchId, action);
     return data?.change ?? null;
   }, []);
+  // /changes/ 도 /rules/ 도 /format-batches/ 도 아니라 /profiles/{id}/{action}으로 나간다
+  // (profile_action은 rule_action/format_batch_action의 미러지 같은 경로가 아니다) — 같은 방식으로
+  // {ok, change}에서 change를 꺼낸다.
+  const onProfileAction = useCallback(async (profileId: string, action: ProfileAction): Promise<ComparisonProfile | null> => {
+    const data = await actOnProfile(profileId, action);
+    return data?.change ?? null;
+  }, []);
   return (
     <PanelShell
       chat={shown}
@@ -79,6 +87,7 @@ export default function AssistantPanel({
           onChangeAction={chat.actOnChange}
           onRuleAction={onRuleAction}
           onFormatBatchAction={onFormatBatchAction}
+          onProfileAction={onProfileAction}
           onPrefill={onPrefill}
           onSend={(text) => void chat.send(text)}
           onAttach={onAttach}

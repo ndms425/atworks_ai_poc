@@ -7,6 +7,7 @@ import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pi
 import { fetchRules } from "@/lib/api";
 import { type RuleAction, useRuleActions } from "@/lib/useRuleActions";
 import FormatsView from "@/components/views/FormatsView";
+import ProfilesView from "@/components/views/ProfilesView";
 import type { ValidationRule } from "@/lib/types";
 
 function RuleRow({
@@ -99,6 +100,7 @@ export default function RulesView({
         </>
       )}
       <FormatsView refreshKey={refreshKey} />
+      <ProfilesView refreshKey={refreshKey} />
     </div>
   );
 }
