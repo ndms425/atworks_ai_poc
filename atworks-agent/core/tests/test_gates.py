@@ -137,6 +137,21 @@ def test_check_apply_rule_requires_seen_then_approval():
     assert check_apply_rule(state, CFG, "rule-0001") is None
 
 
+def test_check_apply_rule_rechecks_guardrails_under_current_config():
+    # Staged under a loose config (max_membership_values=50); apply-time config has since
+    # tightened to 1 — check_apply_rule must hold it, mirroring check_apply_job.
+    state = AtworksSessionState()
+    membership_rule = ValidationRule(rule_id="rule-0002", api_id="api-1", param="status", kind="membership",
+                                     op="in", values=["A", "B", "C"], message="status in [A, B, C]",
+                                     created_at=datetime.now(UTC), created_by="op")
+    state.remember_rule(membership_rule)
+    state.approved_rule_ids.add("rule-0002")
+    tight_cfg = AtworksAgentConfig(model="m", max_membership_values=1)
+    held = check_apply_rule(state, tight_cfg, "rule-0002")
+    assert held is not None and held.blocked == "guardrail"
+    assert "3 values" in held.result_text and "limit is 1" in held.result_text
+
+
 def test_check_discard_rule_and_actor_kind():
     state = AtworksSessionState()
     assert check_discard_rule(state, "rule-x").blocked == PROVENANCE_GATE

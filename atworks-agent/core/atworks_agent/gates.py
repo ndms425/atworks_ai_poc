@@ -10,6 +10,7 @@ from commerce_common.streaming import ToolOutcome
 
 from .config import AtworksAgentConfig
 from .jobs import JobDraft, _listed, check_job_guardrails
+from .rules import RuleDraft, check_rule_guardrails
 from .types import ActorKind, AtworksSessionState
 
 PROVENANCE_GATE = "provenance"
@@ -154,8 +155,16 @@ def check_rule_param_provenance(state: AtworksSessionState, api_id: str, param: 
 
 
 def check_apply_rule(state: AtworksSessionState, config: AtworksAgentConfig, rule_id: str) -> ToolOutcome | None:
-    if rule_id not in state.seen_rules:
+    known = state.seen_rules.get(rule_id)
+    if known is None:
         return ToolOutcome.held(PROVENANCE_GATE, f"rule {rule_id} was not staged or listed this session.")
+    draft = RuleDraft(api_id=known.api_id, param=known.param, kind=known.kind, op=known.op, value=known.value,
+                      values=list(known.values), format=known.format, pattern=known.pattern)
+    # api stays None here on purpose, exactly like check_apply_job: this session may know the
+    # rule without ever having seen its API's catalogue, and a missing catalogue must never
+    # become a param-provenance violation. The ledger re-checks the param rule with its catalogue.
+    if violations := check_rule_guardrails(draft, config, None):
+        return ToolOutcome.held(GUARDRAIL_GATE, apply_guardrail_message(violations))
     if config.require_host_approval and rule_id not in state.approved_rule_ids:
         return ToolOutcome.held(APPROVAL_GATE,
             f"rule {rule_id} is staged and waiting for approval on the Rules page; approving it there applies it.")

@@ -29,6 +29,10 @@ def test_state_remembers_api_for_provenance():
     assert "api-001" in state.seen_apis
 
 
+def test_state_has_rule_impacts_field_defaulting_empty():
+    assert AtworksSessionState().rule_impacts == {}
+
+
 def test_state_has_no_dead_attached_items_field():
     # attached_items is per-turn context (ChatRequest.attached_items in the host, and the
     # stream_turn parameter) — nothing reads it off the persisted session state, so it

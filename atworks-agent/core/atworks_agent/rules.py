@@ -208,6 +208,16 @@ class RuleLedger:
 
     def apply(self, rule_id: str, *, actor: str) -> ValidationRule:
         rule = self._require_staged(rule_id, "apply")
+        applied_for_api = sum(1 for r in self._rules.values()
+                              if r.api_id == rule.api_id and r.status is RuleStatus.APPLIED)
+        if applied_for_api >= self._config.max_rules_per_api:
+            raise RuleGuardrailViolation([f"{rule.api_id} already has {applied_for_api} applied rules; "
+                                          f"the limit is {self._config.max_rules_per_api}"])
+        draft = RuleDraft(api_id=rule.api_id, param=rule.param, kind=rule.kind, op=rule.op, value=rule.value,
+                          values=list(rule.values), format=rule.format, pattern=rule.pattern)
+        api = self._apis.get(rule.api_id) if self._apis else None
+        if violations := check_rule_guardrails(draft, self._config, api):
+            raise RuleGuardrailViolation(violations)
         updated = rule.model_copy(update={"status": RuleStatus.APPLIED, "applied_at": datetime.now(UTC),
                                           "applied_by": actor, "effective_from": datetime.now(UTC)})
         self._rules[rule_id] = updated

@@ -266,6 +266,7 @@ class AtworksSessionState(BaseModel):
     # ValidationRule instances, typed loosely to avoid a rules.py <-> types.py import cycle
     # (rules.py already imports types.py for ApiSpec/ActorKind/RuleStatus).
     seen_rules: dict[str, Any] = Field(default_factory=dict)
+    rule_impacts: dict[str, Any] = Field(default_factory=dict)
     approved_rule_ids: set[str] = Field(default_factory=set)
     host_action_rule_ids: set[str] = Field(default_factory=set)
 

@@ -181,3 +181,25 @@ def test_ledger_stage_uses_apis_mapping_for_param_guardrail():
     ledger = RuleLedger(CFG, apis={"api-1": _api(params=["amount"])})
     with pytest.raises(RuleGuardrailViolation):
         ledger.stage(_draft(api_id="api-1", param="unknown"), actor="op")
+
+
+def test_ledger_apply_rejects_second_rule_once_cap_reached_by_a_prior_apply():
+    # Both stage fine (each sees 0 APPLIED rules for api-1 at stage time); the cap must be
+    # enforced again at apply, or two staged rules for one API can both reach APPLIED.
+    cfg = AtworksAgentConfig(model="m", max_rules_per_api=1)
+    ledger = RuleLedger(cfg)
+    a = ledger.stage(_draft(api_id="api-1", param="amount"), actor="op")
+    b = ledger.stage(_draft(api_id="api-1", param="amount", kind="required", op=None, value=None), actor="op")
+    ledger.apply(a.rule_id, actor="op")
+    with pytest.raises(RuleGuardrailViolation):
+        ledger.apply(b.rule_id, actor="op")
+
+
+def test_ledger_apply_rechecks_guardrails_under_current_config():
+    # A rule that is valid at stage time but violates a param guardrail against the ledger's
+    # own catalogue (added after staging) must still be caught at apply.
+    ledger = RuleLedger(CFG)
+    staged = ledger.stage(_draft(api_id="api-1", param="amount"), actor="op")
+    ledger._apis = {"api-1": _api(api_id="api-1", params=["other"])}
+    with pytest.raises(RuleGuardrailViolation):
+        ledger.apply(staged.rule_id, actor="op")
