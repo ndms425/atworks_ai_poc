@@ -201,7 +201,7 @@ def build_tools(
                 "value": {"type": "string", "maxLength": 120, "description": "compare rule's bound."},
                 "values": {"type": "array", "maxItems": config.max_membership_values,
                           "items": {"type": "string", "maxLength": 120}, "description": "membership rule's list."},
-                "format": {"type": "string", "enum": list(config.allowed_named_formats), "description": "format rule: a named format, preferred over pattern."},
+                "format": {"type": "string", "maxLength": 60, "description": "format rule: a named format — a built-in (email, date, iso8601, uuid, number) or a name saved to the format library — resolved server-side. Preferred over pattern."},
                 "pattern": {"type": "string", "maxLength": 200, "description": "format rule: a raw regex, used only when no named format fits. Flagged for review."},
                 "pass_examples": {"type": "array", "maxItems": config.max_format_examples,
                                   "items": {"type": "string", "maxLength": 120},

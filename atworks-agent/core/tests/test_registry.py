@@ -76,7 +76,7 @@ def test_stage_rule_schema_has_enums_from_config_and_is_closed():
             "summary", "confidence", "assumptions"} <= set(props)
     assert props["kind"]["enum"] == list(cfg.allowed_rule_kinds)
     assert props["op"]["enum"] == list(cfg.allowed_compare_ops) + ["in", "not_in"]
-    assert props["format"]["enum"] == list(cfg.allowed_named_formats)
+    assert props["format"]["type"] == "string" and "enum" not in props["format"]
     assert props["values"]["maxItems"] == cfg.max_membership_values
     assert stage["input_schema"]["additionalProperties"] is False
     assert stage["input_schema"]["required"] == ["api_id", "param", "kind", "summary"]
