@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from commerce_common.streaming import ToolOutcome
-from commerce_common.testing import FakeClient, text_message
+from commerce_common.testing import FakeClient, text_message, tool_calls_message
 from httpx import ASGITransport, AsyncClient
 
 from atworks_agent import (
@@ -284,6 +284,52 @@ async def test_apply_rule_route_marks_then_consumes_approval(client_backend):
         assert r2.json()["ok"] is False
     else:
         assert r2.status_code == 400
+
+
+@pytest.fixture
+async def client_for_chat_staged_rule(tmp_path):
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    scripted = FakeClient([
+        tool_calls_message(("get_api", {"api_id": "api-001"}, "tu-get")),
+        tool_calls_message(("stage_rule", {"api_id": "api-001", "param": "contractNo", "kind": "required"}, "tu-stage")),
+        text_message("규칙을 스테이징했습니다."),
+    ])
+    agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=scripted)
+    reports = Reports(tmp_path)
+    briefings = Briefings(tmp_path / "b", config)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None, briefings=briefings),
+                      reports=reports, briefings=briefings)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        yield c
+
+
+async def test_apply_rule_after_chat_stage_survives_session_reload(client_for_chat_staged_rule):
+    # Regression for the apply_rule 400: stage the rule through a real chat turn (so
+    # seen_rules is populated the way the bug actually happened, not via a direct backend
+    # call), let the session state round-trip through the store's JSON serialization
+    # between requests (as the real HTTP flow does), then approve it from a fresh request —
+    # exactly the "approve on the Rules page" path that used to raise
+    # AttributeError: 'dict' object has no attribute 'api_id'.
+    client = client_for_chat_staged_rule
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    headers = {"X-Session-Id": sid}
+
+    chat = await client.post("/api/atworks/chat", headers=headers, json={"message": "contractNo 필수값 규칙 추가해줘"})
+    assert chat.status_code == 200
+
+    rules = (await client.get("/api/atworks/rules", headers=headers)).json()["rules"]
+    assert len(rules) == 1
+    rule_id = rules[0]["rule_id"]
+
+    # A brand-new request: CurrentSession reloads AtworksSessionState from the store's
+    # JSON document here, the same reload that used to turn seen_rules entries into
+    # plain dicts.
+    r = await client.post(f"/api/atworks/rules/{rule_id}/apply", headers=headers)
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["change"]["status"] == "applied"
+    assert body["change"]["effective_from"] is not None
 
 
 async def test_apply_unknown_rule_returns_ok_false(client):

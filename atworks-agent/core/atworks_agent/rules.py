@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .types import ActorKind, ApiSpec, RuleStatus
+from .types import ActorKind, ApiSpec, RuleStatus, ValidationRule
 
 if TYPE_CHECKING:
     from .config import AtworksAgentConfig
@@ -51,33 +51,6 @@ def _as_number(text: str) -> float | None:
         return float(text)
     except (TypeError, ValueError):
         return None
-
-
-class ValidationRule(BaseModel):
-    """스테이징/저장되는 규칙. message는 서버 렌더값이며 위반 시 failed_rules에 그대로 실린다."""
-    rule_id: str
-    api_id: str
-    param: str = Field(max_length=80)
-    kind: RuleKind
-    op: str | None = None
-    value: str | None = Field(default=None, max_length=120)
-    values: list[str] = Field(default_factory=list)
-    format: str | None = None
-    pattern: str | None = Field(default=None, max_length=200)
-    review_required: bool = False
-    message: str = Field(max_length=200)
-    status: RuleStatus = RuleStatus.STAGED
-    effective_from: datetime | None = None
-    confidence: dict[str, float] = Field(default_factory=dict)
-    assumptions: list[str] = Field(default_factory=list)
-    created_at: datetime
-    created_by: str
-    created_by_kind: ActorKind = ActorKind.OPERATOR
-    applied_at: datetime | None = None
-    applied_by: str | None = None
-    discarded_at: datetime | None = None
-    discarded_by: str | None = None
-    discarded_by_kind: ActorKind | None = None
 
 
 class RuleDraft(BaseModel):

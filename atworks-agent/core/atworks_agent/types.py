@@ -223,6 +223,33 @@ class JobSpec(BaseModel):
         return self.matrix_size * self.total_executions
 
 
+class ValidationRule(BaseModel):
+    """스테이징/저장되는 규칙. message는 서버 렌더값이며 위반 시 failed_rules에 그대로 실린다."""
+    rule_id: str
+    api_id: str
+    param: str = Field(max_length=80)
+    kind: Literal["compare", "membership", "required", "format"]
+    op: str | None = None
+    value: str | None = Field(default=None, max_length=120)
+    values: list[str] = Field(default_factory=list)
+    format: str | None = None
+    pattern: str | None = Field(default=None, max_length=200)
+    review_required: bool = False
+    message: str = Field(max_length=200)
+    status: RuleStatus = RuleStatus.STAGED
+    effective_from: datetime | None = None
+    confidence: dict[str, float] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+    created_at: datetime
+    created_by: str
+    created_by_kind: ActorKind = ActorKind.OPERATOR
+    applied_at: datetime | None = None
+    applied_by: str | None = None
+    discarded_at: datetime | None = None
+    discarded_by: str | None = None
+    discarded_by_kind: ActorKind | None = None
+
+
 # -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------
 
 class AttachedItem(BaseModel):
@@ -263,9 +290,8 @@ class AtworksSessionState(BaseModel):
     last_aggregate_since: datetime | None = None
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
-    # ValidationRule instances, typed loosely to avoid a rules.py <-> types.py import cycle
-    # (rules.py already imports types.py for ApiSpec/ActorKind/RuleStatus).
-    seen_rules: dict[str, Any] = Field(default_factory=dict)
+    seen_rules: dict[str, ValidationRule] = Field(default_factory=dict)
+    # RuleImpact-or-dict, used only within one turn; never reloaded across a session round trip.
     rule_impacts: dict[str, Any] = Field(default_factory=dict)
     approved_rule_ids: set[str] = Field(default_factory=set)
     host_action_rule_ids: set[str] = Field(default_factory=set)
@@ -282,7 +308,7 @@ class AtworksSessionState(BaseModel):
     def remember_job(self, job: JobSpec) -> None:
         remember(self.seen_jobs, job.job_id, job)
 
-    def remember_rule(self, rule: Any) -> None:
+    def remember_rule(self, rule: ValidationRule) -> None:
         remember(self.seen_rules, rule.rule_id, rule)
 
     def remember_groups(self, group_by: str, groups: list[RunGroup], since: datetime | None) -> None:

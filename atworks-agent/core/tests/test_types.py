@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -14,6 +15,7 @@ from atworks_agent.types import (
     RunResult,
     RunStatus,
     TestDataSet,
+    ValidationRule,
 )
 
 
@@ -144,3 +146,21 @@ def test_run_result_carries_the_data_set_it_was_bound_to():
     unbound = RunResult(run_id="run-2", api_id="api-001", executed_at=datetime.now(UTC),
                         target_env="dev", status=RunStatus.PASS)
     assert unbound.test_data_label is None
+
+
+def test_seen_rules_survives_the_session_json_round_trip():
+    # Regression for the apply_rule 400: seen_rules used to be typed dict[str, Any], so
+    # reloading AtworksSessionState from the session store's JSON document (as the host does
+    # between two HTTP requests) left each value a plain dict instead of a ValidationRule,
+    # and gates.check_apply_rule's `known.api_id` raised AttributeError. Typing the field
+    # with ValidationRule lets pydantic reconstruct real instances on reload.
+    state = AtworksSessionState()
+    rule = ValidationRule(rule_id="rule-0001", api_id="api-001", param="contractNo", kind="required",
+                          message="contractNo required", created_at=datetime.now(UTC), created_by="op")
+    state.remember_rule(rule)
+
+    reloaded = AtworksSessionState.model_validate(json.loads(state.model_dump_json()))
+
+    known = reloaded.seen_rules["rule-0001"]
+    assert isinstance(known, ValidationRule)
+    assert known.api_id == "api-001"
