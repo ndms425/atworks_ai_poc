@@ -63,6 +63,9 @@ class AtworksAgentConfig(BaseAgentConfig):
     max_format_library: int = Field(default=200, ge=1)
     max_format_batch: int = Field(default=30, ge=1)
 
+    # -- 값 동등성 비교 (ComparisonProfile ignore-spec) --------------------------------
+    max_ignore_paths: int = Field(default=200, ge=1)
+
     # -- 집계 (aggregate_runs · /runs/insights · 브리핑) --------------------------------
     max_aggregate_runs: int = Field(default=2000, ge=1)           # list_runs limit for aggregation
     max_aggregate_window_days: int = Field(default=30, ge=1)      # since is clamped to now - N days

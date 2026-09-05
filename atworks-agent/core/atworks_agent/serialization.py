@@ -4,7 +4,15 @@ from __future__ import annotations
 from typing import Any
 
 from .rules import FormatDefinition, ValidationRule
-from .types import ApiSpec, FailedRank, FormatBatch, JobSpec, RuleRecommendation, RunResult
+from .types import (
+    ApiSpec,
+    ComparisonProfile,
+    FailedRank,
+    FormatBatch,
+    JobSpec,
+    RuleRecommendation,
+    RunResult,
+)
 
 
 def api_record(api: ApiSpec) -> dict[str, Any]:
@@ -34,6 +42,12 @@ def job_record(job: JobSpec) -> dict[str, Any]:
 def rule_record(rule: ValidationRule) -> dict[str, Any]:
     record = rule.model_dump(mode="json", exclude_none=True)
     record["change_id"] = rule.rule_id   # web-shared의 change_update 훅과 호환 (Task 15)
+    return record
+
+
+def profile_record(profile: ComparisonProfile) -> dict[str, Any]:
+    record = profile.model_dump(mode="json", exclude_none=True)
+    record["change_id"] = profile.profile_id   # web-shared의 change_update 훅과 호환 (Task 15)
     return record
 
 

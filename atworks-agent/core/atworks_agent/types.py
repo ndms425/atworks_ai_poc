@@ -99,6 +99,12 @@ class RuleStatus(StrEnum):
     DISCARDED = "discarded"
 
 
+class ProfileStatus(StrEnum):
+    STAGED = "staged"
+    APPLIED = "applied"
+    DISCARDED = "discarded"
+
+
 class ActorKind(StrEnum):
     OPERATOR = "operator"
     AGENT = "agent"
@@ -259,6 +265,27 @@ class ValidationRule(BaseModel):
     discarded_by_kind: ActorKind | None = None
 
 
+class ComparisonProfile(BaseModel):
+    """값 동등성 비교의 ignore-spec. ValidationRule과 같은 라이프사이클(stage→host-approve→apply)을
+    따른다: apply가 effective_from을 찍고, 과거 비교 결과는 절대 다시 판정하지 않는다. seen_profiles가
+    이 모델(딕트가 아니라)로 역직렬화되도록 profiles.py가 아니라 여기 둔다."""
+    profile_id: str
+    job_id: str   # the parity run this profile targets
+    ignore_paths: list[str] = Field(default_factory=list)
+    per_api_ignore: dict[str, list[str]] = Field(default_factory=dict)
+    status: ProfileStatus = ProfileStatus.STAGED
+    effective_from: datetime | None = None
+    summary: str = Field(max_length=200)
+    created_at: datetime
+    created_by: str
+    created_by_kind: ActorKind = ActorKind.OPERATOR
+    applied_at: datetime | None = None
+    applied_by: str | None = None
+    discarded_at: datetime | None = None
+    discarded_by: str | None = None
+    discarded_by_kind: ActorKind | None = None
+
+
 class RuleRecommendation(BaseModel):
     """recommend_rules_for_api 출력 1건: 대상 API의 규칙 없는 param에 대해, 같은 이름의 param을 가진
     다른 API에 이미 적용된 규칙 하나를 제안으로 보여준다. 대응하는 peer가 없으면 그 param은 아무것도
@@ -366,6 +393,11 @@ class AtworksSessionState(BaseModel):
     seen_format_batches: dict[str, FormatBatch] = Field(default_factory=dict)
     approved_format_batch_ids: set[str] = Field(default_factory=set)
     host_action_format_batch_ids: set[str] = Field(default_factory=set)
+    # Typed dict[str, ComparisonProfile] (not dict[str, Any]) so it survives the session JSON
+    # round-trip -- the same lesson as seen_rules/seen_format_batches.
+    seen_profiles: dict[str, ComparisonProfile] = Field(default_factory=dict)
+    approved_profile_ids: set[str] = Field(default_factory=set)
+    host_action_profile_ids: set[str] = Field(default_factory=set)
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)
@@ -384,6 +416,9 @@ class AtworksSessionState(BaseModel):
 
     def remember_format_batch(self, batch: FormatBatch) -> None:
         remember(self.seen_format_batches, batch.batch_id, batch)
+
+    def remember_profile(self, profile: ComparisonProfile) -> None:
+        remember(self.seen_profiles, profile.profile_id, profile)
 
     def remember_groups(self, group_by: str, groups: list[RunGroup], since: datetime | None) -> None:
         for group in groups:

@@ -8,16 +8,26 @@ from atworks_agent.gates import (
     STAGING_FOLLOWTHROUGH_REMINDER,
     check_api_provenance,
     check_apply_job,
+    check_apply_profile,
     check_apply_rule,
     check_discard_job,
+    check_discard_profile,
     check_discard_rule,
     check_rule_param_provenance,
     prose_restates_figures,
+    take_profile_discard_actor_kind,
     take_rule_discard_actor_kind,
     turn_attempted_staging,
 )
 from atworks_agent.rules import ValidationRule
-from atworks_agent.types import ActorKind, ApiSpec, AtworksSessionState, JobKind, JobSpec
+from atworks_agent.types import (
+    ActorKind,
+    ApiSpec,
+    AtworksSessionState,
+    ComparisonProfile,
+    JobKind,
+    JobSpec,
+)
 
 CFG = AtworksAgentConfig(model="m")
 
@@ -175,3 +185,50 @@ def test_check_discard_rule_and_actor_kind():
     state.host_action_rule_ids.add("rule-0001")
     assert take_rule_discard_actor_kind(state, "rule-0001") is ActorKind.OPERATOR
     assert "rule-0001" not in state.host_action_rule_ids
+
+
+# -- ComparisonProfile gates (mirror the rule gates above) ---------------------------
+
+
+def _profile(profile_id="profile-0001", job_id="job-0001", ignore_paths=("$.serverTime",)):
+    return ComparisonProfile(profile_id=profile_id, job_id=job_id, ignore_paths=list(ignore_paths),
+                             summary="s", created_at=datetime.now(UTC), created_by="op")
+
+
+def test_check_apply_profile_requires_seen_then_approval():
+    state = AtworksSessionState()
+    held = check_apply_profile(state, CFG, "profile-0001")
+    assert held is not None and held.blocked == PROVENANCE_GATE
+    state.remember_profile(_profile())
+    held = check_apply_profile(state, CFG, "profile-0001")
+    assert held is not None and held.blocked == APPROVAL_GATE
+    state.approved_profile_ids.add("profile-0001")
+    assert check_apply_profile(state, CFG, "profile-0001") is None
+
+
+def test_check_apply_profile_unknown_id_refused():
+    state = AtworksSessionState()
+    held = check_apply_profile(state, CFG, "profile-9999")
+    assert held is not None and held.blocked == PROVENANCE_GATE
+
+
+def test_check_apply_profile_rechecks_guardrails_under_current_config():
+    state = AtworksSessionState()
+    state.remember_profile(_profile(ignore_paths=["$.a", "$.b", "$.c"]))
+    state.approved_profile_ids.add("profile-0001")
+    tight_cfg = AtworksAgentConfig(model="m", max_ignore_paths=1)
+    held = check_apply_profile(state, tight_cfg, "profile-0001")
+    assert held is not None and held.blocked == "guardrail"
+    assert "3" in held.result_text and "limit is 1" in held.result_text
+
+
+def test_check_discard_profile_and_actor_kind():
+    state = AtworksSessionState()
+    held = check_discard_profile(state, "profile-x")
+    assert held is not None and held.blocked == PROVENANCE_GATE
+    state.remember_profile(_profile())
+    assert check_discard_profile(state, "profile-0001") is None
+    assert take_profile_discard_actor_kind(state, "profile-0001") is ActorKind.AGENT
+    state.host_action_profile_ids.add("profile-0001")
+    assert take_profile_discard_actor_kind(state, "profile-0001") is ActorKind.OPERATOR
+    assert "profile-0001" not in state.host_action_profile_ids

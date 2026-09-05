@@ -2,6 +2,11 @@
 from .backend import AtworksBackend
 from .config import AtworksAgentConfig
 from .executor import AtworksToolExecutor, build_memory
+from .gates import (
+    check_apply_profile,
+    check_discard_profile,
+    take_profile_discard_actor_kind,
+)
 from .jobs import (
     GuardrailViolation,
     JobDraft,
@@ -12,6 +17,12 @@ from .jobs import (
     enforce_execution_matrix,
 )
 from .parity import BodyDiff, DiffCluster, apply_ignore, cluster_diffs, compare_bodies
+from .profiles import (
+    ProfileDraft,
+    ProfileGuardrailViolation,
+    ProfileLedger,
+    check_profile_guardrails,
+)
 from .rules import (
     FormatBatchDraft,
     FormatBatchGuardrailViolation,
@@ -29,6 +40,7 @@ from .rules import (
     verify_examples,
 )
 from .selection import Resolution, resolve_select_where
+from .serialization import profile_record
 from .types import (
     ActorKind,
     ApiSpec,
@@ -36,6 +48,7 @@ from .types import (
     AtworksSessionContext,
     AtworksSessionState,
     Binding,
+    ComparisonProfile,
     FailedRank,
     FormatBatch,
     FormatBatchEntry,
@@ -44,6 +57,7 @@ from .types import (
     JobSchedule,
     JobSpec,
     JobStatus,
+    ProfileStatus,
     RuleRecommendation,
     RuleStatus,
     RunGroup,

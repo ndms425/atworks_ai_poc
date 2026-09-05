@@ -10,6 +10,7 @@ from commerce_common.streaming import ToolOutcome
 
 from .config import AtworksAgentConfig
 from .jobs import JobDraft, _listed, check_job_guardrails
+from .profiles import ProfileDraft, check_profile_guardrails
 from .rules import RuleDraft, check_rule_guardrails
 from .types import ActorKind, AtworksSessionState
 
@@ -94,6 +95,10 @@ def apply_guardrail_message(violations: list[str]) -> str:
 
 def apply_rule_guardrail_message(violations: list[str]) -> str:
     return "That rule can no longer be applied under this deployment's guardrails: " + "; ".join(violations)
+
+
+def apply_profile_guardrail_message(violations: list[str]) -> str:
+    return "That comparison profile can no longer be applied under this deployment's guardrails: " + "; ".join(violations)
 
 
 def applied_confirmation(job_id: str, kind_value: str, operator: str) -> str:
@@ -193,6 +198,33 @@ def check_discard_rule(state: AtworksSessionState, rule_id: str) -> ToolOutcome 
 def take_rule_discard_actor_kind(state: AtworksSessionState, rule_id: str) -> ActorKind:
     if rule_id in state.host_action_rule_ids:
         state.host_action_rule_ids.discard(rule_id)
+        return ActorKind.OPERATOR
+    return ActorKind.AGENT
+
+
+def check_apply_profile(state: AtworksSessionState, config: AtworksAgentConfig, profile_id: str) -> ToolOutcome | None:
+    known = state.seen_profiles.get(profile_id)
+    if known is None:
+        return ToolOutcome.held(PROVENANCE_GATE, f"profile {profile_id} was not staged or listed this session.")
+    draft = ProfileDraft(job_id=known.job_id, ignore_paths=list(known.ignore_paths),
+                         per_api_ignore={k: list(v) for k, v in known.per_api_ignore.items()},
+                         summary=known.summary)
+    if violations := check_profile_guardrails(draft, config):
+        return ToolOutcome.held(GUARDRAIL_GATE, apply_profile_guardrail_message(violations))
+    if config.require_host_approval and profile_id not in state.approved_profile_ids:
+        return ToolOutcome.held(APPROVAL_GATE,
+            f"profile {profile_id} is staged and waiting for approval; approving it there applies it.")
+    return None
+
+
+def check_discard_profile(state: AtworksSessionState, profile_id: str) -> ToolOutcome | None:
+    return None if profile_id in state.seen_profiles else ToolOutcome.held(
+        PROVENANCE_GATE, f"profile {profile_id} was not staged or listed this session.")
+
+
+def take_profile_discard_actor_kind(state: AtworksSessionState, profile_id: str) -> ActorKind:
+    if profile_id in state.host_action_profile_ids:
+        state.host_action_profile_ids.discard(profile_id)
         return ActorKind.OPERATOR
     return ActorKind.AGENT
 
