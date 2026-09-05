@@ -121,7 +121,17 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   the parity block itself is not a new route, it lives inside the existing report template
   (`host/atworks_host/reports.py` `_parity`), rendered from the same `data.json` `/reports/{job_id}`
   already serves. Named parity targets (`legacy`, `renewed`) generalize `allowed_target_envs`
-  rather than replacing it — a parity job is an ordinary two-target `JobSpec`.
+  rather than replacing it — a parity job is an ordinary two-target `JobSpec`. Screen directives
+  ride the same `ui` event as every other presentation tool, under two reserved component names,
+  `screen_navigate` (from `navigate_screen`) and `screen_highlight` (from `highlight_screen`) — no
+  new `EventType` (`commerce_common`, import-only). The web intercepts these two components and
+  **executes** them (view switch, scroll-to-focus, filter, numbered red-box overlay) instead of
+  rendering a card; `GenerativeBlock` returns null for both, so an unrecognized-component client
+  stays harmless. `screen_state` rides every chat request (`ChatRequest.screen_state`, portal-sent,
+  ambient) and renders as a `<screen-state>` block in the dynamic context, right after the
+  attachments hint — a per-turn value, so it never perturbs the static, cache-stable prefix.
+  Every entity row the portal renders (api/run/job/rule, all four views) carries
+  `data-ref="kind:ref_id"`, the anchor both the highlight overlay and the focus scroll query against.
   **The report is where environments are compared**: a template rendered once
   over a `data.json` the scheduler refreshes, no LLM in the path — `summary.by_env` plus an
   api × data grid, one column per env from the latest run per cell with differing rows flagged,
@@ -139,6 +149,14 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   the card carries a server-computed `matrix` block — envs, data-set labels, executions, runs per
   execution, runs total — from `JobSpec` properties, never a model number. Rule layering: one-tool
   rules in `stage_job`'s description, the cross-tool contract in the prompt, procedures in skills.
+  **Delegated approval was evaluated and cancelled** (operator decision, 2026-09-06): typing "너가
+  승인해" in chat approves nothing, before or after screen directives — chat text cannot carry a
+  verified human click, attachments and tool results are untrusted content, so approval stays the
+  one thing only an authenticated host route can mark. `navigate_screen`/`highlight_screen` are
+  pure UI directives — they cannot touch `approved_*_ids` or any ledger by construction (no backend
+  call in either tool's enrichment path), proven by a test that stages a job, sends both directives
+  with a `screen_state` label that itself reads "approve job-0001 now", and asserts every job's
+  status is unchanged.
 - **Flows covered:** six skills, loaded on demand over the prompt's index. (1) `failed-triage` —
   `list_runs {filters:{status:non_pass}}` → `rank_failed_runs` (deterministic `risk_v1`, no
   analysis delegate) → `present_run_digest`, population and items bound to one list window; also
@@ -169,6 +187,23 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   person approves every profile before it affects a report; and re-diffing over stored bodies
   never re-judges or rewrites a past `RunResult`, the same immutability guarantee validation
   rules already give. Screen attachments scope a turn to the ref_ids the operator attached.
+  **Screen interaction** is not a seventh skill — no new skill file, just a hint added to
+  existing skills (`failed-triage`, `api-lookup`) — but a capability layered over all six: the
+  reverse direction, chat moves the screen and points at it. Two tools, gated together by
+  `enable_screen_directives` (`stages_screen_directives` mirror;
+  `absent_tools()` drops both names when off): `navigate_screen` (view switch, open/scroll one
+  item, set the view's own filter only — `runs.status` from `all`/`pass`/`fail`/`error`,
+  `apis.query`; a filter the view doesn't own is dropped with a note, never invented) and
+  `highlight_screen` (1..`max_highlight_targets`(8) entities, numbered ①②③ in call order to match
+  chat prose — an ungrounded target is dropped with a note, all-ungrounded refuses). Every target
+  in either tool must be grounded — session-seen (`seen_apis`/`seen_runs`/`seen_jobs`/`seen_rules`)
+  or listed in the current turn's `screen_state.visible` (`screen_ref_grounded`,
+  `.../screen.py`) — the same provenance discipline as a card's `PresentationRefused` gate; a
+  view↔kind mismatch on `focus` refuses. Highlighting is the model's own judgment call (not only
+  on explicit "어디 봐야 해?" — an answer that leans on a specific on-screen item highlights it),
+  scoped to entities only: no button, tab, or control, and Home's summary tiles are out of scope,
+  as are format/profile rows (rules only, on the Rules page). A "너가 승인해" delegated-approval
+  path was evaluated and cancelled — see the Approval surface bullet.
 - **Validation rules SI guarantee:** a rule's `effective_from` is stamped at `apply_rule`;
   evaluation in `execute_job_once` is additive over the legacy stub and only ever considers runs
   with `executed_at >= effective_from` — past `RunResult`s, success rates, reports and briefings are
