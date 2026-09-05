@@ -659,6 +659,10 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _recommend_rules_for_api(self, tool_input: dict[str, Any]) -> ToolOutcome:
         api_id = str(tool_input.get("api_id", ""))
+        api = await self._backend.get_api(self._session, api_id)
+        if api is None:
+            return ToolOutcome.error("No API with that id.")
+        self._state.remember_api(api)
         recommendations = await self._backend.recommend_rules_for_api(self._session, api_id)
         return self._fenced(
             [rule_recommendation_record(r) for r in recommendations] if recommendations

@@ -711,12 +711,22 @@ async def test_recommend_rules_for_api_suggests_a_peers_applied_rule_on_the_same
     assert recs[0]["param"] == "amount"
     assert recs[0]["from_api_id"] == "api-1"
     assert recs[0]["rule"]["rule_id"] == applied.rule_id
+    assert "api-3" in state.seen_apis
 
 
 async def test_recommend_rules_for_api_suggests_nothing_when_no_peer_has_a_rule(backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
     out = await ex.execute("recommend_rules_for_api", {"api_id": "api-1"})
+    assert not out.is_error
     assert _payload(out) == {"note": "No rule-less parameter of this API has a peer with an applied rule to suggest."}
+    assert "api-1" in state.seen_apis
+
+
+async def test_recommend_rules_for_api_errors_on_an_unknown_api_id(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("recommend_rules_for_api", {"api_id": "no-such-api"})
+    assert out.is_error and "No API with that id." in out.result_text
+    assert "no-such-api" not in state.seen_apis
 
 
 async def test_recommend_rules_for_api_skips_params_the_target_already_has_a_rule_for(
