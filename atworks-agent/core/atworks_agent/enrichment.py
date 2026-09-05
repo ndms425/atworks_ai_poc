@@ -305,16 +305,24 @@ async def enrich_navigate_screen(payload: NavigateScreenPayload, context: Enrich
         if dropped:
             notes.append(f"{payload.view} has no {', '.join(dropped)} filter; ignored.")
     if notes:
-        enriched["note"] = " ".join(notes)
+        # Also into context.notes: run_presentation builds the tool result text from
+        # context.notes, not the payload — without this the model never learns a filter was
+        # dropped and can go on to claim it applied.
+        msg = " ".join(notes)
+        enriched["note"] = msg
+        context.notes.append(msg)
     return enriched
 
 
 async def enrich_highlight_screen(payload: HighlightScreenPayload, context: EnrichmentContext) -> dict[str, Any]:
     kept: list[dict[str, Any]] = []
     dropped: list[str] = []
-    for t in payload.targets:
+    # number = the target's original 1-based position in payload.targets, not a position over the
+    # kept list — a dropped target must not shift the badge numbers of the targets after it, or
+    # the model's ①②③ prose stops matching what's actually on screen.
+    for number, t in enumerate(payload.targets, start=1):
         if screen_ref_grounded(context.state, t.kind, t.ref_id):
-            kept.append({"kind": t.kind, "ref_id": t.ref_id, "note": t.note, "number": len(kept) + 1})
+            kept.append({"kind": t.kind, "ref_id": t.ref_id, "note": t.note, "number": number})
         else:
             dropped.append(f"{t.kind}:{t.ref_id}")
     if not kept:
@@ -323,7 +331,11 @@ async def enrich_highlight_screen(payload: HighlightScreenPayload, context: Enri
     if payload.headline:
         enriched["headline"] = payload.headline
     if dropped:
-        enriched["note"] = "Not highlighted (ungrounded): " + ", ".join(dropped)
+        # Also into context.notes (see enrich_navigate_screen): otherwise run_presentation's tool
+        # result text stays "Shown to the operator." and the model believes every target landed.
+        note = "Not highlighted (ungrounded): " + ", ".join(dropped)
+        enriched["note"] = note
+        context.notes.append(note)
     return enriched
 
 

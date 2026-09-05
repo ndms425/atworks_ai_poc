@@ -88,6 +88,9 @@ class HighlightTarget(BaseModel):
 
 
 class HighlightScreenPayload(PresentationPayload):
-    """DIRECTIVE: 카드가 아니라 화면을 바꾼다. 근거 없는 target은 enrichment에서 조용히 걸러진다."""
-    targets: list[HighlightTarget] = Field(min_length=1, max_length=8)
+    """DIRECTIVE: 카드가 아니라 화면을 바꾼다. 근거 없는 target은 enrichment에서 조용히 걸러진다.
+    max_length=50 is a loose safety ceiling only — the effective cap is the registry's
+    ``maxItems: config.max_highlight_targets`` (tools/registry.py), so a config raising that
+    above 8 doesn't make every full call fail this model's own validation."""
+    targets: list[HighlightTarget] = Field(min_length=1, max_length=50)
     headline: str | None = Field(default=None, max_length=80)

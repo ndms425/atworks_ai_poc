@@ -29,7 +29,7 @@ export function useScreenFocus(intent: ScreenIntent | null | undefined, kind: Sc
     const ref = pending.current;
     if (!ref || !rowsReady) return;
     const tryScroll = () => {
-      const el = document.querySelector(`[data-ref="${kind}:${ref}"]`);
+      const el = document.querySelector(`[data-ref="${CSS.escape(`${kind}:${ref}`)}"]`);
       if (!el) return false;
       el.scrollIntoView({ block: "center", behavior: "smooth" });
       pending.current = null;

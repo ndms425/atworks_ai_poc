@@ -55,18 +55,18 @@ export default function PortalPage() {
   // A `navigate` directive turns into an intent the mounted view applies once (nonce-tracked);
   // page.tsx clears it after that view's next onScreen report — no separate onIntentConsumed.
   const [screenIntent, setScreenIntent] = useState<ScreenIntent | null>(null);
-  // Task 8 state: prepared here, consumed there. `highlight` payloads land in `highlights`;
-  // `navigate` marks navigatedByDirectiveRef before setView so Task 8 can tell a chat-driven
-  // navigation apart from the operator clicking the nav rail themselves.
+  // `highlight` payloads land here; a `navigate` directive's setView never clears them (only a
+  // user-initiated nav change or a send does — see onUserViewChange/send below).
   const [highlights, setHighlights] = useState<ScreenHighlightPayload | null>(null);
-  const navigatedByDirectiveRef = useRef(false);
+  // Monotonic counter for screenIntent.nonce: two directives landing within the same millisecond
+  // must still get distinct nonces, which Date.now() cannot guarantee.
+  const intentSeq = useRef(0);
 
   const onScreenDirective = useCallback((d: ScreenDirective) => {
     if (d.kind === "navigate") {
       const p = d.payload as unknown as ScreenNavigatePayload;
-      navigatedByDirectiveRef.current = true;
       setView(p.view);
-      setScreenIntent({ focus: p.focus, filter: p.filter, nonce: Date.now() });
+      setScreenIntent({ focus: p.focus, filter: p.filter, nonce: ++intentSeq.current });
     } else {
       setHighlights(d.payload as unknown as ScreenHighlightPayload);
     }
@@ -81,17 +81,13 @@ export default function PortalPage() {
 
   useScreenHighlight(highlights?.targets ?? null, { view, refreshKey });
 
-  // A nav-bar click by the operator clears stale boxes. A same-turn `navigate` directive already
-  // set navigatedByDirectiveRef right before its setView, so that one view-change is swallowed
-  // here instead — the `highlight` directive that follows in the same turn lands after this
-  // effect runs and survives. (Harmless on the very first render: highlights is null then.)
-  useEffect(() => {
-    if (navigatedByDirectiveRef.current) {
-      navigatedByDirectiveRef.current = false;
-      return;
-    }
+  // A nav-bar click by the operator clears stale boxes; a directive-caused navigate never does
+  // (its setView call above is raw, untouched by this). Passed to PortalShell as onViewChange —
+  // never invoked by the directive path, so no handshake/ref is needed to tell the two apart.
+  const onUserViewChange = useCallback((v: PortalView) => {
     setHighlights(null);
-  }, [view]);
+    setView(v);
+  }, []);
 
   // The mounted view reports what it actually shows; this pushes that (plus the current view)
   // onto api.screenState, which rides every chat turn as `screen_state`. Clearing screenIntent
@@ -109,9 +105,13 @@ export default function PortalPage() {
 
   // A bare view switch (before the newly mounted view has reported anything, e.g. its data is
   // still loading) still needs api.screenState.view to be current — with an empty visible list
-  // rather than the outgoing view's stale rows.
+  // rather than the outgoing view's stale rows. But child effects run before parent effects, so
+  // when the newly mounted view's own onScreen report already landed (same view) this must NOT
+  // clobber it back to an empty visible list — only reset when the view actually changed.
   useEffect(() => {
-    api.screenState = { view, visible: [] } as ScreenState;
+    if ((api.screenState as ScreenState | null)?.view !== view) {
+      api.screenState = { view, visible: [] } as ScreenState;
+    }
   }, [view]);
 
   // Snapshot of what a send actually carried, so the busy->false cleanup below can tell a sent
@@ -212,7 +212,7 @@ export default function PortalPage() {
         brand={{ mark: <StoreMark />, name: "aTworks AI", detail: "API 운영 콘솔" }}
         nav={nav}
         view={view}
-        onViewChange={setView}
+        onViewChange={onUserViewChange}
         operator={{ name: session.operator ?? "Operator", role: "운영자" }}
         assistantOpen={assistantOpen}
         assistantBusy={chat.busy}

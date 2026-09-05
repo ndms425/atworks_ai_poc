@@ -7,7 +7,10 @@ import re
 from .fencing import ATWORKS_FENCE
 from .types import AtworksSessionState, ScreenState
 
-_TAG = re.compile(r"<\s*/?\s*screen-state\s*>", re.IGNORECASE)
+# The two dynamic-region blocks (screen-state, attached-result-items) render adjacent to each
+# other, so a value in this block could forge the OTHER block's boundary tag just as easily as
+# its own; strip both to a fixpoint.
+_TAG = re.compile(r"<\s*/?\s*(?:screen-state|attached-result-items)\s*>", re.IGNORECASE)
 
 
 def _strip(text: str) -> str:

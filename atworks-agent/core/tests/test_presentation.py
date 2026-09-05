@@ -482,10 +482,12 @@ async def test_navigate_refuses_view_kind_mismatch():
 
 
 async def test_navigate_drops_filter_keys_the_view_lacks_with_a_note():
-    out = await enrich_navigate_screen(
-        NavigateScreenPayload(view="jobs", filter=ScreenFilter(status="fail")), _ctx(AtworksSessionState()),
-    )
+    ctx = _ctx(AtworksSessionState())
+    out = await enrich_navigate_screen(NavigateScreenPayload(view="jobs", filter=ScreenFilter(status="fail")), ctx)
     assert out.get("filter") in (None, {}) and "note" in out and "status" in out["note"]
+    # The note must also reach context.notes, or run_presentation's tool result text never tells
+    # the model the filter was dropped.
+    assert any("status" in n for n in ctx.notes)
 
 
 async def test_navigate_keeps_runs_status_and_apis_query():
@@ -509,10 +511,15 @@ async def test_highlight_numbers_targets_in_order_and_drops_ungrounded_with_note
         HighlightTarget(kind="run", ref_id="run-9999"),
         HighlightTarget(kind="run", ref_id="run-0031"),
     ])
-    out = await enrich_highlight_screen(p, _ctx(state))
+    ctx = _ctx(state)
+    out = await enrich_highlight_screen(p, ctx)
     assert [t["ref_id"] for t in out["targets"]] == ["run-0032", "run-0031"]
-    assert [t["number"] for t in out["targets"]] == [1, 2]
+    # Numbers are the ORIGINAL 1-based position in payload.targets, not a position over the kept
+    # list — run-0032 was position 1, run-0031 was position 3 (run-9999 at position 2 was dropped).
+    assert [t["number"] for t in out["targets"]] == [1, 3]
     assert "run-9999" in out["note"]
+    # And the drop note must also reach context.notes so the model hears about it.
+    assert any("run-9999" in n for n in ctx.notes)
 
 
 async def test_highlight_refuses_when_nothing_is_grounded():
@@ -531,3 +538,13 @@ async def test_directives_never_touch_approval_marks_or_ledger():
     await enrich_highlight_screen(HighlightScreenPayload(targets=[HighlightTarget(kind="job", ref_id="job-0001")]), _ctx(state))
     await enrich_navigate_screen(NavigateScreenPayload(view="jobs", focus=ScreenTarget(kind="job", ref_id="job-0001")), _ctx(state))
     assert (set(state.approved_job_ids), set(state.approved_rule_ids), set(state.approved_profile_ids)) == before
+
+
+def test_highlight_payload_pydantic_cap_is_a_loose_ceiling_above_the_default_registry_max():
+    # The registry publishes maxItems: config.max_highlight_targets (default 8, but configurable
+    # higher, e.g. 12) — the pydantic model's own max_length must never be tighter than that, or a
+    # raised config makes every full call fail this model's own validation before it reaches the
+    # registry's cap at all.
+    targets = [HighlightTarget(kind="run", ref_id=f"run-{i:04d}") for i in range(12)]
+    payload = HighlightScreenPayload(targets=targets)
+    assert len(payload.targets) == 12
