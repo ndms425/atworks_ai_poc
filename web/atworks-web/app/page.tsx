@@ -58,7 +58,6 @@ export default function PortalPage() {
   // navigation apart from the operator clicking the nav rail themselves.
   const [highlights, setHighlights] = useState<ScreenHighlightPayload | null>(null);
   const navigatedByDirectiveRef = useRef(false);
-  const screenReportRef = useRef<{ filter?: ScreenFilter; visible: ScreenTarget[] }>({ visible: [] });
 
   const onScreenDirective = useCallback((d: ScreenDirective) => {
     if (d.kind === "navigate") {
@@ -81,20 +80,21 @@ export default function PortalPage() {
   // The mounted view reports what it actually shows; this pushes that (plus the current view)
   // onto api.screenState, which rides every chat turn as `screen_state`. Clearing screenIntent
   // here (rather than a callback the view calls back) is the "consumed" signal from ruling 1.
+  // `onScreen` itself stays stable across intent set/clear (a functional, unconditional
+  // setScreenIntent(null) is a no-op when already null) so a mounted view's report effect —
+  // which depends on onScreen — never re-fires just because screenIntent changed.
   const onScreen = useCallback(
     (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => {
-      screenReportRef.current = report;
       api.screenState = { view, filter: report.filter, visible: report.visible.slice(0, 40) } as ScreenState;
-      if (screenIntent) setScreenIntent(null);
+      setScreenIntent(null);
     },
-    [view, screenIntent],
+    [view],
   );
 
   // A bare view switch (before the newly mounted view has reported anything, e.g. its data is
   // still loading) still needs api.screenState.view to be current — with an empty visible list
   // rather than the outgoing view's stale rows.
   useEffect(() => {
-    screenReportRef.current = { visible: [] };
     api.screenState = { view, visible: [] } as ScreenState;
   }, [view]);
 

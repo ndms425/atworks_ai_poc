@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AskButton, formatDate, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton, useResource } from "web-shared";
 import { fetchApis, fetchRuns } from "@/lib/api";
 import { RUN_STATUS } from "@/lib/kinds";
+import { useScreenFocus } from "@/lib/useScreenFocus";
 import type { ApiSpec, AttachedItem, ScreenFilter, ScreenIntent, ScreenTarget } from "@/lib/types";
 
 type Filter = "all" | "fail" | "error" | "pass";
@@ -35,39 +36,16 @@ export default function RunsView({
     return api ? `${api.method} ${api.path}` : apiId;
   };
 
-  // Apply a navigate directive once per nonce (a re-render must never re-apply it). The focus
-  // target is stashed in a ref rather than read straight off `intent` in the scroll effect below,
-  // because page.tsx clears `screenIntent` right after this view's first onScreen report — which
-  // fires on mount, often before the fetch below has resolved — so `intent` itself can go null
-  // before there's anything to scroll to.
-  const appliedNonceRef = useRef<number | undefined>(undefined);
-  const pendingFocusRef = useRef<{ kind: string; ref_id: string } | null>(null);
+  // Apply a navigate directive's filter once per nonce (a re-render must never re-apply it).
+  // Scroll-to-focus is handled by the shared hook below, independent of this filter application.
+  const appliedFilterNonceRef = useRef<number | undefined>(undefined);
   useEffect(() => {
-    if (!intent || intent.nonce === appliedNonceRef.current) return;
-    appliedNonceRef.current = intent.nonce;
+    if (!intent || intent.nonce === appliedFilterNonceRef.current) return;
+    appliedFilterNonceRef.current = intent.nonce;
     if (intent.filter?.status) setFilter(intent.filter.status);
-    pendingFocusRef.current = intent.focus ?? null;
   }, [intent]);
 
-  // Scroll to the pending focus target once its row exists. Re-runs whenever the row set changes
-  // (i.e. once the fetch resolves), plus a short retry for the case where the DOM hasn't
-  // committed the new rows yet when this effect fires.
-  useEffect(() => {
-    const focus = pendingFocusRef.current;
-    if (!focus) return;
-    const find = () => document.querySelector(`[data-ref="${focus.kind}:${focus.ref_id}"]`);
-    const found = find();
-    if (found) {
-      found.scrollIntoView({ block: "center", behavior: "smooth" });
-      pendingFocusRef.current = null;
-      return;
-    }
-    const timer = setTimeout(() => {
-      find()?.scrollIntoView({ block: "center", behavior: "smooth" });
-      pendingFocusRef.current = null;
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [runs]);
+  useScreenFocus(intent, "run", runs.length > 0);
 
   // Report what's actually on screen so api.screenState stays current for the next chat turn.
   useEffect(() => {
