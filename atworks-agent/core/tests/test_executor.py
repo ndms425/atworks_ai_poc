@@ -435,6 +435,131 @@ async def test_aggregate_runs_population_counts_the_true_total_and_flags_truncat
     assert len(state.last_listed_run_ids) == 2
 
 
+async def test_stage_rule_holds_unknown_api_then_stages(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    draft = {"api_id": "api-1", "param": "amount", "kind": "compare", "op": ">=", "value": "0",
+             "summary": "amount must be non-negative"}
+    held = await ex.execute("stage_rule", draft)
+    assert held.blocked == "provenance"
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", draft)
+    assert not out.refused
+    kinds = [(e.type, e.data.get("component")) for e in out.events]
+    assert kinds == [("change_update", None)]   # Task 5 adds the rule_preview card
+    rule_id = next(iter(state.seen_rules))
+    assert rule_id == "rule-0001"
+    assert "Staged" in out.result_text
+    assert state.rule_impacts[rule_id] is not None
+
+
+async def test_stage_rule_holds_unknown_param(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    held = await ex.execute("stage_rule", {"api_id": "api-1", "param": "nope", "kind": "required", "summary": "s"})
+    assert held.blocked == "provenance"
+
+
+async def test_stage_rule_membership_needs_values_is_a_named_error(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "membership",
+                                          "op": "in", "values": [], "summary": "s"})
+    assert out.is_error
+    assert "unavailable" not in out.result_text
+
+
+async def test_stage_rule_guardrail_membership_values_limit(backend, config, skills, session, state):
+    tight = config.model_copy(update={"max_membership_values": 2})
+    ex = _exec(backend, tight, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "membership",
+                                          "op": "in", "values": ["a", "b", "c"], "summary": "s"})
+    assert out.blocked == "guardrail"
+    assert "3 values" in out.result_text
+
+
+async def test_stage_rule_guardrail_when_api_already_at_the_applied_limit(backend, config, skills, session, state):
+    tight = config.model_copy(update={"max_rules_per_api": 1})
+    ex = _exec(backend.__class__(tight), tight, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                    "op": ">=", "value": "0", "summary": "first"})
+    state.approved_rule_ids.add("rule-0001")
+    await ex.execute("apply_rule", {"rule_id": "rule-0001"})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "required",
+                                          "summary": "second"})
+    assert out.blocked == "guardrail"
+    assert "rule-0002" not in state.seen_rules
+
+
+async def test_apply_rule_requires_host_mark(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                    "op": ">=", "value": "0", "summary": "s"})
+    held = await ex.execute("apply_rule", {"rule_id": "rule-0001"})
+    assert held.blocked == "approval"
+    state.approved_rule_ids.add("rule-0001")
+    out = await ex.execute("apply_rule", {"rule_id": "rule-0001"})
+    assert not out.refused and state.seen_rules["rule-0001"].status.value == "applied"
+    assert out.events[0].type == "change_update"
+
+
+async def test_apply_rule_guardrail_when_limit_exceeded_between_stage_and_apply(backend, config, skills, session, state):
+    tight = config.model_copy(update={"max_rules_per_api": 1})
+    ex = _exec(backend.__class__(tight), tight, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                    "op": ">=", "value": "0", "summary": "first"})
+    await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "required", "summary": "second"})
+    state.approved_rule_ids.update({"rule-0001", "rule-0002"})
+    first = await ex.execute("apply_rule", {"rule_id": "rule-0001"})
+    assert not first.refused
+    second = await ex.execute("apply_rule", {"rule_id": "rule-0002"})
+    assert second.blocked == "guardrail"
+
+
+async def test_discard_rule(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                    "op": ">=", "value": "0", "summary": "s"})
+    out = await ex.execute("discard_rule", {"rule_id": "rule-0001"})
+    assert not out.refused
+    assert state.seen_rules["rule-0001"].status.value == "discarded"
+
+
+async def test_discard_rule_unknown_id_is_provenance_blocked(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("discard_rule", {"rule_id": "rule-9999"})
+    assert out.blocked == "provenance"
+
+
+async def test_get_pending_rules(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": ""})
+    await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                    "op": ">=", "value": "0", "summary": "s"})
+    out = await ex.execute("get_pending_rules", {})
+    assert not out.refused
+    pending = _payload(out)
+    assert len(pending) == 1 and pending[0]["rule_id"] == "rule-0001"
+
+
+async def test_open_question_form_blocks_staging_rule_this_turn(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    form = await ex.execute("present_question_form", {
+        "id": "param-pick", "title": "파라미터",
+        "questions": [{"id": "param", "label": "파라미터", "type": "radio", "why": "param이 없음",
+                       "default": "amount", "options": ["amount", "contractNo"]}],
+    })
+    assert not form.refused
+    await ex.execute("search_apis", {"query": ""})
+    out = await ex.execute("stage_rule", {"api_id": "api-1", "param": "amount", "kind": "compare",
+                                          "op": ">=", "value": "0", "summary": "s"})
+    assert out.blocked == "question_form"
+
+
 async def test_absent_tools_are_reported_as_absent_even_when_question_form_is_open(backend, config, skills, session, state):
     no_jobs_config = config.model_copy(update={"enable_jobs": False})
     ex = _exec(backend, no_jobs_config, skills, session, state)

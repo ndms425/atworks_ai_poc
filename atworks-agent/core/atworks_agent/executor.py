@@ -29,9 +29,13 @@ from .gates import (
     apply_guardrail_message,
     check_api_provenance,
     check_apply_job,
+    check_apply_rule,
     check_discard_job,
+    check_discard_rule,
+    check_rule_param_provenance,
     guardrail_block_message,
     take_discard_actor_kind,
+    take_rule_discard_actor_kind,
 )
 from .jobs import (
     CONFIDENCE_KEYS,
@@ -42,9 +46,10 @@ from .jobs import (
     check_job_guardrails,
 )
 from .memory import ATWORKS_MEMORY_EXTRACTION_PROMPT
+from .rules import RuleDraft, RuleGuardrailViolation, ValidationRule, check_rule_guardrails
 from .scoring import UnknownScorer, rank_runs
 from .selection import resolve_select_where
-from .serialization import api_record, job_record, rank_record, run_record
+from .serialization import api_record, job_record, rank_record, rule_record, run_record
 from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL
 from .types import (
     ActorKind,
@@ -104,6 +109,24 @@ def _limit(raw: Any, default: int, ceiling: int) -> int:
         raise InvalidToolArgument("limit", kind="integer") from error
 
 
+def _rule_guardrail_message(violations: list[str]) -> str:
+    """gates.guardrail_block_message names a job; a RuleGuardrailViolation raised from the
+    backend (the per-api applied-rule cap, which check_rule_guardrails cannot see without
+    the ledger) needs its own wording instead of misreporting a rule as a job."""
+    return (
+        "That rule exceeds this deployment's guardrails: " + "; ".join(violations)
+        + ". Explain the block to the operator and propose a compliant alternative."
+    )
+
+
+def _applied_rule_confirmation(rule_id: str, operator: str) -> str:
+    return (
+        f"Applied {rule_id} as {operator}. Confirm to the operator that the rule is now "
+        "effective for executions from this moment forward (effective_from); past runs are "
+        "not re-evaluated."
+    )
+
+
 def _coerce_list(value: Any) -> list[Any] | None:
     if isinstance(value, list):
         return value
@@ -142,6 +165,8 @@ class AtworksToolExecutor(BaseToolExecutor):
         return self._session.project_id
 
     def domain_error(self, error: Exception) -> ToolOutcome | None:
+        if isinstance(error, RuleGuardrailViolation):
+            return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(error.violations))
         if isinstance(error, GuardrailViolation):
             return ToolOutcome.held(GUARDRAIL_GATE, guardrail_block_message(error.violations))
         if isinstance(error, (JobNotApplicable, UnknownScorer)):
@@ -184,7 +209,7 @@ class AtworksToolExecutor(BaseToolExecutor):
         return outcome
 
     async def dispatch(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
-        if name in ("stage_job", "apply_job") and self._asked_form and name not in self._absent:
+        if name in ("stage_job", "apply_job", "stage_rule", "apply_rule") and self._asked_form and name not in self._absent:
             return ToolOutcome.held(
                 QUESTION_FORM_GATE,
                 "A question form is open this turn. End the turn with present_suggestions "
@@ -204,6 +229,10 @@ class AtworksToolExecutor(BaseToolExecutor):
             "stage_job": self._stage_job,
             "apply_job": self._apply_job,
             "discard_job": self._discard_job,
+            "get_pending_rules": self._get_pending_rules,
+            "stage_rule": self._stage_rule,
+            "apply_rule": self._apply_rule,
+            "discard_rule": self._discard_rule,
         }
 
     # -- 읽기 -------------------------------------------------------------------------
@@ -441,3 +470,74 @@ class AtworksToolExecutor(BaseToolExecutor):
         discarded = await self._backend.discard_job(self._session, job_id, take_discard_actor_kind(self._state, job_id))
         self._state.remember_job(discarded)
         return ToolOutcome(f"Discarded {job_id}.", [AgentEvent.change_update(job_record(discarded))])
+
+    # -- 검증 규칙 ----------------------------------------------------------------------
+
+    async def _remember_and_preview_rule(self, rule: ValidationRule) -> ToolOutcome:
+        self._state.remember_rule(rule)
+        events = [AgentEvent.change_update(rule_record(rule))]
+        # Task 5 adds the rule_preview card (RULE_PREVIEW_TOOL / present_rule_preview do not
+        # exist yet): only the change_update fires here, so the note always reads as staged
+        # only, never "shown on its preview card".
+        return self._fenced({"staged": rule_record(rule), "note": STAGED_NOTE}, events)
+
+    async def _stage_rule(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        api_id = str(tool_input.get("api_id", ""))
+        param = self._sanitize(tool_input.get("param"), 80)
+        if held := check_rule_param_provenance(self._state, api_id, param):
+            return held
+        values = [self._sanitize(v, 120) for v in (_coerce_list(tool_input.get("values")) or [])]
+        confidence_input = tool_input.get("confidence")
+        if confidence_input is not None and not isinstance(confidence_input, dict):
+            raise InvalidToolArgument("confidence", kind="object")
+        raw_value = tool_input.get("value")
+        raw_pattern = tool_input.get("pattern")
+        draft = parse_argument(RuleDraft, {
+            "api_id": api_id, "param": param, "kind": tool_input.get("kind"), "op": tool_input.get("op"),
+            "value": self._sanitize(raw_value, 120) if raw_value is not None else None,
+            "values": values,
+            "format": tool_input.get("format") or None,
+            "pattern": self._sanitize(raw_pattern, 200) if raw_pattern is not None else None,
+            "summary": self._sanitize(tool_input.get("summary"), 200),
+            "confidence": {
+                k: float(v) for k, v in (confidence_input or {}).items() if isinstance(v, (int, float))
+            },
+            "assumptions": [self._sanitize(a, 160) for a in (_coerce_list(tool_input.get("assumptions")) or [])][:6],
+        })
+        # Mirrors _stage_job: the guardrail runs here, before the backend call, using the
+        # session's own provenance-checked catalogue (check_rule_param_provenance above
+        # already confirmed api_id is in state.seen_apis).
+        api = self._state.seen_apis.get(api_id)
+        if violations := check_rule_guardrails(draft, self._config, api):
+            return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(violations))
+        rule = await self._backend.stage_rule(self._session, draft, ActorKind.AGENT)
+        self._state.rule_impacts[rule.rule_id] = await self._backend.simulate_rule(self._session, draft)
+        return await self._remember_and_preview_rule(rule)
+
+    async def _get_pending_rules(self, _: dict[str, Any]) -> ToolOutcome:
+        pending = await self._backend.get_pending_rules(self._session)
+        for rule in pending:
+            self._state.remember_rule(rule)
+        return self._fenced([rule_record(r) for r in pending] or {"note": "Nothing is waiting for approval."})
+
+    async def _apply_rule(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        rule_id = str(tool_input.get("rule_id", ""))
+        if held := check_apply_rule(self._state, self._config, rule_id):
+            return held
+        try:
+            applied = await self._backend.apply_rule(self._session, rule_id)
+        except RuleGuardrailViolation as violation:
+            return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(violation.violations))
+        self._state.remember_rule(applied)
+        return ToolOutcome(_applied_rule_confirmation(rule_id, self._session.operator),
+                           [AgentEvent.change_update(rule_record(applied))])
+
+    async def _discard_rule(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        rule_id = str(tool_input.get("rule_id", ""))
+        if held := check_discard_rule(self._state, rule_id):
+            return held
+        discarded = await self._backend.discard_rule(
+            self._session, rule_id, take_rule_discard_actor_kind(self._state, rule_id)
+        )
+        self._state.remember_rule(discarded)
+        return ToolOutcome(f"Discarded {rule_id}.", [AgentEvent.change_update(rule_record(discarded))])
