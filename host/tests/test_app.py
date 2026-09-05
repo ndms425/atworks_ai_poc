@@ -10,10 +10,12 @@ from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
     AtworksSessionContext,
+    AtworksSessionState,
     AtworksToolExecutor,
     FormatBatchDraft,
     JobDraft,
     JobKind,
+    ProfileDraft,
     RuleDraft,
 )
 from atworks_agent_runtime import AtworksAgent
@@ -430,6 +432,95 @@ async def test_format_batch_route_discard_records_operator(client_backend):
     )
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post(f"/api/atworks/format-batches/{batch.batch_id}/discard", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["change"]["discarded_by_kind"] == "operator"
+
+
+async def test_profiles_route_needs_a_session(client):
+    assert (await client.get("/api/atworks/profiles")).status_code in (401, 422)
+
+
+async def test_profiles_route_lists_staged_profiles_and_filters_by_job(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    profile = await backend.stage_profile(
+        session, ProfileDraft(job_id="job-0001", ignore_paths=["$.updatedAt"], summary="ignore timestamp noise"),
+        ActorKind.AGENT,
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid})
+    assert r.status_code == 200
+    assert [row["profile_id"] for row in r.json()["profiles"]] == [profile.profile_id]
+
+    matching = await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid}, params={"job_id": "job-0001"})
+    assert [row["profile_id"] for row in matching.json()["profiles"]] == [profile.profile_id]
+
+    other_job = await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid}, params={"job_id": "job-9999"})
+    assert other_job.json()["profiles"] == []
+
+
+async def test_apply_profile_route_marks_then_consumes_approval(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    profile = await backend.stage_profile(
+        session, ProfileDraft(job_id="job-0001", ignore_paths=["$.updatedAt"], summary="ignore timestamp noise"),
+        ActorKind.AGENT,
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/profiles/{profile.profile_id}/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True and body["change"]["status"] == "applied"
+
+    listed = (await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid})).json()["profiles"]
+    assert listed[0]["status"] == "applied"
+
+    # the mark is spent on the first click — a second click (or a chat turn) finds no mark left.
+    r2 = await client.post(f"/api/atworks/profiles/{profile.profile_id}/apply", headers={"X-Session-Id": sid})
+    if r2.status_code == 200:
+        assert r2.json()["ok"] is False
+    else:
+        assert r2.status_code == 400
+
+
+async def test_apply_profile_is_held_without_the_host_route(client_backend):
+    # approved_profile_ids may ONLY be set by profile_action (the host route), immediately
+    # before the executor call and cleared immediately after. Building the executor exactly
+    # the way the route does but skipping the route's own approval mark — the way a model's
+    # own tool call would — proves the mark can't be self-granted from chat.
+    client, backend = client_backend
+    del client
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    profile = await backend.stage_profile(
+        session, ProfileDraft(job_id="job-0001", ignore_paths=["$.updatedAt"], summary="ignore timestamp noise"),
+        ActorKind.AGENT,
+    )
+    config = AtworksAgentConfig(model="m")
+    agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=FakeClient([text_message("ok")]))
+    state = AtworksSessionState()
+    state.remember_profile(profile)
+    executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
+                                    session=session, state=state, memory=agent.memory)
+    outcome = await executor.execute("apply_profile", {"profile_id": profile.profile_id})
+    assert outcome.blocked == "approval"
+
+
+async def test_apply_unknown_profile_returns_ok_false(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post("/api/atworks/profiles/profile-9999/apply", headers={"X-Session-Id": sid})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is False
+
+
+async def test_profile_route_discard_records_operator(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    profile = await backend.stage_profile(
+        session, ProfileDraft(job_id="job-0001", ignore_paths=["$.updatedAt"], summary="ignore timestamp noise"),
+        ActorKind.AGENT,
+    )
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    r = await client.post(f"/api/atworks/profiles/{profile.profile_id}/discard", headers={"X-Session-Id": sid})
     body = r.json()
     assert r.status_code == 200 and body["ok"] is True
     assert body["change"]["discarded_by_kind"] == "operator"

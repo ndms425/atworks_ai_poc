@@ -23,6 +23,7 @@ from atworks_agent.serialization import (
     format_batch_record,
     format_record,
     job_record,
+    profile_record,
     rule_record,
     run_record,
 )
@@ -195,6 +196,46 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/rules/{rule_id}/discard")
     async def discard_rule(rule_id: str, record: CurrentSession) -> dict:
         return await rule_action(rule_id, "discard_rule", record)
+
+    @router.get("/profiles")
+    async def profiles(record: CurrentSession, job_id: str | None = None) -> dict:
+        return {"profiles": [profile_record(p) for p in await backend.list_profiles(context(record), job_id)]}
+
+    async def profile_action(profile_id: str, action: str, record: Record) -> dict:
+        # profile_action은 rule_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
+        # 클릭 한 번에 소비되고 남지 않는다. provenance는 모델을 지키는 게이트지 버튼을 지키는
+        # 게 아니다: 이 세션이 아직 모르는 profile이라도, 호스트가 그 profile을 실제로 소유(ledger)
+        # 하고 있으면 클릭 전에 기억시킨다.
+        if profile_id not in record.state.seen_profiles:
+            known = next((p for p in await backend.list_profiles(context(record)) if p.profile_id == profile_id), None)
+            if known is not None:
+                record.state.remember_profile(known)
+        if action == "apply_profile":
+            record.state.approved_profile_ids.add(profile_id)
+        else:
+            record.state.host_action_profile_ids.add(profile_id)
+        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
+                                        session=context(record), state=record.state, memory=agent.memory)
+        execution = await executor.execute(action, {"profile_id": profile_id})
+        record.state.approved_profile_ids.discard(profile_id)
+        record.state.host_action_profile_ids.discard(profile_id)
+        if execution.is_error:
+            raise HTTPException(status_code=400, detail=execution.result_text)
+        if execution.blocked is not None:
+            return {"ok": False, "change": None, "reason": execution.result_text}
+        record.pending_app_events.append(
+            f"Operator {'approved' if action == 'apply_profile' else 'dismissed'} comparison profile {profile_id} from the card."
+        )
+        change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
+        return {"ok": True, "change": change}
+
+    @router.post("/profiles/{profile_id}/apply")
+    async def approve_profile(profile_id: str, record: CurrentSession) -> dict:
+        return await profile_action(profile_id, "apply_profile", record)
+
+    @router.post("/profiles/{profile_id}/discard")
+    async def discard_profile(profile_id: str, record: CurrentSession) -> dict:
+        return await profile_action(profile_id, "discard_profile", record)
 
     @router.get("/formats")
     async def formats(record: CurrentSession) -> dict:
