@@ -71,3 +71,17 @@ def test_static_prompt_drops_rule_rules_when_switched_off():
     text = build_static_system(AtworksAgentConfig(model="m", enable_rules=False), SKILLS)
     assert "stage_rule" not in text and "apply_rule" not in text
     assert "You draft validation rules as structured objects" not in text
+
+
+def test_static_prompt_carries_the_format_example_reuse_bulk_hard_line():
+    text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
+    hard_line = ("When you author a format pattern you MUST supply pass and fail examples; the system "
+                 "verifies the pattern against them before approval. Reuse a saved format by name instead "
+                 "of re-authoring it. Bulk-add formats with stage_format_batch; duplicates are skipped.")
+    assert hard_line in text
+    assert text.index(hard_line) < text.index("# How you work")
+
+
+def test_static_prompt_drops_format_hard_line_when_rules_switched_off():
+    text = build_static_system(AtworksAgentConfig(model="m", enable_rules=False), SKILLS)
+    assert "Bulk-add formats with stage_format_batch" not in text

@@ -10,6 +10,8 @@ from atworks_agent.types import (
     AtworksSessionContext,
     AtworksSessionState,
     FailedRank,
+    FormatBatch,
+    FormatBatchEntry,
     JobKind,
     JobSpec,
     RunGroup,
@@ -291,6 +293,42 @@ async def test_run_groups_refuses_without_an_aggregate_call():
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"], {"group_keys": ["x"]},
                                      _ctx(AtworksSessionState()), "Shown.")
     assert outcome.is_error and "aggregate_runs" in outcome.result_text
+
+
+def _format_batch(**overrides):
+    fields = {
+        "batch_id": "fbatch-0001", "summary": "사번/부서코드 포맷 씨앗",
+        "entries": [
+            FormatBatchEntry(name="emp-id", pattern=r"^EMP\d{4}$", pass_examples=["EMP1234"], fail_examples=["EMP12"], outcome="new"),
+            FormatBatchEntry(name="email", pattern=r"^[^@]+@[^@]+$", outcome="duplicate", reason="name exists"),
+            FormatBatchEntry(name="dept-code", pattern="^[A-Z", outcome="invalid", reason="pattern does not compile"),
+        ],
+        "created_at": datetime.now(UTC), "created_by": "op",
+    }
+    fields.update(overrides)
+    return FormatBatch(**fields)
+
+
+async def test_format_batch_joins_staged_record_with_entries_and_counts():
+    state = AtworksSessionState()
+    state.remember_format_batch(_format_batch())
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_format_batch"],
+        {"batch_id": "fbatch-0001", "headline": "h"}, _ctx(state), "Shown.",
+    )
+    payload = outcome.events[0].data["payload"]
+    assert payload["change_id"] == "fbatch-0001"
+    assert payload["new_count"] == 1 and payload["duplicate_count"] == 1 and payload["invalid_count"] == 1
+    outcomes = {e["name"]: e["outcome"] for e in payload["entries"]}
+    assert outcomes == {"emp-id": "new", "email": "duplicate", "dept-code": "invalid"}
+    assert payload["batch"]["batch_id"] == "fbatch-0001"
+
+
+async def test_format_batch_refuses_unknown_batch():
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_format_batch"], {"batch_id": "nope"}, _ctx(AtworksSessionState()), "Shown.",
+    )
+    assert outcome.blocked == "provenance"
 
 
 async def test_run_groups_unknown_keys_are_provenance_when_all_and_a_note_when_some():

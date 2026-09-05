@@ -10,7 +10,14 @@ from commerce_common.presentation import PresentationExtension
 
 from ..config import AtworksAgentConfig
 from ..question_form import QUESTION_FORM_INPUT_SCHEMA
-from .presentation import DIGEST_TOOL, GROUPS_TOOL, PREVIEW_TOOL, QUESTION_TOOL, RULE_PREVIEW_TOOL
+from .presentation import (
+    DIGEST_TOOL,
+    FORMAT_BATCH_TOOL,
+    GROUPS_TOOL,
+    PREVIEW_TOOL,
+    QUESTION_TOOL,
+    RULE_PREVIEW_TOOL,
+)
 
 _STATUS_READER = "the operator"
 _SESSION_API_ID = "api_id that search_apis or get_api returned this session."
@@ -23,6 +30,10 @@ def _job_id() -> dict[str, Any]:
 
 def _rule_id() -> dict[str, Any]:
     return {"type": "string", "description": "rule_id staged this conversation or listed by get_pending_rules."}
+
+
+def _batch_id() -> dict[str, Any]:
+    return {"type": "string", "description": "batch_id staged this conversation or listed by get_pending_format_batches."}
 
 
 def build_tools(
@@ -224,6 +235,53 @@ def build_tools(
             "description": "Rules staged and waiting for approval. / 승인 대기 중인 검증 규칙.",
             "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
+        # -- 포맷 라이브러리 (bulk seed, deduped, one host approval) ----------------------
+        {
+            "name": "stage_format_batch",
+            "description": ("Stage a batch of raw-pattern formats to the shared format library in one call — it "
+                            "saves nothing yet. Each entry needs pass_examples and fail_examples; the system "
+                            "verifies the pattern against them and marks the entry invalid if it fails to "
+                            "classify them correctly. An entry whose name or pattern already exists in the "
+                            "library, or repeats an earlier entry in this same batch, is marked duplicate and "
+                            "skipped — never re-added. Applying the batch only adds entries marked new. Prefer "
+                            "this over calling stage_rule's format authoring repeatedly when the operator wants "
+                            "several patterns seeded at once. / 포맷 여러 개를 한 번에 라이브러리에 씨앗한다. "
+                            "저장은 승인 후에만 일어나고, 이름·패턴이 겹치면 건너뛴다."),
+            "input_schema": {"type": "object", "properties": {
+                "formats": {"type": "array", "maxItems": config.max_format_batch, "items": {
+                    "type": "object", "properties": {
+                        "name": {"type": "string", "maxLength": 60, "pattern": "^[a-z0-9][a-z0-9-]{0,59}$",
+                                 "description": "Library key for this format, lowercase-with-hyphens."},
+                        "pattern": {"type": "string", "maxLength": 200, "description": "The raw regex."},
+                        "pass_examples": {"type": "array", "maxItems": config.max_format_examples,
+                                          "items": {"type": "string", "maxLength": 120},
+                                          "description": "Values that MUST match; verified before approval."},
+                        "fail_examples": {"type": "array", "maxItems": config.max_format_examples,
+                                          "items": {"type": "string", "maxLength": 120},
+                                          "description": "Values that MUST NOT match; verified before approval."}},
+                        "required": ["name", "pattern"], "additionalProperties": False},
+                    "description": "One entry per format; each becomes new, duplicate, or invalid."},
+                "summary": {"type": "string", "maxLength": 200, "description": "One line the preview card shows."}},
+                "required": ["formats", "summary"], "additionalProperties": False},
+        },
+        {
+            "name": "apply_format_batch",
+            "description": ("Apply a format batch the operator approved on the Formats page. It is the only tool "
+                            "that adds entries to the shared library — only entries marked new are added; "
+                            "duplicate and invalid entries are reported but never added. A batch not marked "
+                            "approved by the host is held. / Formats 페이지에서 승인된 배치만 라이브러리에 반영된다."),
+            "input_schema": {"type": "object", "properties": {"batch_id": _batch_id()}, "required": ["batch_id"], "additionalProperties": False},
+        },
+        {
+            "name": "discard_format_batch",
+            "description": "Discard a staged format batch the operator rejected or replaced.",
+            "input_schema": {"type": "object", "properties": {"batch_id": _batch_id()}, "required": ["batch_id"], "additionalProperties": False},
+        },
+        {
+            "name": "get_pending_format_batches",
+            "description": "Format batches staged and waiting for approval. / 승인 대기 중인 포맷 배치.",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
     ]
 
     presentation: list[dict[str, Any]] = [
@@ -277,6 +335,17 @@ def build_tools(
                 "headline": {"type": "string", "maxLength": 120},
                 "note": {"type": "string", "maxLength": 200}},
                 "required": ["rule_id"], "additionalProperties": False},
+        },
+        {
+            "name": FORMAT_BATCH_TOOL,
+            "description": ("Show the approval card for a format batch staged or listed earlier; the card fills "
+                            "in each entry's outcome (new, duplicate, invalid) and the counts. Show every staged "
+                            "batch with it before anything is applied."),
+            "input_schema": {"type": "object", "properties": {
+                "batch_id": _batch_id(),
+                "headline": {"type": "string", "maxLength": 120},
+                "note": {"type": "string", "maxLength": 200}},
+                "required": ["batch_id"], "additionalProperties": False},
         },
         {
             "name": QUESTION_TOOL,

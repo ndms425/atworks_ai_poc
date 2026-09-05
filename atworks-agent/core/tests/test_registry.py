@@ -6,8 +6,9 @@ from atworks_agent.tools.registry import build_tools
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
             "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
+            "stage_format_batch", "apply_format_batch", "discard_format_batch", "get_pending_format_batches",
             "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
-            "present_question_form", "present_suggestions"]
+            "present_format_batch", "present_question_form", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():
@@ -25,6 +26,12 @@ def test_jobs_switch_removes_tools():
 def test_rules_switch_removes_tools():
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_rules=False), [])]
     assert not {"stage_rule", "apply_rule", "discard_rule", "get_pending_rules", "present_rule_preview"} & set(names)
+
+
+def test_rules_switch_removes_format_batch_tools_too():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_rules=False), [])]
+    assert not {"stage_format_batch", "apply_format_batch", "discard_format_batch",
+                "get_pending_format_batches", "present_format_batch"} & set(names)
 
 
 def test_same_config_same_bytes():
@@ -107,3 +114,35 @@ def test_aggregate_runs_schema_lists_the_axes():
     props = tool["input_schema"]["properties"]
     assert props["group_by"]["enum"] == ["api", "failed_rule", "http_status", "env", "api_env_data"]
     assert tool["input_schema"]["required"] == ["group_by"]
+
+
+def test_stage_format_batch_schema_is_bounded_and_closed():
+    cfg = AtworksAgentConfig(model="m", max_format_batch=7, max_format_examples=3)
+    stage = next(t for t in build_tools(cfg, []) if t["name"] == "stage_format_batch")
+    props = stage["input_schema"]["properties"]
+    assert stage["input_schema"]["additionalProperties"] is False
+    assert stage["input_schema"]["required"] == ["formats", "summary"]
+    assert props["formats"]["type"] == "array" and props["formats"]["maxItems"] == 7
+    item = props["formats"]["items"]
+    assert item["additionalProperties"] is False
+    assert item["required"] == ["name", "pattern"]
+    assert set(item["properties"]) == {"name", "pattern", "pass_examples", "fail_examples"}
+    assert item["properties"]["pass_examples"]["maxItems"] == 3
+    assert item["properties"]["fail_examples"]["maxItems"] == 3
+
+
+def test_apply_discard_get_format_batch_tools_shapes():
+    tools = build_tools(AtworksAgentConfig(model="m"), [])
+    apply_tool = next(t for t in tools if t["name"] == "apply_format_batch")
+    discard_tool = next(t for t in tools if t["name"] == "discard_format_batch")
+    get_tool = next(t for t in tools if t["name"] == "get_pending_format_batches")
+    assert apply_tool["input_schema"]["required"] == ["batch_id"]
+    assert discard_tool["input_schema"]["required"] == ["batch_id"]
+    assert set(get_tool["input_schema"]["properties"]) == {"status"}
+
+
+def test_present_format_batch_schema():
+    tool = next(t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "present_format_batch")
+    props = tool["input_schema"]["properties"]
+    assert set(props) == {"batch_id", "headline", "note"}
+    assert tool["input_schema"]["required"] == ["batch_id"]

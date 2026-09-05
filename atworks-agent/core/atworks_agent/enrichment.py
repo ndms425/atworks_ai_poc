@@ -20,13 +20,15 @@ from pydantic import BaseModel
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
 from .rules import FORMAT_EXAMPLES, NAMED_FORMATS
-from .serialization import job_record, rule_record
+from .serialization import format_batch_record, job_record, rule_record
 from .tools.presentation import (
     DIGEST_TOOL,
+    FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
     PREVIEW_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
+    PresentFormatBatchPayload,
     PresentJobPreviewPayload,
     PresentRulePreviewPayload,
     PresentRunDigestPayload,
@@ -214,6 +216,24 @@ async def enrich_rule_preview(payload: PresentRulePreviewPayload, context: Enric
     return enriched
 
 
+async def enrich_format_batch(payload: PresentFormatBatchPayload, context: EnrichmentContext) -> dict[str, Any]:
+    batch = context.state.seen_format_batches.get(payload.batch_id)
+    if batch is None:
+        raise PresentationRefused(
+            "That batch_id was not staged or listed in this session. Stage the batch (or call "
+            "get_pending_format_batches) first and use its id.",
+            gate=PROVENANCE_GATE,
+        )
+    enriched = payload.model_dump(exclude_none=True)
+    enriched["batch"] = format_batch_record(batch)
+    enriched["change_id"] = batch.batch_id   # web-shared의 change_update 훅과 호환 (Task 15)
+    enriched["entries"] = [e.model_dump(mode="json", exclude_none=True) for e in batch.entries]
+    enriched["new_count"] = batch.new_count
+    enriched["duplicate_count"] = batch.duplicate_count
+    enriched["invalid_count"] = batch.invalid_count
+    return enriched
+
+
 async def enrich_question_form(payload: QuestionFormPayload, context: EnrichmentContext) -> dict[str, Any]:
     del context
     enriched = payload.model_dump(exclude_none=True)
@@ -230,6 +250,7 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
         PresentationComponent(name=GROUPS_TOOL, component="run_groups", payload_model=PresentRunGroupsPayload, enrich=enrich_run_groups),
         PresentationComponent(name=PREVIEW_TOOL, component="job_preview", payload_model=PresentJobPreviewPayload, enrich=enrich_job_preview),
         PresentationComponent(name=RULE_PREVIEW_TOOL, component="rule_preview", payload_model=PresentRulePreviewPayload, enrich=enrich_rule_preview),
+        PresentationComponent(name=FORMAT_BATCH_TOOL, component="format_batch", payload_model=PresentFormatBatchPayload, enrich=enrich_format_batch),
         PresentationComponent(name=QUESTION_TOOL, component="question_form", payload_model=QuestionFormPayload, enrich=enrich_question_form),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),
     )
