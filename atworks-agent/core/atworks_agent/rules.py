@@ -3,12 +3,16 @@ aTworks 엔진)가 한다. 규칙은 승인 시점(effective_from) 이후 실행
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Literal
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .types import ActorKind, RuleStatus
+from .types import ActorKind, ApiSpec, RuleStatus
+
+if TYPE_CHECKING:
+    from .config import AtworksAgentConfig
 
 RuleKind = Literal["compare", "membership", "required", "format"]
 CompareOp = Literal[">=", ">", "<=", "<", "==", "!="]
@@ -150,3 +154,76 @@ def evaluate(rule: ValidationRule, value: str | None) -> bool:
         except re.error:
             return False
     return True
+
+
+class RuleGuardrailViolation(ValueError):
+    def __init__(self, violations: list[str]):
+        super().__init__("; ".join(violations))
+        self.violations = violations
+
+
+def check_rule_guardrails(draft: RuleDraft, config: AtworksAgentConfig, api: ApiSpec | None) -> list[str]:
+    violations: list[str] = []
+    if api is not None and draft.param not in api.params:
+        violations.append(f"param {draft.param!r} is not a parameter of {draft.api_id} "
+                          f"({', '.join(api.params) or 'none declared'})")
+    if draft.kind == "membership" and len(draft.values) > config.max_membership_values:
+        violations.append(f"membership list has {len(draft.values)} values; the limit is {config.max_membership_values}")
+    if draft.kind == "format" and draft.format is not None and draft.format not in config.allowed_named_formats:
+        violations.append(f"named format {draft.format!r} is not one of {', '.join(config.allowed_named_formats)}")
+    return violations
+
+
+class RuleLedger:
+    def __init__(self, config: AtworksAgentConfig, apis: Mapping[str, ApiSpec] | None = None):
+        self._config = config
+        self._apis = apis
+        self._rules: dict[str, ValidationRule] = {}
+        self._sequence = 0
+
+    def stage(self, draft: RuleDraft, *, actor: str, actor_kind: ActorKind = ActorKind.OPERATOR) -> ValidationRule:
+        api = self._apis.get(draft.api_id) if self._apis else None
+        if v := check_rule_guardrails(draft, self._config, api):
+            raise RuleGuardrailViolation(v)
+        applied_for_api = sum(1 for r in self._rules.values()
+                              if r.api_id == draft.api_id and r.status is RuleStatus.APPLIED)
+        if applied_for_api >= self._config.max_rules_per_api:
+            raise RuleGuardrailViolation([f"{draft.api_id} already has {applied_for_api} applied rules; "
+                                          f"the limit is {self._config.max_rules_per_api}"])
+        self._sequence += 1
+        rule = ValidationRule(
+            rule_id=f"rule-{self._sequence:04d}", api_id=draft.api_id, param=draft.param, kind=draft.kind,
+            op=draft.op, value=draft.value, values=list(draft.values), format=draft.format, pattern=draft.pattern,
+            review_required=draft.review_required, message=draft.message(),
+            confidence=dict(draft.confidence), assumptions=list(draft.assumptions),
+            created_at=datetime.now(UTC), created_by=actor, created_by_kind=actor_kind)
+        self._rules[rule.rule_id] = rule
+        return rule
+
+    def get(self, rule_id): return self._rules.get(rule_id)
+    def pending(self): return [r for r in self._rules.values() if r.status is RuleStatus.STAGED]
+    def applied(self): return [r for r in self._rules.values() if r.status is RuleStatus.APPLIED]
+    def list(self, api_id: str | None = None):
+        return [r for r in self._rules.values() if api_id is None or r.api_id == api_id]
+
+    def apply(self, rule_id: str, *, actor: str) -> ValidationRule:
+        rule = self._require_staged(rule_id, "apply")
+        updated = rule.model_copy(update={"status": RuleStatus.APPLIED, "applied_at": datetime.now(UTC),
+                                          "applied_by": actor, "effective_from": datetime.now(UTC)})
+        self._rules[rule_id] = updated
+        return updated
+
+    def discard(self, rule_id: str, *, actor: str, actor_kind: ActorKind = ActorKind.OPERATOR) -> ValidationRule:
+        rule = self._require_staged(rule_id, "discard")
+        updated = rule.model_copy(update={"status": RuleStatus.DISCARDED, "discarded_at": datetime.now(UTC),
+                                          "discarded_by": actor, "discarded_by_kind": actor_kind})
+        self._rules[rule_id] = updated
+        return updated
+
+    def _require_staged(self, rule_id: str, action: str) -> ValidationRule:
+        rule = self._rules.get(rule_id)
+        if rule is None:
+            raise RuleGuardrailViolation([f"no rule {rule_id} to {action}"])
+        if rule.status is not RuleStatus.STAGED:
+            raise RuleGuardrailViolation([f"rule {rule_id} is {rule.status.value}, cannot {action}"])
+        return rule

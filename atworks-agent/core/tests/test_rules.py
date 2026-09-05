@@ -2,9 +2,20 @@ from datetime import UTC, datetime
 
 import pytest
 
-from atworks_agent.rules import NAMED_FORMATS, RuleDraft, ValidationRule, evaluate, render_message
+from atworks_agent.config import AtworksAgentConfig
+from atworks_agent.rules import (
+    NAMED_FORMATS,
+    RuleDraft,
+    RuleGuardrailViolation,
+    RuleLedger,
+    ValidationRule,
+    check_rule_guardrails,
+    evaluate,
+    render_message,
+)
 from atworks_agent.types import (  # noqa: F401 -- interface check: importable from types
     ActorKind,
+    ApiSpec,
     RuleStatus,
 )
 
@@ -76,3 +87,97 @@ def test_evaluate_never_raises_on_unrecognized_format_bypassing_draft():
     # Constructed directly (bypassing RuleDraft's validation) so evaluate() must stay total.
     bad = rule(kind="format", op=None, value=None, format="phone", message="x")
     assert evaluate(bad, "555") is False
+
+
+# -- Task 2: check_rule_guardrails and RuleLedger ------------------------------------
+
+CFG = AtworksAgentConfig(model="m")
+
+
+def _draft(**over):
+    base = dict(api_id="api-1", param="amount", kind="compare", op=">=", value="0")
+    base.update(over)
+    return RuleDraft(**base)
+
+
+def _api(api_id="api-1", params=("amount",)):
+    return ApiSpec(api_id=api_id, method="POST", path=f"/v1/{api_id}", name=api_id,
+                   updated_at=datetime.now(UTC), params=list(params))
+
+
+def test_check_rule_guardrails_param_not_in_api():
+    v = check_rule_guardrails(_draft(param="unknown"), CFG, _api(params=["amount"]))
+    assert any("unknown" in m and "not a parameter" in m for m in v)
+
+
+def test_check_rule_guardrails_allows_known_param():
+    assert check_rule_guardrails(_draft(param="amount"), CFG, _api(params=["amount"])) == []
+
+
+def test_check_rule_guardrails_skips_param_check_without_api():
+    assert check_rule_guardrails(_draft(param="unknown"), CFG, None) == []
+
+
+def test_check_rule_guardrails_membership_over_limit():
+    cfg = AtworksAgentConfig(model="m", max_membership_values=2)
+    draft = _draft(kind="membership", op="in", value=None, values=["A", "B", "C"])
+    v = check_rule_guardrails(draft, cfg, None)
+    assert any("3 values" in m and "limit is 2" in m for m in v)
+
+
+def test_check_rule_guardrails_named_format_not_allowed():
+    cfg = AtworksAgentConfig(model="m", allowed_named_formats=("email",))
+    draft = _draft(kind="format", op=None, value=None, format="uuid")
+    v = check_rule_guardrails(draft, cfg, None)
+    assert any("uuid" in m and "not one of" in m for m in v)
+
+
+def test_ledger_stage_apply_discard():
+    ledger = RuleLedger(CFG)
+    rule_ = ledger.stage(_draft(), actor="op")
+    assert rule_.rule_id == "rule-0001" and rule_.status is RuleStatus.STAGED
+    applied = ledger.apply(rule_.rule_id, actor="op")
+    assert applied.status is RuleStatus.APPLIED and applied.effective_from is not None
+    with pytest.raises(RuleGuardrailViolation):
+        ledger.discard(rule_.rule_id, actor="op")
+
+
+def test_ledger_apply_refuses_non_staged_id():
+    ledger = RuleLedger(CFG)
+    with pytest.raises(RuleGuardrailViolation):
+        ledger.apply("rule-9999", actor="op")
+
+
+def test_ledger_discard_records_actor_kind():
+    ledger = RuleLedger(CFG)
+    rule_ = ledger.stage(_draft(), actor="op")
+    discarded = ledger.discard(rule_.rule_id, actor="assistant", actor_kind=ActorKind.AGENT)
+    assert discarded.status is RuleStatus.DISCARDED
+    assert discarded.discarded_by_kind is ActorKind.AGENT
+    assert discarded.discarded_by == "assistant"
+
+
+def test_ledger_pending_applied_and_list_filter_by_api():
+    ledger = RuleLedger(CFG)
+    r1 = ledger.stage(_draft(api_id="api-1"), actor="op")
+    r2 = ledger.stage(_draft(api_id="api-2"), actor="op")
+    ledger.apply(r1.rule_id, actor="op")
+    assert [r.rule_id for r in ledger.pending()] == [r2.rule_id]
+    assert [r.rule_id for r in ledger.applied()] == [r1.rule_id]
+    assert [r.rule_id for r in ledger.list(api_id="api-1")] == [r1.rule_id]
+    assert {r.rule_id for r in ledger.list()} == {r1.rule_id, r2.rule_id}
+
+
+def test_ledger_rejects_more_than_max_rules_per_api_applied():
+    cfg = AtworksAgentConfig(model="m", max_rules_per_api=1)
+    ledger = RuleLedger(cfg)
+    first = ledger.stage(_draft(api_id="api-1", param="amount"), actor="op")
+    ledger.apply(first.rule_id, actor="op")
+    with pytest.raises(RuleGuardrailViolation):
+        ledger.stage(_draft(api_id="api-1", param="status", kind="required"), actor="op")
+
+
+def test_ledger_stage_uses_apis_mapping_for_param_guardrail():
+    ledger = RuleLedger(CFG, apis={"api-1": _api(params=["amount"])})
+    with pytest.raises(RuleGuardrailViolation):
+        ledger.stage(_draft(api_id="api-1", param="unknown"), actor="op")

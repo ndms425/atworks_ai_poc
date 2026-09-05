@@ -8,11 +8,16 @@ from atworks_agent.gates import (
     STAGING_FOLLOWTHROUGH_REMINDER,
     check_api_provenance,
     check_apply_job,
+    check_apply_rule,
     check_discard_job,
+    check_discard_rule,
+    check_rule_param_provenance,
     prose_restates_figures,
+    take_rule_discard_actor_kind,
     turn_attempted_staging,
 )
-from atworks_agent.types import ApiSpec, AtworksSessionState, JobKind, JobSpec
+from atworks_agent.rules import ValidationRule
+from atworks_agent.types import ActorKind, ApiSpec, AtworksSessionState, JobKind, JobSpec
 
 CFG = AtworksAgentConfig(model="m")
 
@@ -93,3 +98,51 @@ def test_prose_restates_figures_negatives():
     assert not prose_restates_figures("2026-09-03 09:00 실행 예정입니다.")
     assert not prose_restates_figures("HTTP 503 error가 발생했습니다.")
     assert not prose_restates_figures("api-003 스펙을 확인하세요.")
+
+
+def _rule(rule_id="rule-0001", api_id="api-1"):
+    return ValidationRule(rule_id=rule_id, api_id=api_id, param="amount", kind="compare", op=">=",
+                          value="0", message="amount >= 0", created_at=datetime.now(UTC), created_by="op")
+
+
+def test_check_rule_param_provenance_unknown_api():
+    state = AtworksSessionState()
+    held = check_rule_param_provenance(state, "api-1", "amount")
+    assert held is not None and held.blocked == PROVENANCE_GATE
+
+
+def test_check_rule_param_provenance_unknown_param():
+    state = AtworksSessionState()
+    state.remember_api(ApiSpec(api_id="api-1", method="GET", path="/x", name="x",
+                               updated_at=datetime.now(UTC), params=["amount"]))
+    held = check_rule_param_provenance(state, "api-1", "bogus")
+    assert held is not None and held.blocked == PROVENANCE_GATE
+    assert "bogus" in held.result_text
+
+
+def test_check_rule_param_provenance_ok():
+    state = AtworksSessionState()
+    state.remember_api(ApiSpec(api_id="api-1", method="GET", path="/x", name="x",
+                               updated_at=datetime.now(UTC), params=["amount"]))
+    assert check_rule_param_provenance(state, "api-1", "amount") is None
+
+
+def test_check_apply_rule_requires_seen_then_approval():
+    state = AtworksSessionState()
+    assert check_apply_rule(state, CFG, "rule-0001").blocked == PROVENANCE_GATE
+    state.remember_rule(_rule())
+    held = check_apply_rule(state, CFG, "rule-0001")
+    assert held is not None and held.blocked == APPROVAL_GATE
+    state.approved_rule_ids.add("rule-0001")
+    assert check_apply_rule(state, CFG, "rule-0001") is None
+
+
+def test_check_discard_rule_and_actor_kind():
+    state = AtworksSessionState()
+    assert check_discard_rule(state, "rule-x").blocked == PROVENANCE_GATE
+    state.remember_rule(_rule())
+    assert check_discard_rule(state, "rule-0001") is None
+    assert take_rule_discard_actor_kind(state, "rule-0001") is ActorKind.AGENT
+    state.host_action_rule_ids.add("rule-0001")
+    assert take_rule_discard_actor_kind(state, "rule-0001") is ActorKind.OPERATOR
+    assert "rule-0001" not in state.host_action_rule_ids

@@ -263,6 +263,11 @@ class AtworksSessionState(BaseModel):
     last_aggregate_since: datetime | None = None
     approved_job_ids: set[str] = Field(default_factory=set)
     host_action_job_ids: set[str] = Field(default_factory=set)
+    # ValidationRule instances, typed loosely to avoid a rules.py <-> types.py import cycle
+    # (rules.py already imports types.py for ApiSpec/ActorKind/RuleStatus).
+    seen_rules: dict[str, Any] = Field(default_factory=dict)
+    approved_rule_ids: set[str] = Field(default_factory=set)
+    host_action_rule_ids: set[str] = Field(default_factory=set)
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)
@@ -275,6 +280,9 @@ class AtworksSessionState(BaseModel):
 
     def remember_job(self, job: JobSpec) -> None:
         remember(self.seen_jobs, job.job_id, job)
+
+    def remember_rule(self, rule: Any) -> None:
+        remember(self.seen_rules, rule.rule_id, rule)
 
     def remember_groups(self, group_by: str, groups: list[RunGroup], since: datetime | None) -> None:
         for group in groups:

@@ -141,3 +141,34 @@ def take_discard_actor_kind(state: AtworksSessionState, job_id: str) -> ActorKin
         state.host_action_job_ids.discard(job_id)
         return ActorKind.OPERATOR
     return ActorKind.AGENT
+
+
+def check_rule_param_provenance(state: AtworksSessionState, api_id: str, param: str) -> ToolOutcome | None:
+    api = state.seen_apis.get(api_id)
+    if api is None:
+        return ToolOutcome.held(PROVENANCE_GATE, f"api_id {api_id} was not read this session; call get_api first.")
+    if param not in api.params:
+        return ToolOutcome.held(PROVENANCE_GATE,
+            f"{param!r} is not a parameter of {api_id} ({', '.join(api.params) or 'none'}); pick one get_api lists.")
+    return None
+
+
+def check_apply_rule(state: AtworksSessionState, config: AtworksAgentConfig, rule_id: str) -> ToolOutcome | None:
+    if rule_id not in state.seen_rules:
+        return ToolOutcome.held(PROVENANCE_GATE, f"rule {rule_id} was not staged or listed this session.")
+    if config.require_host_approval and rule_id not in state.approved_rule_ids:
+        return ToolOutcome.held(APPROVAL_GATE,
+            f"rule {rule_id} is staged and waiting for approval on the Rules page; approving it there applies it.")
+    return None
+
+
+def check_discard_rule(state: AtworksSessionState, rule_id: str) -> ToolOutcome | None:
+    return None if rule_id in state.seen_rules else ToolOutcome.held(
+        PROVENANCE_GATE, f"rule {rule_id} was not staged or listed this session.")
+
+
+def take_rule_discard_actor_kind(state: AtworksSessionState, rule_id: str) -> ActorKind:
+    if rule_id in state.host_action_rule_ids:
+        state.host_action_rule_ids.discard(rule_id)
+        return ActorKind.OPERATOR
+    return ActorKind.AGENT
