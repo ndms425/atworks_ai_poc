@@ -95,3 +95,13 @@ def test_static_prompt_carries_the_format_example_reuse_bulk_hard_line():
 def test_static_prompt_drops_format_hard_line_when_rules_switched_off():
     text = build_static_system(AtworksAgentConfig(model="m", enable_rules=False), SKILLS)
     assert "Bulk-add formats with stage_format_batch" not in text
+
+
+def test_dynamic_context_carries_screen_state_and_is_byte_stable_without_it():
+    from atworks_agent import ScreenState, ScreenTarget
+    from atworks_agent.prompt import build_dynamic_context
+    base = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[])
+    assert "<screen-state>" not in base
+    withs = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[],
+                                  screen_state=ScreenState(view="apis", visible=[ScreenTarget(kind="api", ref_id="api-001")]))
+    assert withs.startswith(base) and "api:api-001" in withs

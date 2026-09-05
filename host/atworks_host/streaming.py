@@ -85,7 +85,13 @@ def build_app(title: str, on_startup: Sequence[Callable[[], Awaitable[None]]] = 
 
 class TurnAgent(Protocol):
     def stream_turn(
-        self, messages: list[dict[str, Any]], session: Any, state: Any, *, attached_items: Any = ()
+        self,
+        messages: list[dict[str, Any]],
+        session: Any,
+        state: Any,
+        *,
+        attached_items: Any = (),
+        screen_state: Any = None,
     ) -> AsyncIterator[AgentEvent]: ...
 
 
@@ -113,6 +119,7 @@ def stream_turn(
     *,
     env_hint: str,
     attached_items: Any = (),
+    screen_state: Any = None,
 ) -> StreamingResponse:
     """Stream one turn as SSE; the record is written back once the stream has ended (the
     request dependency wrote back before it began). Credential failures become a readable
@@ -122,7 +129,7 @@ def stream_turn(
     async def event_stream() -> AsyncIterator[str]:
         try:
             async for event in agent.stream_turn(
-                record.messages, session, record.state, attached_items=attached_items
+                record.messages, session, record.state, attached_items=attached_items, screen_state=screen_state
             ):
                 if event.type == "turn_complete" and event.data.get("results_cleared"):
                     record.stored_messages = 0  # earlier messages changed: rewrite the transcript

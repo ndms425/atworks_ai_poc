@@ -97,6 +97,14 @@ async def test_chat_streams_sse_with_attachments(client):
     assert "event: text_delta" in r.text and "event: turn_complete" in r.text
 
 
+async def test_chat_request_accepts_screen_state_and_caps_visible(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    too_many = [{"kind": "run", "ref_id": f"run-{i:04d}"} for i in range(41)]
+    r = await client.post("/api/atworks/chat", headers={"X-Session-Id": sid},
+                          json={"message": "hi", "screen_state": {"view": "runs", "visible": too_many}})
+    assert r.status_code == 422
+
+
 async def test_apply_route_marks_then_consumes_approval(client):
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post("/api/atworks/changes/job-9999/apply", headers={"X-Session-Id": sid})

@@ -76,7 +76,12 @@ from atworks_agent.gates import (
 from atworks_agent.grounding import GROUNDING_RULES, job_requested
 from atworks_agent.prompt import build_dynamic_context, build_static_system
 from atworks_agent.tools.registry import build_tools
-from atworks_agent.types import AttachedItem, AtworksSessionContext, AtworksSessionState
+from atworks_agent.types import (
+    AttachedItem,
+    AtworksSessionContext,
+    AtworksSessionState,
+    ScreenState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,12 +137,14 @@ class AtworksAgent:
         session: AtworksSessionContext,
         state: AtworksSessionState | None = None,
         attached_items: Sequence[AttachedItem] = (),
+        screen_state: ScreenState | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run one turn. ``messages`` ends with the operator's message and is extended
         in place with the turn's assistant messages, tool results, and any reminder, so
         the host stores it as is; ``state`` carries the session's provenance and comes
         back on every turn."""
         state = state if state is not None else AtworksSessionState()
+        state.current_screen = screen_state
         turn_started = time.monotonic()
         usage = usage_totals()
         atworks_context = await fetched(self.backend.get_context(session))
@@ -152,6 +159,7 @@ class AtworksAgent:
             attached_items=list(attached_items),
             now=session.local_now(),
             context_max_chars=self.config.max_context_chars,
+            screen_state=screen_state,
         )
         system = build_system_blocks(self._static_system, context)
         # Delegates post progress lines while their executions are in flight; the loop

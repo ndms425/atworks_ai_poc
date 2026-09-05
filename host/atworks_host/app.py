@@ -16,6 +16,7 @@ from atworks_agent import (
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
+    ScreenState,
 )
 from atworks_agent.aggregation import summarize_insights
 from atworks_agent.serialization import (
@@ -61,6 +62,7 @@ def _aware(value: str | None) -> datetime | None:
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     attached_items: list[AttachedItem] = Field(default_factory=list, max_length=8)
+    screen_state: ScreenState | None = None
 
 
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
@@ -83,7 +85,10 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/chat")
     async def chat(request: ChatRequest, record: CurrentSession) -> StreamingResponse:
         append_user_turn(record, request.message, "Portal events")
-        return stream_turn(agent, sessions, record, context(record), env_hint=".env", attached_items=request.attached_items)
+        return stream_turn(
+            agent, sessions, record, context(record), env_hint=".env",
+            attached_items=request.attached_items, screen_state=request.screen_state,
+        )
 
     @router.get("/apis")
     async def apis(record: CurrentSession, query: str = "", group: str | None = None) -> dict:

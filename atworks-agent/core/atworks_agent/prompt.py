@@ -13,7 +13,8 @@ from commerce_common.skills import SkillRegistry
 from .attachments import render_attached_items_hint
 from .config import AtworksAgentConfig
 from .fencing import ATWORKS_FENCE
-from .types import AttachedItem
+from .screen import render_screen_state_hint
+from .types import AttachedItem, ScreenState
 
 
 def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> str:
@@ -139,6 +140,7 @@ def build_dynamic_context(
     now: datetime | None = None,
     max_chars: int = 6000,
     context_max_chars: int = 2000,
+    screen_state: ScreenState | None = None,
 ) -> str:
     payload: dict[str, Any] = {}
     if atworks_context is not None:
@@ -147,4 +149,4 @@ def build_dynamic_context(
     if now is not None:
         payload["local_time"] = context_clock(now)
     block = "# aTworks context\n\n" + ATWORKS_FENCE.fence_payload(payload, max_chars=max_chars)
-    return block + render_attached_items_hint(attached_items)
+    return block + render_attached_items_hint(attached_items) + render_screen_state_hint(screen_state)
