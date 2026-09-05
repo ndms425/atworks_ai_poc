@@ -26,12 +26,14 @@ from .tools.presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
+    HIGHLIGHT_SCREEN_TOOL,
     NAVIGATE_SCREEN_TOOL,
     PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
     PROFILE_PREVIEW_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
+    HighlightScreenPayload,
     NavigateScreenPayload,
     PresentFormatBatchPayload,
     PresentJobPreviewPayload,
@@ -307,6 +309,24 @@ async def enrich_navigate_screen(payload: NavigateScreenPayload, context: Enrich
     return enriched
 
 
+async def enrich_highlight_screen(payload: HighlightScreenPayload, context: EnrichmentContext) -> dict[str, Any]:
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for t in payload.targets:
+        if screen_ref_grounded(context.state, t.kind, t.ref_id):
+            kept.append({"kind": t.kind, "ref_id": t.ref_id, "note": t.note, "number": len(kept) + 1})
+        else:
+            dropped.append(f"{t.kind}:{t.ref_id}")
+    if not kept:
+        raise PresentationRefused("None of those ids were seen this session or are on the current screen.", gate=PROVENANCE_GATE)
+    enriched: dict[str, Any] = {"targets": kept}
+    if payload.headline:
+        enriched["headline"] = payload.headline
+    if dropped:
+        enriched["note"] = "Not highlighted (ungrounded): " + ", ".join(dropped)
+    return enriched
+
+
 async def enrich_question_form(payload: QuestionFormPayload, context: EnrichmentContext) -> dict[str, Any]:
     del context
     enriched = payload.model_dump(exclude_none=True)
@@ -328,6 +348,7 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
         PresentationComponent(name=PROFILE_PREVIEW_TOOL, component="profile_preview", payload_model=PresentProfilePreviewPayload, enrich=enrich_profile_preview),
         PresentationComponent(name=QUESTION_TOOL, component="question_form", payload_model=QuestionFormPayload, enrich=enrich_question_form),
         PresentationComponent(name=NAVIGATE_SCREEN_TOOL, component="screen_navigate", payload_model=NavigateScreenPayload, enrich=enrich_navigate_screen),
+        PresentationComponent(name=HIGHLIGHT_SCREEN_TOOL, component="screen_highlight", payload_model=HighlightScreenPayload, enrich=enrich_highlight_screen),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),
     )
 }

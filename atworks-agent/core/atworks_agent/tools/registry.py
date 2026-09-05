@@ -14,6 +14,7 @@ from .presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
     GROUPS_TOOL,
+    HIGHLIGHT_SCREEN_TOOL,
     NAVIGATE_SCREEN_TOOL,
     PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
@@ -480,6 +481,22 @@ def build_tools(
                     "query": {"type": "string", "maxLength": 80}},
                     "additionalProperties": False}},
                 "required": ["view"], "additionalProperties": False},
+        },
+        {
+            "name": HIGHLIGHT_SCREEN_TOOL,
+            "description": ("Draw numbered red boxes on items the operator can see (①②③ in the order given; match "
+                            "them in your prose). Use it when your explanation rests on specific on-screen items; "
+                            "navigate_screen first if they are on another view. Screen only — nothing is run or "
+                            "approved."),
+            "input_schema": {"type": "object", "properties": {
+                "targets": {"type": "array", "minItems": 1, "maxItems": config.max_highlight_targets,
+                            "items": {"type": "object", "properties": {
+                                "kind": {"type": "string", "enum": ["api", "run", "job", "rule"]},
+                                "ref_id": {"type": "string", "maxLength": 64},
+                                "note": {"type": "string", "maxLength": 120}},
+                                "required": ["kind", "ref_id"], "additionalProperties": False}},
+                "headline": {"type": "string", "maxLength": 80}},
+                "required": ["targets"], "additionalProperties": False},
         },
         {
             "name": "present_suggestions",

@@ -11,7 +11,7 @@ EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "ran
             "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles", "recommend_ignore_paths",
             "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
             "present_format_batch", "present_parity_summary", "present_profile_preview",
-            "present_question_form", "navigate_screen", "present_suggestions"]
+            "present_question_form", "navigate_screen", "highlight_screen", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():
@@ -188,3 +188,13 @@ def test_registry_has_navigate_screen_with_view_enum_and_filter_shape():
 def test_navigate_screen_absent_when_screen_directives_disabled():
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=False), [])]
     assert "navigate_screen" not in names
+
+
+def test_registry_highlight_max_items_tracks_config():
+    tools = {t["name"]: t for t in build_tools(AtworksAgentConfig(model="m", max_highlight_targets=3), [], ())}
+    assert tools["highlight_screen"]["input_schema"]["properties"]["targets"]["maxItems"] == 3
+
+
+def test_highlight_screen_absent_when_screen_directives_disabled():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=False), [])]
+    assert "highlight_screen" not in names
