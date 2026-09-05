@@ -74,3 +74,16 @@ run이 자동으로 첨부된다.
 채팅에서 값 검증 규칙 초안을 작성 — 수치 비교, 코드값 소속(membership), 필수값(required), 포맷(named
 또는 raw regex) 네 종류 — 하고 Rules 뷰에서 승인하면 이후 실행되는 run에만 적용된다. 과거 run과
 성공률, 리포트, 브리핑은 그대로 남는다(effective_from 이후만 평가).
+
+## 포맷 라이브러리, 예시 검증 & 추천
+
+raw regex 포맷 규칙은 `pass_examples`/`fail_examples`를 함께 내야 스테이징된다 — 패턴을 컴파일해 pass는
+전부 fullmatch, fail은 전부 불일치해야 하고, 하나라도 어긋나면 그 자리에서 거부된다(내장 5개
+email/date/iso8601/uuid/number는 예시가 필요 없다). 승인된 raw-pattern 규칙에 이름을 붙이면
+(`save_format_as`) 포맷 라이브러리에 저장돼 이후 다른 규칙의 `format`에 그 이름을 그대로 쓸 수 있다
+— 라이브러리 포맷은 어떤 run도 참조되기 전까진 판정하지 않으므로(inert), 여러 개를 한 번에 추가하는
+`stage_format_batch`도 승인 한 번으로 끝난다(이름·패턴이 겹치면 자동으로 걸러진다). 추천은 두 방향 —
+한 API에 적용한 포맷을 같은 이름의 param을 가진 다른 API로 확장할지 묻거나, 규칙이 없는 API에 대해
+같은 이름의 param을 가진 다른 API들에 이미 적용된 규칙을 제안한다(대응하는 사례가 없으면 아무것도
+지어내지 않는다) — 제안된 규칙도 각각 개별 스테이징·승인을 거친다. Rules 페이지의 Formats 섹션에서
+`GET /formats`·`GET /format-batches`로 보고 `POST /format-batches/{id}/apply|discard`로 승인/폐기한다.

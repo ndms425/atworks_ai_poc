@@ -44,7 +44,35 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `stage_rule` / `apply_rule` / `discard_rule` / `get_pending_rules` / `list_rules` / `simulate_rule`
   → the rule ledger (`stage` drafts a structured `ValidationRule` on a session-seen API param,
   `apply` stamps `effective_from` and is the sole state change, `simulate_rule` is a read-only
-  impact preview).
+  impact preview). A value rule is the API's success criterion independent of HTTP status; it only
+  ever validates, never transforms a value. A `format` rule kind carries a raw regex or a
+  `format` string — a **free string**, resolved server-side against the format library, never
+  restricted to the five named enum values in the tool schema. A raw pattern must carry
+  `pass_examples`/`fail_examples` (`min_format_examples`(1)/`max_format_examples`(8) config
+  floor/cap): `verify_examples` (`.../rules.py`) compiles the pattern and fullmatches every example
+  — a pass example that doesn't match, or a fail example that does, rejects the draft before it's
+  built. The five built-ins (email/date/iso8601/uuid/number) need no examples. `get_format` /
+  `list_formats` / `save_format` on the ABC read and write the **format library**
+  (`FormatDefinition`/`FormatLibrary` in `.../rules.py`): the five built-ins seeded read-only plus
+  operator-saved entries (`save_format_as` on a raw-pattern rule, promoted at `apply_rule` — the
+  same host-approval click that applies the rule also seeds the library; a name/pattern collision
+  or a full library (`max_format_library`=200) is a silent skip plus a guardrail note, never a
+  failed rule apply). A later rule's `format` field can name any library entry; the executor
+  resolves it at stage time into `pattern` (plus its stored examples) and keeps only the source
+  name for display (`ValidationRule.format_name`) — `evaluate()` stays pattern-based and
+  backend-independent, no per-backend format lookup. A library format is **inert**: it judges no
+  run until an approved rule references it, which is what makes bulk seeding safe to approve once.
+  `stage_format_batch` / `get_pending_format_batches` / `apply_format_batch` / `discard_format_batch`
+  stage and approve a `FormatBatch` (`max_format_batch`=30 entries) — each entry's outcome
+  (new/duplicate/invalid) is computed at stage time via the same dedup rule as `FormatLibrary.add`
+  (name or identical pattern), and `apply_format_batch` adds only the `new` ones, one host approval
+  for the whole batch. `find_apis_with_param` / `recommend_rules_for_api` are read-only
+  recommendation, two directions, never fabricating a constraint from a param name alone:
+  outward — given a param, other APIs that declare it and don't yet have a format rule on it,
+  so an applied format can be offered to expand; inward — given a rule-less API,
+  `RuleRecommendation`s built only from rules already applied to peer APIs' same-named params (an
+  unmatched param suggests nothing). Each recommended target still stages and is approved as its
+  own rule.
 - **Identity and credentials:** auth mechanism is none in MVP (fixed `OPERATOR` constant; a
   production host derives the principal from its authentication). Backend calls carry server-side
   credentials the model never sees.
@@ -70,7 +98,11 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `run_digest`, `job_preview`, `question_form`, `run_groups`, chips; job lifecycle rides `change_update` with a
   `change_id` alias. Rules get their own surface, never `/changes/`: the Rules page (5th nav),
   `POST /rules/{id}/apply|discard` (mirror of `job_action`), `GET /rules`, and the `rule_preview`
-  card shown when `stage_rule` runs, carrying the impact simulation and immutability note.
+  card shown when `stage_rule` runs, carrying the impact simulation and immutability note. Formats
+  get their own namespace too, never `/rules/` or `/changes/`: `GET /formats` (built-ins + saved),
+  `GET /format-batches` (pending), `POST /format-batches/{id}/apply|discard`
+  (`format_batch_action`, mirror of `rule_action`) — a Formats section on the Rules page and its own
+  `format_batch` card, posting only to `/format-batches`.
   **The report is where environments are compared**: a template rendered once
   over a `data.json` the scheduler refreshes, no LLM in the path — `summary.by_env` plus an
   api × data grid, one column per env from the latest run per cell with differing rows flagged,
