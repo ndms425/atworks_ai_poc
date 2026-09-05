@@ -44,6 +44,13 @@ export interface ScreenHighlightPayload {
   note?: string;
 }
 
+/** A navigate directive turned into something a mounted view can apply once (tracked by `nonce`). */
+export interface ScreenIntent {
+  focus?: { kind: ScreenTargetKind; ref_id: string };
+  filter?: ScreenFilter;
+  nonce: number;
+}
+
 export interface ApiSpec {
   api_id: string;
   method: string;

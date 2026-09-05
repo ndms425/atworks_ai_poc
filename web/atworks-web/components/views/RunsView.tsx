@@ -3,11 +3,11 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AskButton, formatDate, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton, useResource } from "web-shared";
 import { fetchApis, fetchRuns } from "@/lib/api";
 import { RUN_STATUS } from "@/lib/kinds";
-import type { ApiSpec, AttachedItem } from "@/lib/types";
+import type { ApiSpec, AttachedItem, ScreenFilter, ScreenIntent, ScreenTarget } from "@/lib/types";
 
 type Filter = "all" | "fail" | "error" | "pass";
 
@@ -15,10 +15,14 @@ export default function RunsView({
   refreshKey,
   attachedCount,
   onAttach,
+  intent,
+  onScreen,
 }: {
   refreshKey: number;
   attachedCount: number;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  intent?: ScreenIntent | null;
+  onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const { data: apiData } = useResource(() => fetchApis(), [refreshKey]);
@@ -30,6 +34,48 @@ export default function RunsView({
     const api: ApiSpec | undefined = apiById.get(apiId);
     return api ? `${api.method} ${api.path}` : apiId;
   };
+
+  // Apply a navigate directive once per nonce (a re-render must never re-apply it). The focus
+  // target is stashed in a ref rather than read straight off `intent` in the scroll effect below,
+  // because page.tsx clears `screenIntent` right after this view's first onScreen report — which
+  // fires on mount, often before the fetch below has resolved — so `intent` itself can go null
+  // before there's anything to scroll to.
+  const appliedNonceRef = useRef<number | undefined>(undefined);
+  const pendingFocusRef = useRef<{ kind: string; ref_id: string } | null>(null);
+  useEffect(() => {
+    if (!intent || intent.nonce === appliedNonceRef.current) return;
+    appliedNonceRef.current = intent.nonce;
+    if (intent.filter?.status) setFilter(intent.filter.status);
+    pendingFocusRef.current = intent.focus ?? null;
+  }, [intent]);
+
+  // Scroll to the pending focus target once its row exists. Re-runs whenever the row set changes
+  // (i.e. once the fetch resolves), plus a short retry for the case where the DOM hasn't
+  // committed the new rows yet when this effect fires.
+  useEffect(() => {
+    const focus = pendingFocusRef.current;
+    if (!focus) return;
+    const find = () => document.querySelector(`[data-ref="${focus.kind}:${focus.ref_id}"]`);
+    const found = find();
+    if (found) {
+      found.scrollIntoView({ block: "center", behavior: "smooth" });
+      pendingFocusRef.current = null;
+      return;
+    }
+    const timer = setTimeout(() => {
+      find()?.scrollIntoView({ block: "center", behavior: "smooth" });
+      pendingFocusRef.current = null;
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [runs]);
+
+  // Report what's actually on screen so api.screenState stays current for the next chat turn.
+  useEffect(() => {
+    onScreen?.({
+      filter: { status: filter },
+      visible: runs.slice(0, 40).map((run) => ({ kind: "run", ref_id: run.run_id, label: `${labelFor(run.api_id)} ${run.target_env}` })),
+    });
+  }, [runs, filter, apiById, onScreen]);
 
   return (
     <div className="ac-reveal flex flex-col gap-4">
@@ -73,7 +119,7 @@ export default function RunsView({
               {runs.map((run) => {
                 const style = RUN_STATUS[run.status];
                 return (
-                  <tr key={run.run_id} className="border-t border-(--line)">
+                  <tr key={run.run_id} data-ref={`run:${run.run_id}`} className="border-t border-(--line)">
                     <td className="py-2 pl-[18px] pr-3">
                       <div className="font-mono text-[12.5px] text-(--ink)">{labelFor(run.api_id)}</div>
                       <div className="text-[11.5px] tabular-nums text-(--ink-soft)">

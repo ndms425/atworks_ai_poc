@@ -13,7 +13,18 @@ import RulesView from "@/components/views/RulesView";
 import RunsView from "@/components/views/RunsView";
 import { actOnRule, api, UNREACHABLE } from "@/lib/api";
 import type { RuleAction } from "@/lib/useRuleActions";
-import type { AttachedItem, JobSpec, ValidationRule } from "@/lib/types";
+import type {
+  AttachedItem,
+  JobSpec,
+  ScreenDirective,
+  ScreenFilter,
+  ScreenHighlightPayload,
+  ScreenIntent,
+  ScreenNavigatePayload,
+  ScreenState,
+  ScreenTarget,
+  ValidationRule,
+} from "@/lib/types";
 
 type PortalView = "home" | "apis" | "runs" | "jobs" | "rules";
 
@@ -39,11 +50,53 @@ export default function PortalPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const refreshPortal = useCallback(() => setRefreshKey((value) => value + 1), []);
 
+  // A `navigate` directive turns into an intent the mounted view applies once (nonce-tracked);
+  // page.tsx clears it after that view's next onScreen report — no separate onIntentConsumed.
+  const [screenIntent, setScreenIntent] = useState<ScreenIntent | null>(null);
+  // Task 8 state: prepared here, consumed there. `highlight` payloads land in `highlights`;
+  // `navigate` marks navigatedByDirectiveRef before setView so Task 8 can tell a chat-driven
+  // navigation apart from the operator clicking the nav rail themselves.
+  const [highlights, setHighlights] = useState<ScreenHighlightPayload | null>(null);
+  const navigatedByDirectiveRef = useRef(false);
+  const screenReportRef = useRef<{ filter?: ScreenFilter; visible: ScreenTarget[] }>({ visible: [] });
+
+  const onScreenDirective = useCallback((d: ScreenDirective) => {
+    if (d.kind === "navigate") {
+      const p = d.payload as unknown as ScreenNavigatePayload;
+      navigatedByDirectiveRef.current = true;
+      setView(p.view);
+      setScreenIntent({ focus: p.focus, filter: p.filter, nonce: Date.now() });
+    } else {
+      setHighlights(d.payload as unknown as ScreenHighlightPayload);
+    }
+  }, []);
+
   const chat = useMerchantChat<JobSpec>(api, {
     ...session,
     unreachable: UNREACHABLE,
     onPortalRefresh: refreshPortal,
+    onScreenDirective,
   });
+
+  // The mounted view reports what it actually shows; this pushes that (plus the current view)
+  // onto api.screenState, which rides every chat turn as `screen_state`. Clearing screenIntent
+  // here (rather than a callback the view calls back) is the "consumed" signal from ruling 1.
+  const onScreen = useCallback(
+    (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => {
+      screenReportRef.current = report;
+      api.screenState = { view, filter: report.filter, visible: report.visible.slice(0, 40) } as ScreenState;
+      if (screenIntent) setScreenIntent(null);
+    },
+    [view, screenIntent],
+  );
+
+  // A bare view switch (before the newly mounted view has reported anything, e.g. its data is
+  // still loading) still needs api.screenState.view to be current — with an empty visible list
+  // rather than the outgoing view's stale rows.
+  useEffect(() => {
+    screenReportRef.current = { visible: [] };
+    api.screenState = { view, visible: [] } as ScreenState;
+  }, [view]);
 
   // Snapshot of what a send actually carried, so the busy->false cleanup below can tell a sent
   // attachment apart from one dropped in mid-send (see onAttach/effect below).
@@ -165,11 +218,23 @@ export default function PortalPage() {
       >
         {session.sessionId ? (
           <>
-            {view === "home" ? <HomeView refreshKey={refreshKey} onAskAssistant={askAssistant} /> : null}
-            {view === "apis" ? <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} onAttach={onAttach} /> : null}
-            {view === "runs" ? <RunsView refreshKey={refreshKey} attachedCount={attached.length} onAttach={onAttach} /> : null}
-            {view === "jobs" ? <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} onAttach={onAttach} /> : null}
-            {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} /> : null}
+            {view === "home" ? <HomeView refreshKey={refreshKey} onAskAssistant={askAssistant} onScreen={onScreen} /> : null}
+            {view === "apis" ? (
+              <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} onAttach={onAttach} intent={screenIntent} onScreen={onScreen} />
+            ) : null}
+            {view === "runs" ? (
+              <RunsView
+                refreshKey={refreshKey}
+                attachedCount={attached.length}
+                onAttach={onAttach}
+                intent={screenIntent}
+                onScreen={onScreen}
+              />
+            ) : null}
+            {view === "jobs" ? (
+              <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} onAttach={onAttach} intent={screenIntent} onScreen={onScreen} />
+            ) : null}
+            {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} intent={screenIntent} onScreen={onScreen} /> : null}
           </>
         ) : null}
       </PortalShell>

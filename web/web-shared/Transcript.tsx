@@ -5,6 +5,7 @@
 
 import type { ReactNode } from "react";
 import { AssistantText, ErrorBubble, UserBubble } from "./MessageBubble";
+import { SCREEN_DIRECTIVE_COMPONENTS } from "./protocol";
 import type { AssistantChatItem, ChatItem, UISegment } from "./protocol";
 import { Suggestions } from "./Suggestions";
 
@@ -61,6 +62,10 @@ export function Transcript({
             return <AssistantText key={i} text={segment.text} streaming={last} />;
           }
           if (segment.type === "error") return <ErrorBubble key={i} text={segment.text} />;
+          // Directive-only components (screen_navigate/screen_highlight) render nothing — the
+          // page and view act on onScreenDirective instead — so skip the wrapper entirely.
+          // Otherwise the empty slot is still a flex child of this gap-3 column and leaves a hole.
+          if ((SCREEN_DIRECTIVE_COMPONENTS as readonly string[]).includes(segment.block.component)) return null;
           return (
             <div
               key={segment.slotKey}

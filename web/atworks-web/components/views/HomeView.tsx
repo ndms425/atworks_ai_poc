@@ -3,9 +3,11 @@
 
 "use client";
 
+import { useEffect } from "react";
 import { Button, Notice, PageHeader, Panel, plural, Skeleton, StatStrip, StatTile, useResource } from "web-shared";
 import { fetchInsights, fetchJobs, fetchRuns } from "@/lib/api";
 import BriefingCard from "@/components/BriefingCard";
+import type { ScreenFilter, ScreenTarget } from "@/lib/types";
 
 interface HomeCounts {
   fail: number;
@@ -25,8 +27,21 @@ async function loadCounts(): Promise<HomeCounts | null> {
   };
 }
 
-export default function HomeView({ refreshKey, onAskAssistant }: { refreshKey: number; onAskAssistant: (text: string) => void }) {
+export default function HomeView({
+  refreshKey,
+  onAskAssistant,
+  onScreen,
+}: {
+  refreshKey: number;
+  onAskAssistant: (text: string) => void;
+  onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
+}) {
   const { data, failed } = useResource(loadCounts, [refreshKey]);
+
+  // Home has no list of its own to report — just keep api.screenState's view current.
+  useEffect(() => {
+    onScreen?.({ visible: [] });
+  }, [onScreen]);
 
   return (
     <div className="ac-reveal flex flex-col gap-5">
