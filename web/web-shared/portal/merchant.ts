@@ -5,7 +5,7 @@
 
 import { useCallback, useRef } from "react";
 import type { AgentApi } from "../api";
-import type { AgentEvent, ChatItem } from "../protocol";
+import { type AgentEvent, type ChatItem, type ScreenDirective, SCREEN_DIRECTIVE_COMPONENTS } from "../protocol";
 import { type AgentTurn, useAgentTurn } from "../turn";
 
 export interface ChangeRef {
@@ -48,14 +48,28 @@ export function useMerchantChat<TChange extends ChangeRef>(
     sessionId: string | null;
     unreachable: string;
     onPortalRefresh: () => void;
+    /** Final `ui` only — a half-streamed directive (`ui_partial`) must never execute. */
+    onScreenDirective?: (directive: ScreenDirective) => void;
   },
 ): MerchantChat<TChange> {
   const { onPortalRefresh } = options;
   const dirtyRef = useRef(false);
   const setItemsRef = useRef<AgentTurn["setItems"] | null>(null);
+  const onScreenDirectiveRef = useRef(options.onScreenDirective);
+  onScreenDirectiveRef.current = options.onScreenDirective;
 
   const onEvent = useCallback((event: AgentEvent, turn: number) => {
-    if ((event.type === "ui" || event.type === "ui_partial") && event.data.component === "job_preview") {
+    const component = event.data.component;
+    if (
+      event.type === "ui" &&
+      typeof component === "string" &&
+      (SCREEN_DIRECTIVE_COMPONENTS as readonly string[]).includes(component)
+    ) {
+      onScreenDirectiveRef.current?.({
+        kind: component === "screen_navigate" ? "navigate" : "highlight",
+        payload: (event.data.payload ?? {}) as Record<string, unknown>,
+      });
+    } else if ((event.type === "ui" || event.type === "ui_partial") && component === "job_preview") {
       const changeId = (event.data.payload as { change_id?: string } | undefined)?.change_id;
       if (!changeId) return;
       setItemsRef.current?.((items) =>

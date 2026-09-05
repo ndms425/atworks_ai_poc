@@ -53,6 +53,12 @@ export interface UIBlock {
   payload: unknown;
 }
 
+/** The two reserved `ui` components a directive turn emits; never rendered as a card. */
+export const SCREEN_DIRECTIVE_COMPONENTS = ["screen_navigate", "screen_highlight"] as const;
+
+/** Transport-level shape; apps narrow `payload` against their own typed interfaces. */
+export type ScreenDirective = { kind: "navigate" | "highlight"; payload: Record<string, unknown> };
+
 export interface TraceEntry {
   kind: "tool_call" | "tool_result" | "turn_complete" | "error";
   turn: number;

@@ -70,6 +70,10 @@ export default function GenerativeBlock({
       return <ProfilePreviewCard payload={block.payload as ProfilePreviewPayload} onProfileAct={onProfileAction} />;
     case "question_form":
       return <QuestionFormCard payload={block.payload as QuestionFormPayload} onSubmit={onSend} />;
+    // Screen directives are intercepted in useMerchantChat and executed by the portal, never rendered as a card.
+    case "screen_navigate":
+    case "screen_highlight":
+      return null;
     default:
       return status === "final" ? <UnknownBlock component={block.component} /> : null;
   }

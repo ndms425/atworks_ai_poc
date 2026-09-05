@@ -15,6 +15,8 @@ export class AgentApi {
   readonly base: string;
   /** 다음 chatStream 한 번에 실려 가는 화면 첨부. 보낸 뒤 비운다. */
   pendingAttachments: unknown[] = [];
+  /** Describes the screen right now; a page updates it, chatStream reads it, never drained. */
+  screenState: unknown | null = null;
 
   /** `root` is the API's URL; `prefix` the role's route prefix ("/api", "/api/merchant"). */
   constructor(
@@ -113,7 +115,7 @@ export class AgentApi {
     const response = await fetch(`${this.base}/chat`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ message, attached_items }),
+      body: JSON.stringify({ message, attached_items, screen_state: this.screenState }),
     });
     if (!response.ok || !response.body) throw new Error(`chat request failed: ${response.status}`);
     yield* readEventStream(response.body);

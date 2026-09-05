@@ -3,6 +3,47 @@
 
 /** Mirrors atworks_agent/types.py and tools/presentation.py. */
 
+/** Transport-level directive shape; defined in web-shared (merchant.ts can't import from here). */
+export type { ScreenDirective } from "web-shared";
+
+export type ScreenTargetKind = "api" | "run" | "job" | "rule";
+
+export interface ScreenTarget {
+  kind: ScreenTargetKind;
+  ref_id: string;
+  label?: string;
+}
+
+export interface ScreenFilter {
+  status?: "all" | "pass" | "fail" | "error";
+  query?: string;
+}
+
+export type PortalViewId = "home" | "apis" | "runs" | "jobs" | "rules";
+
+/** The screen description sent as `screen_state` with every chat turn. */
+export interface ScreenState {
+  view: PortalViewId;
+  focus?: ScreenTarget;
+  filter?: ScreenFilter;
+  visible: ScreenTarget[];
+}
+
+/** `screen_navigate` directive payload. */
+export interface ScreenNavigatePayload {
+  view: PortalViewId;
+  focus?: { kind: ScreenTargetKind; ref_id: string };
+  filter?: ScreenFilter;
+  note?: string;
+}
+
+/** `screen_highlight` directive payload. */
+export interface ScreenHighlightPayload {
+  targets: { kind: ScreenTargetKind; ref_id: string; note?: string | null; number: number }[];
+  headline?: string;
+  note?: string;
+}
+
 export interface ApiSpec {
   api_id: string;
   method: string;
