@@ -85,9 +85,13 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `ProfileLedger`, mirroring the rule ledger), `apply_profile` stamps `effective_from` and, if a
   parity report already exists for the profile's job, re-diffs it from the STORED response
   bodies with no new backend call and no new run.
-- **Identity and credentials:** auth mechanism is none in MVP (fixed `OPERATOR` constant; a
-  production host derives the principal from its authentication). Backend calls carry server-side
-  credentials the model never sees.
+- **Identity and credentials:** auth mechanism is none in MVP. Operator profiles
+  (`host/atworks_host/fixtures/operators.json`, roles `developer`/`qa`/`pm`) are bound once at
+  `POST /api/atworks/session {operator_id}` via `sessions.start(operator_id)`; unknown id → 400,
+  omitted → the default operator. `AtworksSessionContext.operator`/`.role` are read server-side
+  after; later requests carry only `X-Session-Id`. A production host maps its own authentication →
+  `operator_id` (the reference `demo_common/sessions.py` seam, unchanged). Real auth is out of MVP
+  scope. Backend calls carry server-side credentials the model never sees.
 - **Sessions:** the principal is bound once at `POST /api/atworks/session` (`SessionStore.start`)
   onto `AtworksSessionContext` (`session_id`, `project_id`, `operator`) and read server-side after;
   later requests carry only `X-Session-Id` and no request shape names a user. Per-session state is
@@ -137,7 +141,13 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   api × data grid, one column per env from the latest run per cell with differing rows flagged,
   computed in `host/atworks_host/reports.py` from run records and escaped on the way out. Next.js
   portal (`web/atworks-web`, from `merchant-web`) is Task 15. No progressive/partial rendering and
-  no eager input streaming (see the model endpoint line).
+  no eager input streaming (see the model endpoint line). Two more session-free/session reads
+  round out Home: `GET /operators` (no session) lists the operator-profile fixture; `GET
+  /home/insights` (session) and `POST /home/insights/refresh` (session) serve the per-operator
+  insight panel, 404 when `enable_insight_panel=False` — the panel is read-only, touching no
+  approval mark or ledger. Its narration is cached per operator per local day at
+  `insights_out/<operator>/<YYYY-MM-DD>/narrative.json`, tagged `generated_by: agent|deterministic`
+  for provenance.
 - **Approval surface / `require_host_approval`:** `require_host_approval = True`; the surface is
   **the Jobs page approve button**. `POST /api/atworks/changes/{job_id}/apply` → `job_action` in
   `host/atworks_host/app.py` (mirror of `change_action`, `demo_common/merchant.py:238-283`) is the
@@ -204,6 +214,24 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   scoped to entities only: no button, tab, or control, and Home's summary tiles are out of scope,
   as are format/profile rows (rules only, on the Rules page). A "너가 승인해" delegated-approval
   path was evaluated and cancelled — see the Approval surface bullet.
+  **The per-operator insight panel** is likewise not a skill — a read-only Home feature, no tool,
+  no chat turn. Scope = the APIs the operator ran (`RunResult.executed_by = job.applied_by`,
+  stamped at `execute_job_once`) within `scope_window_days`; an operator who ran nothing falls back
+  to project-wide scope (`scope_fallback=True`). Deterministic candidates
+  (`atworks_agent/insights.py` `candidate_insights`, on top of `aggregation.py`) are ranked by a
+  fixed per-role priority table (`ROLE_PRIORITY`), capped `max_insight_candidates`. Exactly one
+  narration call per cache miss (`atworks_agent_runtime/insight_narrator.py` `narrate_insights`) —
+  fenced candidates as data, a forced tool, headline/why-it-matters/prompt only, never a number the
+  model computed itself; any unknown `candidate_id` in the model's answer is dropped; any exception
+  or timeout fails open to `[]`, and the host then serves the deterministic labels with
+  `generated_by: "deterministic"` — `enable_insight_narration=False` (`ATWORKS_INSIGHT_NARRATION=0`)
+  forces that fallback path for the demo without touching a candidate. The narration is a lazy,
+  per-operator-per-day cache (`host/atworks_host/insights.py`); candidates and scope themselves are
+  always recomputed live, never cached. The scheduler tick and the daily briefing stay untouched —
+  still LLM-free. `get_context` also adds `operator_role`/`scope_api_ids` (capped 20) to the
+  per-request context block, rendered as one `operator_line` in chat only when a role is present;
+  this is informational for the model's answers, not a filter — tool defaults and grounding rules
+  are unchanged, so scope is convenience, never authorization.
 - **Validation rules SI guarantee:** a rule's `effective_from` is stamped at `apply_rule`;
   evaluation in `execute_job_once` is additive over the legacy stub and only ever considers runs
   with `executed_at >= effective_from` — past `RunResult`s, success rates, reports and briefings are
