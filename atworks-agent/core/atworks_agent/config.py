@@ -88,7 +88,14 @@ class AtworksAgentConfig(BaseAgentConfig):
     max_ignore_paths: int = Field(default=200, ge=1)
 
     # -- 집계 (aggregate_runs · /runs/insights · 브리핑) --------------------------------
-    max_aggregate_runs: int = Field(default=2000, ge=1)           # list_runs limit for aggregation
+    # DEPRECATED (M13), kept only so the tests that PROVE it no longer matters can still name it.
+    # It was the size of the run SAMPLE aggregation used to page out of `list_runs`; Task 8 made
+    # every aggregate read rollup-fed, so nothing in the agent or the host reads this field any
+    # more and no behaviour follows from changing it. Deleting it outright would take the
+    # regression tests that pin "the 2,000-run window was WRONG, not merely slow"
+    # (host/tests/test_rewire.py) with it, so it stays, inert and labelled. It is prompt bytes
+    # nowhere and a tool-schema bound nowhere.
+    max_aggregate_runs: int = Field(default=2000, ge=1)
     max_aggregate_window_days: int = Field(default=30, ge=1)      # since is clamped to now - N days
     flaky_min_transitions: int = Field(default=2, ge=1)           # flaky_v1 threshold
     max_group_items: int = Field(default=12, ge=1, le=50)         # groups on one card (schema maxItems)

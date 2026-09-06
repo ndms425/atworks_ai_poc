@@ -1032,7 +1032,7 @@ class Store:
             executed_by=q.executed_by, job_id=q.job_id,
         )
         # The cold partition is the SAME contract read against another table: aliasing it to
-        # `runs` keeps every predicate, the keyset clause and the body join byte-identical, so
+        # `runs` keeps every predicate, the keyset clause and the label join byte-identical, so
         # an archived page can never drift from a hot one (spec §6 "조회는 명시적 archived=true").
         source = "runs_archive AS runs" if q.archived else "runs"
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -1062,14 +1062,24 @@ class Store:
         next_cursor = encode_cursor(items[-1].executed_at, items[-1].run_id) if len(rows) > q.limit else None
         return Page(items=items, next_cursor=next_cursor, total=total)
 
+    def count_runs_sql(
+        self, since: datetime | None = None, until: datetime | None = None,
+        status: str | None = None, api_id: str | None = None, archived: bool = False,
+    ) -> tuple[str, list]:
+        """``count_runs``' statement, verbatim -- built here for the same reason as
+        ``list_runs_sql`` (M19): a query-plan test that hand-copies the SQL proves nothing about
+        the query that actually runs, and rots silently the first time a predicate changes."""
+        clauses, params = self._runs_predicates(since=since, until=until, status=status, api_id=api_id)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        source = "runs_archive" if archived else "runs"
+        return f"SELECT COUNT(*) FROM {source} {where_sql}", params
+
     def count_runs(
         self, since: datetime | None = None, until: datetime | None = None,
         status: str | None = None, api_id: str | None = None, archived: bool = False,
     ) -> int:
-        clauses, params = self._runs_predicates(since=since, until=until, status=status, api_id=api_id)
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        source = "runs_archive" if archived else "runs"
-        return self._conn.execute(f"SELECT COUNT(*) FROM {source} {where_sql}", params).fetchone()[0]
+        sql, params = self.count_runs_sql(since, until, status, api_id, archived)
+        return self._conn.execute(sql, params).fetchone()[0]
 
     def count_runs_by_job(self, since: datetime | None = None, until: datetime | None = None) -> dict[str, int]:
         """``{job_id: runs in the window}`` in one indexed GROUP BY -- the briefing's "which jobs
@@ -1090,16 +1100,59 @@ class Store:
         return self._row_to_run(row) if row is not None else None
 
     def runs_by_ids(self, run_ids: Sequence[str]) -> list[RunResult]:
+        """Ids in, records out, in the caller's order, missing ids skipped. The IN-list is
+        CHUNKED at 500 (M12): SQLite's default bound-variable cap is 999, and the callers here
+        pass whatever list they hold -- `job.recent_run_ids` is 50 today, but a union of group
+        run_ids is not bounded by anything as small, and blowing that cap is an
+        `OperationalError`, not a slow query. Same chunk size as `_existing_run_ids`."""
         if not run_ids:
             return []
-        placeholders = ",".join("?" for _ in run_ids)
-        rows = self._conn.execute(
-            f"SELECT {self._RUN_SELECT} FROM runs {self._RUN_JOINS} "
-            f"WHERE runs.run_id IN ({placeholders})",
-            list(run_ids),
-        ).fetchall()
-        by_id = {r["run_id"]: self._row_to_run(r) for r in rows}
+        by_id: dict[str, RunResult] = {}
+        for start in range(0, len(run_ids), 500):
+            chunk = list(run_ids[start:start + 500])
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT {self._RUN_SELECT} FROM runs {self._RUN_JOINS} "
+                f"WHERE runs.run_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            by_id.update({r["run_id"]: self._row_to_run(r) for r in rows})
         return [by_id[i] for i in run_ids if i in by_id]
+
+    def apis_by_ids(self, api_ids: Sequence[str]) -> list[ApiSpec]:
+        """The batch read behind ABC ``get_apis`` (M16). ``resolve_select_where``'s
+        ``failed_since`` branch used to await ``get_api`` once per watermark it kept -- up to
+        ``max_apis_per_job + 1`` round trips to fetch specs it already knew the ids of. Chunked at
+        500 for the same reason as ``runs_by_ids``."""
+        if not api_ids:
+            return []
+        found: dict[str, ApiSpec] = {}
+        for start in range(0, len(api_ids), 500):
+            chunk = list(api_ids[start:start + 500])
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT * FROM apis WHERE api_id IN ({placeholders})", chunk).fetchall()
+            found.update({r["api_id"]: self._row_to_api(r) for r in rows})
+        return [found[i] for i in api_ids if i in found]
+
+    def max_run_seq(self) -> int:
+        """The highest N in a ``run-N`` id across BOTH partitions, or 0 when neither holds one.
+
+        ``MockAtworks`` seeds its run counter from this (M17). It used to seed from
+        ``run_count()``, which is the number of runs in the HOT partition -- so once retention
+        moved a day into ``runs_archive`` the counter jumped BACKWARDS and the next execution
+        re-issued run ids that already exist in the archive. `INSERT OR IGNORE` would then
+        silently drop the new run as a duplicate. The archive must be counted precisely because
+        it is the part that is invisible to every ordinary read."""
+        best = 0
+        for table in ("runs", "runs_archive"):
+            row = self._conn.execute(
+                f"SELECT MAX(CAST(SUBSTR(run_id, 5) AS INTEGER)) FROM {table} "
+                "WHERE run_id LIKE 'run-%'"
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                best = max(best, int(row[0]))
+        return best
 
     def fetch_runs(
         self, *, since: datetime | None = None, until: datetime | None = None,

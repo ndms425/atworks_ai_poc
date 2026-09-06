@@ -60,7 +60,7 @@ from .rules import (
     evaluate,
     verify_examples,
 )
-from .selection import Resolution, collect_runs, resolve_select_where
+from .selection import Resolution, resolve_select_where
 from .serialization import profile_record
 from .types import (
     ActorKind,

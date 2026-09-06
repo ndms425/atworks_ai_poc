@@ -1114,10 +1114,11 @@ def test_rollup_key_day_is_backfilled_on_a_store_written_before_it_existed(tmp_p
 
 
 def test_count_runs_by_api_id_query_plan_uses_an_index():
+    # M19: EXPLAIN the REAL statement (`Store.count_runs_sql`), not a hand-copied string -- the
+    # copy stayed green through every predicate change and proved nothing about the shipped query.
     store = _store_with_fixtures()
-    plan = store.conn().execute(
-        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM runs WHERE api_id = ?", ("api-001",),
-    ).fetchall()
+    sql, params = store.count_runs_sql(api_id="api-001")
+    plan = store.conn().execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
     _assert_no_unindexed_scan(plan, "runs")
     detail = " | ".join(row["detail"] for row in plan)
     assert "INDEX" in detail

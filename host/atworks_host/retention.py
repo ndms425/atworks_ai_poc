@@ -19,8 +19,10 @@
 "영구 보관"이고, 이 코드베이스에서 run 레코드를 지우는 경로는 그 한 줄이 유일하다.
 
 세션 스윕만 이 모듈에 ``SessionStore`` 서브클래스로 들어온다: ``sessions.py``는 레퍼런스와
-**바이트 동일**하게 유지되어야 하므로(호스트 계약), 마지막 접근 시각 스탬프와 스윕은 여기
-``TimestampedSessionStore``가 얹는다.
+**줄바꿈만 다른 동일 파일**(레퍼런스는 CRLF, 이 저장소는 `.gitattributes`가 강제하는 LF)로
+유지되어야 하므로(호스트 계약), 마지막 접근 시각 스탬프와 스윕은 여기
+``TimestampedSessionStore``가 얹는다. "바이트 동일"이라고 적으면 EOL 정규화 때문에 영원히
+거짓인 주장이 된다 — 지켜야 하는 불변식은 **내용이 한 글자도 다르지 않다**는 쪽이다.
 """
 from __future__ import annotations
 
@@ -51,7 +53,8 @@ BODY_DELETE_SLICE = 5_000
 class TimestampedSessionStore(SessionStore[StateT]):
     """``SessionStore`` plus a last-touched stamp and an idle sweep (spec §6 "세션 유휴 24h TTL").
 
-    The base class is byte-identical to the reference host contract and must stay that way, so
+    The base class is identical to the reference host contract MODULO LINE ENDINGS (the
+    reference is CRLF, this repository is LF by `.gitattributes`) and must stay that way, so
     the TTL lives here: every state read and every state write stamps the session, and ``sweep``
     deletes the ones nobody has touched in ``idle_hours``. A session with no stamp at all is
     never swept — the sweep only ever acts on evidence it has, so it cannot delete a live

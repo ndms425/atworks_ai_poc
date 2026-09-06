@@ -54,7 +54,6 @@ export const fetchProfiles = (jobId?: string, cursor: string | null = null) =>
 // /changes/ 가 아니다 — profile_action은 rule_action/format_batch_action의 미러지만 별도 경로다.
 export const actOnProfile = (profileId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ComparisonProfile | null }>(`/profiles/${encodeURIComponent(profileId)}/${action}`, {});
-export const fetchInsights = () => api.get<{ flaky: number; regression_suspect: number; window_days: number }>("/runs/insights");
 /** Home's whole above-the-fold state in ONE call — counts, insight flags and the briefing header.
  * It replaced four parallel reads, two of which downloaded a run page only to count it. */
 export const fetchHomeSummary = () => api.get<HomeSummary>("/home/summary");

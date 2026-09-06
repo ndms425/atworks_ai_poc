@@ -195,6 +195,9 @@ class RecordingBackend(AtworksBackend):
     async def get_api(self, session, api_id):
         raise NotImplementedError
 
+    async def get_apis(self, session, api_ids):
+        raise NotImplementedError
+
     async def list_runs(self, session, q):
         # the report path pages this by job_id now (scale spec §4) — run_ids no longer grows
         self.calls.append("list_runs")

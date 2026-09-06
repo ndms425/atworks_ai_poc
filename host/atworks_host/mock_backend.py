@@ -197,7 +197,11 @@ class MockAtworks(AtworksBackend):
         self.format_library = FormatLibrary(max_size=config.max_format_library)
         self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
         self._runs_view = _RunsView(self.store, config.briefing_tz)
-        self._run_seq = self.store.run_count()
+        # NOT run_count() (M17): that counts only the HOT partition, so once retention
+        # moved a day into `runs_archive` the counter jumped backwards and the next
+        # execution re-issued ids that already exist there -- which `INSERT OR IGNORE`
+        # then silently dropped as duplicates.
+        self._run_seq = self.store.max_run_seq()
         self.operators: dict[str, OperatorProfile] = {
             row["operator_id"]: OperatorProfile(**row)
             for row in json.loads((fixtures_dir / "operators.json").read_text(encoding="utf-8"))
@@ -235,6 +239,10 @@ class MockAtworks(AtworksBackend):
 
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
+
+    async def get_apis(self, session, api_ids):
+        del session
+        return self.store.apis_by_ids(api_ids)
 
     async def list_runs(self, session, q: RunsQuery) -> Page[RunResult]:
         return self.store.list_runs(q)

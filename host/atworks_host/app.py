@@ -143,8 +143,9 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     # routes always see the InsightPanels instance, never the shadowing route function.
     insight_panels = insights
     app = build_app("atworks-ai host", on_startup=on_startup)
-    # TimestampedSessionStore, not the bare SessionStore: `sessions.py` is byte-identical to the
-    # reference host contract, so the idle-TTL stamp and sweep (spec §6) live in the subclass.
+    # TimestampedSessionStore, not the bare SessionStore: `sessions.py` is identical to the
+    # reference host contract modulo line endings, so the idle-TTL stamp and sweep (spec §6) live
+    # in the subclass.
     # main.py passes the SAME instance it handed the retention job, so the sweep really reaches
     # the sessions this app serves.
     sessions = sessions if sessions is not None else TimestampedSessionStore(AtworksSessionState)

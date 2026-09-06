@@ -54,6 +54,13 @@ class AtworksBackend(ABC):
     async def get_api(self, session: AtworksSessionContext, api_id: str) -> ApiSpec | None: ...
 
     @abstractmethod
+    async def get_apis(self, session: AtworksSessionContext, api_ids: list[str]) -> list[ApiSpec]:
+        """id 목록으로 스펙을 **한 번에** 읽는다(없는 id는 빠진다, 순서 보장 없음). 이미 id를 손에
+        든 선택 경로(``resolve_select_where``의 ``failed_since`` 가지)가 ``get_api``를 id마다 한 번씩
+        부르던 N+1을 없앤다 — 한 job의 상한만큼, 즉 최대 ``max_apis_per_job + 1`` 회였다.
+        REST 구현 의무: 한 번의 조회로 답하고, IN 목록은 서버가 알아서 나눠 던진다."""
+
+    @abstractmethod
     async def list_runs(self, session: AtworksSessionContext, q: RunsQuery) -> Page[RunResult]:
         """실행 이력. q.status는 pass/fail/error/non_pass. 판정값은 aTworks DSL이 낸 그대로다.
         non_pass는 fail과 error를 함께 묶는다(트리아지 모집단).

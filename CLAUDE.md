@@ -108,11 +108,17 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   deployment is months of accumulation — 50k APIs, ~10k runs/day (rehearsal peak 50k), ~2M hot
   runs, 500 operators. The one decision behind all of it is **query-time scanning →
   ingest-time materialization**. There is exactly one ingest point (`record_execution`, once per
-  schedule occurrence), so `Store.ingest` folds four derived tables into the same transaction as
-  the `runs`/`bodies` insert: `current_state` (latest run per `(api, env, data)` cell plus a
+  schedule occurrence), so `Store.ingest` folds five derived tables into the same transaction as
+  the `runs`/`bodies` insert — one all-or-nothing transaction, rolled back on any failure
+  (`Store._transaction` wraps every multi-statement writer; a half-written batch used to sit
+  PENDING until the next unrelated commit made it permanent): `current_state` (latest run per `(api, env, data)` cell plus a
   `transitions_total` counter bumped on every pass↔non-pass flip), `rollup_day` (per day × cell
   `count/pass/fail/error/transitions/p95` plus `failed_rule_counts` and `http_status_counts`, each
-  a `{key: {count, fail, error}}` map so a grouped read keeps its own split), `api_watermark`
+  a `{key: {count, fail, error}}` map so a grouped read keeps its own split), `rollup_key_day`
+  (those two maps TRANSPOSED onto `(day, axis, key)` with the `api_ids` that fed them, so a
+  key-axis group reads (days × keys) rows instead of `json_each`-ing every cell row in the
+  window; a query scoped to a set of APIs keeps the exact `json_each` arm, since a key row is
+  already summed across APIs), `api_watermark`
   (`last_pass_at`, `first_non_pass_at`, `last_non_pass_at`, `latest_status`, the API's
   `updated_at`) and `operator_api` (`(operator, api)` → last executed, run count). Ingest runs in
   `ingest_chunk_size` chunks with an `await` between them, which is what keeps a chat SSE turn
@@ -146,8 +152,16 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   Korean resident id, card, account, phone, email — with `masking_disabled_groups` letting an API
   group opt out of body capture entirely). A parity row that has no body to compare says which
   reason: `본문 캡처 해제` (the group opted out) or `본문 만료` (outside the 90-day window), and
-  falls back to a status-only verdict rather than inventing one. A body never reaches the model at
-  all: `run_record` carries `has_body: bool` and not the body, and `last_listed_run_ids` is capped
+  falls back to a status-only verdict rather than inventing one. A row whose compared bodies carry
+  any **masked** path is `basis: "masked"` with a note naming those paths: masking is one-way, so
+  two bodies differing only inside a masked leaf both read `***` and would otherwise be published
+  as `equal` on `basis: "body"` — a value-equality claim over a value nobody was shown. The paths
+  are recorded at capture (`bodies.masked_paths`, `mask_body_paths`) and read back through ABC
+  `get_body_masked_paths`; the verdict vocabulary is unchanged, and a real `value_diff` on the
+  unmasked remainder still reports. A body never reaches the model at all — and now it never
+  reaches the PROCESS on a read path either: no read joins `bodies`, `_RUN_SELECT` carries an
+  EXISTS probe into `RunResult.has_body`, `get_body` is the only method that reads the column,
+  `run_record` carries `has_body: bool` and not the body, and `last_listed_run_ids` is capped
   at `PROVENANCE_CAP` (200) while the card's population comes from the envelope's `total`.
   **Audit log.** Every host approval surface writes TWO append-only rows — the bare action before
   the executor call and `<action>:<ok|blocked|error>` after — so a route that dies mid-flight still
@@ -179,8 +193,9 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   onto `AtworksSessionContext` (`session_id`, `project_id`, `operator`) and read server-side after;
   later requests carry only `X-Session-Id` and no request shape names a user. Per-session state is
   `AtworksSessionState` (seen apis/runs/ranks/jobs, `last_population` + `last_listed_run_ids` +
-  `last_listed_filter`, approval marks), saved in `host/atworks_host/sessions.py` — byte-identical
-  to `refs/.../demo_common/sessions.py`: a versioned document under a compare-and-set plus an
+  `last_listed_filter`, approval marks), saved in `host/atworks_host/sessions.py` — identical to
+  `refs/.../demo_common/sessions.py` **modulo line endings** (the reference is CRLF, this repo is
+  LF by `.gitattributes`; the invariant is that no character of the content differs): a versioned document under a compare-and-set plus an
   appended transcript, written at request end and again when a streamed turn ends (the turn wins
   the race). Actions taken outside the chat queue as `pending_app_events` for the next turn.
 - **Marketplace posture:** none. Single-tenant internal tool, closed network, no third-party
@@ -199,8 +214,9 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   three files, not one growing blob: `runs.jsonl` (appended per execution, bodies never in it),
   `parity.json` (the value block plus the run-id pairs it was computed from, so a re-diff needs no
   new run) and `data.json` (job/summary/matrix/parity/provenance), with `index.html` embedding the
-  summary plus the newest 200 rows. Also `GET /runs/insights` (session; flaky/regression_suspect
-  counts for the Home tile) and the briefing pair `GET /briefings/latest` (session, JSON) /
+  summary plus the newest 200 rows. Also `GET /runs/insights` (session; the
+  flaky/regression_suspect counts as a standalone read — Home itself now takes them from
+  `/home/summary`, and the web has no client for this route) and the briefing pair `GET /briefings/latest` (session, JSON) /
   `GET /briefings/{date}` (no session, HTML, `SAFE_DATE`-gated, same shape as `/reports/{job_id}`).
   The report's run rows link back with `?attach=run:{run_id}` (`ATWORKS_PORTAL_ORIGIN`, default
   `http://localhost:3110`); the portal reads that query param on mount into `pendingAttachments`
@@ -253,6 +269,11 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   the card carries a server-computed `matrix` block — envs, data-set labels, executions, runs per
   execution, runs total — from `JobSpec` properties, never a model number. Rule layering: one-tool
   rules in `stage_job`'s description, the cross-tool contract in the prompt, procedures in skills.
+  All four approval surfaces (job / rule / profile / format batch) run through ONE
+  `host_action` helper in `app.py` with a `_Surface` table of the four names that differ — the
+  contract it enforces (mark on, audit pair, try/finally, mark off) must not live in four
+  copies — and each looks its target up by id (`get_job`/`get_rule`/`get_profile`/
+  `get_format_batch`), never by scanning a list page or the pending queue.
   **Delegated approval was evaluated and cancelled** (operator decision, 2026-09-06): typing "너가
   승인해" in chat approves nothing, before or after screen directives — chat text cannot carry a
   verified human click, attachments and tool results are untrusted content, so approval stays the

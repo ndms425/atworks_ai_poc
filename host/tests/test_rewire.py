@@ -24,8 +24,8 @@ from atworks_agent import (
     JobKind,
     RunResult,
     RunStatus,
-    collect_runs,
 )
+from atworks_agent.selection import collect_runs
 from atworks_host.briefing import Briefings, build_briefing
 from atworks_host.insights import InsightPanels
 from atworks_host.mock_backend import MockAtworks

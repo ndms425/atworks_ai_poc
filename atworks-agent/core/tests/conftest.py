@@ -69,6 +69,9 @@ class InMemoryBackend(AtworksBackend):
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
 
+    async def get_apis(self, session, api_ids):
+        return [self.apis[i] for i in api_ids if i in self.apis]
+
     async def list_runs(self, session, q):
         rows = [r for r in self.runs if (q.since is None or r.executed_at >= q.since)
                 and (q.until is None or r.executed_at < q.until)

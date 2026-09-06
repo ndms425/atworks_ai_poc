@@ -36,9 +36,14 @@ async def collect_runs(
     since: datetime | None = None, until: datetime | None = None, status: str | None = None,
     api_id: str | None = None, executed_by: str | None = None, job_id: str | None = None,
 ) -> list[RunResult]:
-    """Gathers up to ``cap`` runs (newest first) by paging ``list_runs`` — ``RunsQuery.limit``
-    caps a single page at 200, so a caller that wants "up to N runs" (an aggregation window, a
-    catalogue scan) pages through cursors here rather than requesting one oversized page."""
+    """**Test-only** (M14). Gathers up to ``cap`` runs (newest first) by paging ``list_runs``.
+
+    This was the transitional aggregation window between Task 2 and Task 8. Nothing in the agent
+    or the host calls it any more — every aggregate read is rollup-fed and covers the whole
+    window instead of its newest N runs — and it is deliberately NOT exported from
+    ``atworks_agent``: the only importer is `host/tests/test_rewire.py`, which uses it to
+    reproduce the old sampled window and show what it MISSED. Left in place because a test that
+    proves "the sample was wrong, not merely slow" needs the sample."""
     items: list[RunResult] = []
     cursor: str | None = None
     while len(items) < cap:
@@ -144,11 +149,12 @@ async def resolve_select_where(
                 marks, key=lambda w: (w.api_updated_at or _EPOCH, w.api_id), reverse=True,
             )[:keep]
             truncated = len(marks) > keep
-            apis = {}
-            for mark in ordered_marks:
-                api = await backend.get_api(session, mark.api_id)
-                if api is not None:
-                    apis[api.api_id] = api
+            # ONE batch read for the specs, not one `get_api` per surviving watermark (M16):
+            # this branch keeps up to `max_apis_per_job + 1` of them and used to await that many
+            # round trips for ids it already held. Order is irrelevant -- the sort below is by
+            # (updated_at, api_id) anyway.
+            apis = {a.api_id: a for a in
+                    await backend.get_apis(session, [m.api_id for m in ordered_marks])}
         sentence = f"{where.failed_since.date().isoformat()} 이후 실패·에러가 있던 API"
         if truncated and not truncation_noted:
             # The scan stopped at its cap — APIs past it were never considered, so the basis says
