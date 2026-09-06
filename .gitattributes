@@ -1,0 +1,10 @@
+# Keep source LF on every platform (a Task 8 implementer run rewrote 21 files to CRLF and
+# turned a 1.7k-line change into an 870KB diff).
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.ini text eol=lf
+*.toml text eol=lf
