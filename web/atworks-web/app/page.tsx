@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantRail, Inspector, type PortalNavItem, PortalShell, type Prefill, useMerchantChat, useSession } from "web-shared";
 import AssistantPanel from "@/components/AssistantPanel";
+import OperatorPicker, { readStoredOperatorId } from "@/components/OperatorPicker";
 import ScreenHighlightOverlay from "@/components/ScreenHighlightOverlay";
 import ApisView from "@/components/views/ApisView";
 import HomeView from "@/components/views/HomeView";
@@ -18,6 +19,7 @@ import type { RuleAction } from "@/lib/useRuleActions";
 import type {
   AttachedItem,
   JobSpec,
+  OperatorRole,
   ScreenDirective,
   ScreenFilter,
   ScreenHighlightPayload,
@@ -27,6 +29,9 @@ import type {
   ScreenTarget,
   ValidationRule,
 } from "@/lib/types";
+import { ROLE_KO } from "@/lib/types";
+
+const DEFAULT_OPERATOR_ID = "minseong";
 
 type PortalView = "home" | "apis" | "runs" | "jobs" | "rules";
 
@@ -42,7 +47,8 @@ function StoreMark() {
 }
 
 export default function PortalPage() {
-  const session = useSession(api);
+  const [operatorId, setOperatorId] = useState<string>(() => readStoredOperatorId() ?? DEFAULT_OPERATOR_ID);
+  const session = useSession(api, { body: { operator_id: operatorId } });
   const [view, setView] = useState<PortalView>("home");
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -213,7 +219,19 @@ export default function PortalPage() {
         nav={nav}
         view={view}
         onViewChange={onUserViewChange}
-        operator={{ name: session.operator ?? "Operator", role: "운영자" }}
+        operator={{
+          name: session.operator_name ?? session.operator ?? "Operator",
+          role: ROLE_KO[session.role as OperatorRole] ?? "운영자",
+        }}
+        operatorControl={
+          <OperatorPicker
+            value={operatorId}
+            onChange={(id) => {
+              setOperatorId(id);
+              refreshPortal();
+            }}
+          />
+        }
         assistantOpen={assistantOpen}
         assistantBusy={chat.busy}
         onToggleAssistant={() => setAssistantOpen((open) => !open)}
@@ -233,9 +251,15 @@ export default function PortalPage() {
           </AssistantRail>
         }
       >
-        {session.sessionId ? (
+        {/* Also require session.operator to already match the picked operatorId: an operator switch
+            restarts the session (useSession's effect), but the old sessionId lingers in `session`
+            state until that finishes. Gating on both unmounts the views for that gap instead of
+            letting a child's data fetch race out under the stale token — see OperatorPicker. */}
+        {session.sessionId && session.operator === operatorId ? (
           <>
-            {view === "home" ? <HomeView refreshKey={refreshKey} onAskAssistant={askAssistant} onScreen={onScreen} /> : null}
+            {view === "home" ? (
+              <HomeView refreshKey={refreshKey} operatorId={operatorId} onAskAssistant={askAssistant} onScreen={onScreen} />
+            ) : null}
             {view === "apis" ? (
               <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} onAttach={onAttach} intent={screenIntent} onScreen={onScreen} />
             ) : null}

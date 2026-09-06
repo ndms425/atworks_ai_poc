@@ -7,6 +7,7 @@ import { useEffect } from "react";
 import { Button, Notice, PageHeader, Panel, plural, Skeleton, StatStrip, StatTile, useResource } from "web-shared";
 import { fetchInsights, fetchJobs, fetchRuns } from "@/lib/api";
 import BriefingCard from "@/components/BriefingCard";
+import InsightPanel from "@/components/InsightPanel";
 import type { ScreenFilter, ScreenTarget } from "@/lib/types";
 
 interface HomeCounts {
@@ -29,10 +30,12 @@ async function loadCounts(): Promise<HomeCounts | null> {
 
 export default function HomeView({
   refreshKey,
+  operatorId,
   onAskAssistant,
   onScreen,
 }: {
   refreshKey: number;
+  operatorId: string;
   onAskAssistant: (text: string) => void;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
@@ -46,6 +49,8 @@ export default function HomeView({
   return (
     <div className="ac-reveal flex flex-col gap-5">
       <PageHeader title="Home" subtitle="오늘 봐야 할 것" />
+
+      <InsightPanel refreshKey={refreshKey} operatorId={operatorId} onAskAssistant={onAskAssistant} />
 
       <BriefingCard refreshKey={refreshKey} onAskAssistant={onAskAssistant} />
 

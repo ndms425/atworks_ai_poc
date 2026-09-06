@@ -36,6 +36,7 @@ export function PortalShell<V extends string>({
   view,
   onViewChange,
   operator,
+  operatorControl,
   assistantOpen,
   assistantBusy = false,
   onToggleAssistant,
@@ -47,6 +48,8 @@ export function PortalShell<V extends string>({
   view: V;
   onViewChange: (view: V) => void;
   operator: { name: string; role: string };
+  /** Rendered beside the signed-in operator block (e.g. a demo operator picker). */
+  operatorControl?: ReactNode;
   assistantOpen: boolean;
   assistantBusy?: boolean;
   onToggleAssistant: () => void;
@@ -116,12 +119,15 @@ export function PortalShell<V extends string>({
             <span className="hidden h-[7px] w-[7px] rounded-full bg-(--accent) shadow-[0_0_0_3px_var(--accent-soft)] xl:block" aria-hidden />
           ) : null}
         </button>
-        <div className="mt-auto flex items-center gap-2.5 border-t border-(--line) px-1 pt-3 xl:px-2">
-          <Avatar name={operator.name} />
-          <div className="hidden min-w-0 xl:block">
-            <div className="truncate text-[13px] font-semibold leading-tight">{operator.name}</div>
-            <div className="truncate text-[11.5px] text-(--ink-soft)">{operator.role}</div>
+        <div className="mt-auto flex flex-col gap-2 border-t border-(--line) px-1 pt-3 xl:px-2">
+          <div className="flex items-center gap-2.5">
+            <Avatar name={operator.name} />
+            <div className="hidden min-w-0 xl:block">
+              <div className="truncate text-[13px] font-semibold leading-tight">{operator.name}</div>
+              <div className="truncate text-[11.5px] text-(--ink-soft)">{operator.role}</div>
+            </div>
           </div>
+          {operatorControl ? <div className="min-w-0">{operatorControl}</div> : null}
         </div>
       </aside>
 

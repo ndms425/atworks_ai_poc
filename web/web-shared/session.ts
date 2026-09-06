@@ -11,6 +11,10 @@ export interface Session {
   sessionId: string | null;
   /** The signed-in operator's name, on merchant sessions. */
   operator?: string;
+  /** The signed-in operator's display name, on merchant sessions. */
+  operator_name?: string;
+  /** The signed-in operator's role, on merchant sessions. */
+  role?: string;
   /** The signed-in shopper, on storefront sessions. */
   shopper?: { name: string; tier?: string };
 }
@@ -19,13 +23,15 @@ const generations = new WeakMap<AgentApi, number>();
 
 /**
  * Only the newest start installs its token. Key the caller on the profile so per-session
- * state resets with it.
+ * state resets with it. When `body` is provided it is sent INSTEAD of `{ user_id: profile }` —
+ * used by a merchant portal to restart the session under a chosen `operator_id`.
  */
 export function useSession(
   api: AgentApi,
-  options: { profile?: string } = {},
+  options: { profile?: string; body?: Record<string, unknown> } = {},
 ): Session {
-  const { profile } = options;
+  const { profile, body } = options;
+  const bodyKey = body ? JSON.stringify(body) : undefined;
   const [session, setSession] = useState<Session>({ sessionId: null });
 
   useEffect(() => {
@@ -33,15 +39,22 @@ export function useSession(
     generations.set(api, generation);
     const current = () => generations.get(api) === generation;
     void (async () => {
-      const started = await api.startSession(profile ? { user_id: profile } : undefined);
+      const started = await api.startSession(body ?? (profile ? { user_id: profile } : undefined));
       if (!current()) return;
       api.session = started?.sessionId ?? null;
-      setSession({ sessionId: started?.sessionId ?? null, operator: started?.operator, shopper: started?.shopper });
+      setSession({
+        sessionId: started?.sessionId ?? null,
+        operator: started?.operator,
+        operator_name: started?.operatorName,
+        role: started?.role,
+        shopper: started?.shopper,
+      });
     })();
     return () => {
       generations.set(api, (generations.get(api) ?? 0) + 1);
     };
-  }, [api, profile]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, profile, bodyKey]);
 
   return session;
 }

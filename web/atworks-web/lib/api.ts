@@ -2,7 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AgentApi } from "web-shared";
-import type { ApiSpec, Briefing, ComparisonProfile, FormatBatch, FormatDefinition, JobSpec, RunResult, ValidationRule } from "./types";
+import type {
+  ApiSpec,
+  Briefing,
+  ComparisonProfile,
+  FormatBatch,
+  FormatDefinition,
+  InsightPanelData,
+  JobSpec,
+  OperatorProfile,
+  RunResult,
+  ValidationRule,
+} from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
 export const api = new AgentApi(API_URL, "/api/atworks");
@@ -26,6 +37,9 @@ export const fetchProfiles = (jobId?: string) =>
 export const actOnProfile = (profileId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ComparisonProfile | null }>(`/profiles/${encodeURIComponent(profileId)}/${action}`, {});
 export const fetchInsights = () => api.get<{ flaky: number; regression_suspect: number; window_days: number }>("/runs/insights");
+export const fetchOperators = () => api.get<{ operators: OperatorProfile[] }>("/operators");
+export const fetchInsightPanel = () => api.get<InsightPanelData>("/home/insights");
+export const refreshInsightPanel = () => api.post<InsightPanelData>("/home/insights/refresh", {});
 export const fetchBriefing = () => api.get<Briefing>("/briefings/latest");
 export const reportUrl = (jobId: string) => `${API_URL}/api/atworks/reports/${encodeURIComponent(jobId)}`;
 export const briefingUrl = (date: string) => `${API_URL}/api/atworks/briefings/${encodeURIComponent(date)}`;

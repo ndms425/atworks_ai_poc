@@ -428,6 +428,56 @@ export interface ProfilePreviewPayload {
   change?: ComparisonProfile;
 }
 
+export type OperatorRole = "developer" | "qa" | "pm";
+
+export const ROLE_KO: Record<OperatorRole, string> = {
+  developer: "개발자",
+  qa: "QA",
+  pm: "PM",
+};
+
+export interface OperatorProfile {
+  operator_id: string;
+  name: string;
+  role: OperatorRole;
+}
+
+export type InsightKind = "regression_suspect" | "flaky_cell" | "top_failed_rule" | "env_divergence" | "stale_pending";
+
+export interface InsightCandidate {
+  candidate_id: string;
+  kind: InsightKind;
+  label: string;
+  figures: Record<string, number | string>;
+  api_ids: string[];
+  ref_ids: string[];
+  priority: number;
+}
+
+export interface InsightNarrative {
+  candidate_id: string;
+  headline: string;
+  why_it_matters: string;
+  prompt: string;
+}
+
+export interface InsightItem {
+  candidate: InsightCandidate;
+  narrative?: InsightNarrative | null;
+}
+
+export interface InsightPanelData {
+  operator_id: string;
+  name: string;
+  role: OperatorRole;
+  scope_api_ids: string[];
+  scope_fallback: boolean;
+  window_days: number;
+  generated_at: string;
+  generated_by: "agent" | "deterministic";
+  items: InsightItem[];
+}
+
 export interface Briefing {
   date: string;
   generated_at: string;
