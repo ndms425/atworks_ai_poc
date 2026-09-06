@@ -146,7 +146,13 @@ class AtworksBackend(ABC):
         """job의 실행 1회를 기록한다: run_ids가 이번 실행이 낸 결과(비어 있을 수 있다 — 실행이
         실패했거나 LATE 재평가가 상한을 넘겨 건너뛴 경우), ``executions``를 정확히 1 늘린다.
         ``schedule_index``는 이번 실행이 소비한 스케줄의 인덱스다(run_now면 ``None``) — 여러
-        스케줄이 각자의 ``done``을 따로 세기 때문에 이 값 없이는 어느 회차가 소비됐는지 알 수 없다."""
+        스케줄이 각자의 ``done``을 따로 세기 때문에 이 값 없이는 어느 회차가 소비됐는지 알 수 없다.
+        REST 어댑터 의무(물질화, spec §4): 한 실행이 낸 run들은 인입 시 ``current_state``/``rollup_day``/
+        ``api_watermark``/``operator_api``로 접혀 들어가며 전환(transitions) 카운터는 인입 순서를 기준으로
+        증가한다 — run은 **실행 순서대로** 인입되어야 하고, 이미 물질화된 시점보다 오래된 run을 뒤늦게
+        인입하면 전환 수가 왜곡된다(재시도는 run_id 중복 무시로 안전). ``job.run_ids``는 더 자라지 않는다;
+        ``run_count``/``recent_run_ids``(최근 50)가 그 자리를 대신하고, 리포트는
+        ``list_runs(RunsQuery(job_id=...))``로 실행 이력을 읽는다."""
 
     @abstractmethod
     async def add_guardrail_note(self, session: AtworksSessionContext, job_id: str, note: str) -> JobSpec:
