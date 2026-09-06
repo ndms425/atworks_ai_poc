@@ -128,6 +128,12 @@ class Scheduler:
                 async def body_loader(run_id: str) -> dict | None:
                     return await self.backend.get_body(self.session, run_id)
 
+                async def masked_paths_loader(run_id: str) -> list[str]:
+                    # Which leaves capture-time masking replaced in that body. Without it the
+                    # parity block would call two `***`-vs-`***` bodies equal on `basis: "body"`
+                    # -- a value-equality claim over a value it never saw.
+                    return await self.backend.get_body_masked_paths(self.session, run_id)
+
                 # A re-write (a later scheduled occurrence, or a profile approved before the
                 # job's first run) must still honor every APPLIED comparison profile — the
                 # profile is durable once approved, and can't be re-staged. Listing profiles
@@ -151,6 +157,7 @@ class Scheduler:
                         self.session, job_id, f"profile lookup failed: {type(profile_error).__name__}"
                     )
                 await self.reports.write(current, fresh, body_loader=body_loader,
+                                         masked_paths_loader=masked_paths_loader,
                                          ignore_paths=ignore_paths, per_api_ignore=per_api_ignore or None)
             except Exception as error:
                 # Report failure: log and note it, but do NOT record a second execution.

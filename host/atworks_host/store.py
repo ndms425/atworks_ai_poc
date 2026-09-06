@@ -115,6 +115,12 @@ CREATE INDEX IF NOT EXISTS idx_runs_archive_api_executed ON runs_archive(api_id,
 CREATE TABLE IF NOT EXISTS bodies (
     run_id TEXT PRIMARY KEY,
     body JSON,
+    -- The JSON paths capture-time masking actually rewrote in THIS body ($.a.b[2] form, the
+    -- shape parity speaks). Masking is one-way, so two bodies differing only inside a masked
+    -- leaf both read "***" and compare equal -- the parity block reported exactly that as
+    -- `equal` with `basis: "body"`. Recorded here, at capture, because it is the only moment
+    -- anything knows: by the time the report compares, the original value is gone for good.
+    masked_paths JSON,
     captured_at TEXT
 );
 -- Retention deletes bodies in bounded slices (`delete_bodies_before(limit=...)`); without this
@@ -210,6 +216,11 @@ CREATE TABLE IF NOT EXISTS retention_state (
     archived_at TEXT NOT NULL
 );
 """
+
+
+#: The capture-time masking hook (``masking.mask_body_paths`` bound to a policy): a response body
+#: in, ``(masked body, the JSON paths it rewrote)`` out. Both halves are stored.
+MaskFn = Callable[[dict], tuple[Any, list[str]]]
 
 
 class _AllDays:
@@ -480,7 +491,8 @@ class Store:
         never widens an existing table, so a store written before Task 8 keeps its old
         ``rollup_day`` shape until this ALTER runs; the new column stays NULL (read as an empty
         map) until ``rebuild_materialized`` refills it."""
-        for table, column, decl in (("rollup_day", "http_status_counts", "JSON"),):
+        for table, column, decl in (("rollup_day", "http_status_counts", "JSON"),
+                                    ("bodies", "masked_paths", "JSON")):
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
@@ -597,32 +609,37 @@ class Store:
         )
 
     def _write_run_rows(
-        self, runs: Sequence[RunResult], briefing_tz: str, mask: Callable[[dict], dict] | None,
+        self, runs: Sequence[RunResult], briefing_tz: str, mask: MaskFn | None,
         *, replace: bool = False,
     ) -> None:
         """Raw row writer -- runs + bodies only, no materialization, no commit. Only ``ingest``
-        and ``upsert_run`` call this. ``mask`` is the Task 6 hook: when given it rewrites each
-        response body on its way into ``bodies`` (this task passes nothing, so bodies are stored
-        unchanged -- but through the same call)."""
+        and ``upsert_run`` call this. ``mask`` is the Task 6 hook, now returning the masked body
+        AND the paths it rewrote (``masking.mask_body_paths``): both go into ``bodies`` in the
+        same INSERT, because capture is the only moment anything still knows which leaves were
+        replaced -- afterwards the original value is gone and the ``***`` is indistinguishable
+        from a real one."""
         verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         self._conn.executemany(
             f"{verb} INTO runs (run_id, api_id, job_id, target_env, test_data_label, status, "
             "http_status, duration_ms, executed_at, executed_by, failed_rules, day) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             [self._run_row(r, briefing_tz) for r in runs],
         )
-        body_rows = [
-            (r.run_id, json.dumps(mask(r.response_body) if mask is not None else r.response_body),
-             _iso(r.executed_at))
-            for r in runs if r.response_body is not None
-        ]
+        body_rows: list[tuple] = []
+        for run in runs:
+            if run.response_body is None:
+                continue
+            body, masked_paths = mask(run.response_body) if mask is not None else (run.response_body, [])
+            body_rows.append((run.run_id, json.dumps(body), json.dumps(masked_paths),
+                              _iso(run.executed_at)))
         if body_rows:
             self._conn.executemany(
-                f"{verb} INTO bodies (run_id, body, captured_at) VALUES (?,?,?)", body_rows,
+                f"{verb} INTO bodies (run_id, body, masked_paths, captured_at) VALUES (?,?,?,?)",
+                body_rows,
             )
 
     def ingest(
         self, runs: Iterable[RunResult], briefing_tz: str = "Asia/Seoul", *,
-        mask: Callable[[dict], dict] | None = None,
+        mask: MaskFn | None = None,
     ) -> int:
         """**The** write path for runs (spec §4): one transaction inserts the batch and folds it
         into ``current_state`` / ``rollup_day`` / ``api_watermark`` / ``operator_api``. Returns the
@@ -1024,6 +1041,16 @@ class Store:
         if row is None or row["body"] is None:
             return None
         return json.loads(row["body"])
+
+    def get_body_masked_paths(self, run_id: str) -> list[str]:
+        """The JSON paths capture-time masking rewrote in this run's stored body -- empty when
+        nothing was masked, when no body was captured, or on a row written before this column
+        existed (which is honest: nothing recorded it, so nothing is claimed)."""
+        row = self._conn.execute(
+            "SELECT masked_paths FROM bodies WHERE run_id = ?", (run_id,)).fetchone()
+        if row is None or row["masked_paths"] is None:
+            return []
+        return json.loads(row["masked_paths"])
 
     # -- retention (Task 9, spec §6) ----------------------------------------------------------
 

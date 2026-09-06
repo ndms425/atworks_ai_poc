@@ -180,6 +180,11 @@ class InMemoryBackend(AtworksBackend):
         run = next((r for r in self.runs if r.run_id == run_id), None)
         return run.response_body if run is not None else None
 
+    async def get_body_masked_paths(self, session, run_id):
+        # This double never masks anything on the way in, so nothing was rewritten.
+        del session, run_id
+        return []
+
     async def audit(self, session, cursor=None, limit=50):
         return Page[AuditEntry]()
 

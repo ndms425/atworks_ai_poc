@@ -48,7 +48,7 @@ from atworks_agent import (
     encode_cursor,
     enforce_execution_matrix,
     evaluate,
-    mask_body,
+    mask_body_paths,
     policy_from_config,
     resolve_select_where,
 )
@@ -417,8 +417,12 @@ class MockAtworks(AtworksBackend):
             async def body_loader(run_id: str) -> dict | None:
                 return await self.get_body(session, run_id)
 
+            async def masked_paths_loader(run_id: str) -> list[str]:
+                return await self.get_body_masked_paths(session, run_id)
+
             await self.reports.rediff(applied.job_id, applied.ignore_paths, applied.per_api_ignore,
-                                      body_loader=body_loader)
+                                      body_loader=body_loader,
+                                      masked_paths_loader=masked_paths_loader)
         return applied
 
     async def discard_profile(self, session, profile_id, actor_kind):
@@ -463,6 +467,9 @@ class MockAtworks(AtworksBackend):
 
     async def get_body(self, session, run_id: str) -> dict | None:
         return self.store.get_body(run_id)
+
+    async def get_body_masked_paths(self, session, run_id: str) -> list[str]:
+        return self.store.get_body_masked_paths(run_id)
 
     async def audit(self, session, cursor=None, limit=50) -> Page[AuditEntry]:
         # seq is zero-padded to a fixed width in the cursor id so the tie-break orders
@@ -597,7 +604,7 @@ class MockAtworks(AtworksBackend):
         for batch in slices:
             try:
                 self.store.ingest(batch, self._config.briefing_tz,
-                                  mask=lambda b: mask_body(b, policy))
+                                  mask=lambda b: mask_body_paths(b, policy))
             except Exception as error:
                 # A mid-chunk failure is OWNED here, not re-raised: the scheduler's exception
                 # path would call `record_execution` a SECOND time and spend two slots for one

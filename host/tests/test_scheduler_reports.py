@@ -229,6 +229,10 @@ class RecordingBackend(AtworksBackend):
         self.calls.append("get_body")
         return None
 
+    async def get_body_masked_paths(self, session, run_id):
+        self.calls.append("get_body_masked_paths")
+        return []
+
     async def audit(self, session, cursor=None, limit=50):
         raise NotImplementedError
 

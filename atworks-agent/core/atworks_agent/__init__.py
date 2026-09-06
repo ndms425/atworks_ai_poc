@@ -22,6 +22,7 @@ from .masking import (
     DEFAULT_MASKING_RULES,
     body_capture_enabled,
     mask_body,
+    mask_body_paths,
     policy_from_config,
 )
 from .materialize import (

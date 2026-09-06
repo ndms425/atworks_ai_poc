@@ -380,6 +380,18 @@ class AtworksBackend(ABC):
         """run 1건의 저장된 응답 바디만 읽는다(run_result 전체가 아니라) — parity 재-diff처럼 바디만
         필요한 경로가 나머지 필드를 실어 나르지 않게 한다. 없는 run이면 None."""
 
+    @abstractmethod
+    async def get_body_masked_paths(self, session: AtworksSessionContext, run_id: str) -> list[str]:
+        """이 run의 저장된 바디에서 **캡처 시점 마스킹이 실제로 바꾼** JSON 경로들(``$.a.b[2]``
+        모양, parity가 쓰는 그 표기). 마스킹된 게 없거나 바디 자체가 없으면 빈 리스트다.
+
+        REST 구현 의무: 이 값은 **캡처 시점에 기록**해 두었다가 그대로 돌려줘야 한다 — 저장된
+        바디를 나중에 다시 훑어 ``***``를 찾아내는 식은 안 된다(원래 값이 진짜 ``***``였을
+        수도 있고, 무엇보다 마스킹 규칙은 그 뒤에 바뀔 수 있다). 마스킹은 단방향이라 마스킹된
+        리프에서만 다른 두 바디는 둘 다 ``***``로 읽혀 **같아 보인다**; parity는 이 목록을 받아
+        그 경로들을 판정에서 빼고 행의 근거(basis)를 ``masked``로 적는다. 이 읽기가 없으면
+        리포트는 보지도 못한 값에 대해 "동등"이라고 말하게 된다."""
+
     # -- 감사 로그 (append-only, seq가 전역 순서) -----------------------------------------
     @abstractmethod
     async def audit(

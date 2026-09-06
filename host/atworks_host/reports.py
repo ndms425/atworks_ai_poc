@@ -14,6 +14,13 @@ Task 9 (scale spec §9 "리포트") splits what used to be one growing ``data.js
 응답 본문은 이 모듈이 들고 있지 않다: parity가 필요한 그 순간에만 ``body_loader(run_id)``
 (= ``backend.get_body``)로 불러온다. 본문이 없으면 판정을 지어내지 않고 상태 비교로 폴백하며,
 그 이유를 노트로 적는다 — 그룹이 캡처 해제면 "본문 캡처 해제", 90일 창을 벗어났으면 "본문 만료".
+
+본문이 **있어도** 캡처 시점 마스킹이 바꾼 리프는 판정하지 않는다(``masked_paths_loader`` =
+``backend.get_body_masked_paths``): 마스킹은 단방향이라 그 리프에서만 다른 두 본문은 둘 다
+``***``로 읽혀 같아 보이고, 그걸 ``basis: "body"``의 ``equal``로 내보내는 건 보지도 못한 값에
+대한 동등성 주장이었다. 이제 그 경로들은 비교에서 빠지고 행의 근거는 ``masked``, 노트가 어떤
+경로였는지 이름을 댄다. verdict 어휘는 그대로다 — 마스킹되지 않은 나머지의 진짜 차이는 계속
+``value_diff``로 나온다.
 """
 from __future__ import annotations
 
@@ -44,11 +51,15 @@ INDEX_FILE = "index.html"
 EMBEDDED_RUN_ROWS = 200
 
 BodyLoader = Callable[[str], Awaitable[dict | None]]
+MaskedPathsLoader = Callable[[str], Awaitable[list[str]]]
 CaptureDisabled = Callable[[str], bool]
 
 #: The two reasons a parity row has no body to compare, verbatim for the report template.
 NOTE_CAPTURE_OFF = "본문 캡처 해제"
 NOTE_BODY_EXPIRED = "본문 만료"
+#: ...and the third reason a row's verdict is not a full body comparison: some leaves were
+#: replaced at capture, so the comparer never saw their values (final review C2).
+NOTE_MASKED = "마스킹된 필드 포함 — 값 동등성 미판정"
 
 
 def _run_row(run: RunResult) -> dict:
@@ -133,6 +144,12 @@ def _parity_pairs(job: JobSpec, runs: list[RunResult]) -> list[dict] | None:
     return pairs
 
 
+def _masked_note(masked: Sequence[str]) -> str | None:
+    """"이 경로들은 판정하지 않았다"를 그대로 적는 한 줄. 경로를 나열하는 게 핵심이다 — 어느
+    필드가 비교에서 빠졌는지 모르면 operator는 이 행을 그냥 통과로 읽는다."""
+    return f"{NOTE_MASKED}: {', '.join(masked)}" if masked else None
+
+
 def _parity_block(
     targets: Sequence[str],
     pairs: Sequence[dict],
@@ -140,6 +157,7 @@ def _parity_block(
     ignore_paths: Sequence[str] = (),
     per_api_ignore: dict[str, list[str]] | None = None,
     capture_disabled: CaptureDisabled | None = None,
+    masked_paths: dict[str, list[str]] | None = None,
 ) -> dict:
     """The value-level comparison for a two-target job, over bodies ALREADY loaded. A row whose
     either side has no body falls back to a status-only verdict (never a fabricated body diff)
@@ -147,14 +165,28 @@ def _parity_block(
     `clusters` groups only the `value_diff` rows — a `status_diff`/`equal` row carries no
     `diff_paths` to cluster on. `per_api_ignore` paths are scoped per row's own api_id — never
     merged across APIs, or a path meant for one API would silently suppress a real diff on every
-    other API too."""
+    other API too.
+
+    **Masked leaves are never judged** (final review C2). Capture-time masking is one-way, so two
+    bodies differing only inside a masked leaf both read `***` and `compare_bodies` calls them
+    equal — and this block used to publish that as `equal` with `basis: "body"`, i.e. a claim of
+    value equality over a value it was never shown. Any path either side masked is now added to
+    that row's ignore list (so it can neither create nor hide a `diff_paths` entry) and the row's
+    BASIS becomes `"masked"`, with a note naming the paths. The verdict vocabulary is unchanged —
+    a real `value_diff` on the unmasked remainder still reports as one — but no masked row ever
+    reads `equal` with `basis: "body"` again."""
     per_api_ignore = per_api_ignore or {}
+    masked_paths = masked_paths or {}
     rows: list[dict] = []
     for pair in pairs:
         api_id = pair["api_id"]
         a_body = bodies.get(pair["a_run_id"])
         b_body = bodies.get(pair["b_run_id"])
         same_status = pair["a_status"] == pair["b_status"]
+        # Either side's masked leaves disqualify the path on BOTH sides: a value the comparer
+        # cannot see on one side is not comparable at all.
+        masked = sorted(set(masked_paths.get(pair["a_run_id"], []))
+                        | set(masked_paths.get(pair["b_run_id"], [])))
         if a_body is None or b_body is None:
             # Task 6 (spec §7) + Task 9 (spec §6): a group opted out of body capture, or the
             # body aged out of the 90-day window. Either way the verdict falls back to status
@@ -169,16 +201,17 @@ def _parity_block(
         elif not same_status:
             verdict = "status_diff"
             diff_paths = []
-            basis = "body"
-            note = None
+            basis = "masked" if masked else "body"
+            note = _masked_note(masked)
         else:
-            row_ignore = [*ignore_paths, *per_api_ignore.get(api_id, [])]
+            row_ignore = [*ignore_paths, *per_api_ignore.get(api_id, []), *masked]
             body_diff = compare_bodies(a_body, b_body, row_ignore)
             verdict = "equal" if body_diff.equal else "value_diff"
             diff_paths = body_diff.diff_paths
-            basis = "body"
-            note = None
-        rows.append({**pair, "verdict": verdict, "diff_paths": diff_paths, "basis": basis, "note": note})
+            basis = "masked" if masked else "body"
+            note = _masked_note(masked)
+        rows.append({**pair, "verdict": verdict, "diff_paths": diff_paths, "basis": basis,
+                     "note": note, "masked_paths": masked})
     clusters = cluster_diffs([
         {"diff_paths": r["diff_paths"], "row_key": f"{r['api_id']}|{r['test_data_label'] or ''}"}
         for r in rows if r["verdict"] == "value_diff"
@@ -215,6 +248,30 @@ async def _load_bodies(pairs: Sequence[dict], body_loader: BodyLoader) -> dict[s
                                run_id, exc_info=True)
                 bodies[run_id] = None
     return bodies
+
+
+async def _load_masked_paths(
+    pairs: Sequence[dict], loader: MaskedPathsLoader | None,
+) -> dict[str, list[str]]:
+    """The capture-time masked paths for the same two runs per row. No loader (a standalone
+    `Reports` in a test) means "nothing is known to be masked" -- which is the pre-C2 behaviour
+    and correct for a backend that masks nothing; the production wiring (scheduler, and the
+    Mock's own `apply_profile` re-diff) always passes one. A loader that raises for one run
+    degrades that run to "nothing recorded", exactly like `_load_bodies`."""
+    if loader is None:
+        return {}
+    paths: dict[str, list[str]] = {}
+    for pair in pairs:
+        for run_id in (pair["a_run_id"], pair["b_run_id"]):
+            if run_id in paths:
+                continue
+            try:
+                paths[run_id] = list(await loader(run_id))
+            except Exception:
+                logger.warning("masked-path load failed for run %s; row is judged as unmasked",
+                               run_id, exc_info=True)
+                paths[run_id] = []
+    return paths
 
 
 class Reports:
@@ -276,6 +333,7 @@ class Reports:
         new_runs: Sequence[RunResult],
         *,
         body_loader: BodyLoader,
+        masked_paths_loader: MaskedPathsLoader | None = None,
         generator: str = "refresh_runner",
         ignore_paths: Sequence[str] = (),
         per_api_ignore: dict[str, list[str]] | None = None,
@@ -305,8 +363,9 @@ class Reports:
         parity = None
         if pairs is not None:
             bodies = await _load_bodies(pairs, body_loader)
+            masked = await _load_masked_paths(pairs, masked_paths_loader)
             parity = _parity_block(job.target_envs, pairs, bodies, ignore_paths, per_api_ignore,
-                                   self.capture_disabled)
+                                   self.capture_disabled, masked)
         self._write_parity(folder, parity)
 
         data = {
@@ -322,7 +381,7 @@ class Reports:
 
     async def rediff(
         self, job_id: str, ignore_paths: Sequence[str], per_api_ignore: dict[str, list[str]] | None = None,
-        *, body_loader: BodyLoader,
+        *, body_loader: BodyLoader, masked_paths_loader: MaskedPathsLoader | None = None,
     ) -> Path:
         """Recompute ONLY the parity block, over the pairs ``parity.json`` already recorded and
         their bodies re-fetched through ``body_loader`` — no new run, no re-selection, no
@@ -339,8 +398,9 @@ class Reports:
             for row in stored["rows"]
         ]
         bodies = await _load_bodies(pairs, body_loader)
+        masked = await _load_masked_paths(pairs, masked_paths_loader)
         parity = _parity_block(stored["targets"], pairs, bodies, ignore_paths, per_api_ignore,
-                               self.capture_disabled)
+                               self.capture_disabled, masked)
         self._write_parity(folder, parity)
         data["parity"] = parity
         data["provenance"] = {**data["provenance"], "generated_at": datetime.now(UTC).isoformat()}

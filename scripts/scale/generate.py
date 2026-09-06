@@ -58,7 +58,7 @@ from atworks_agent import (
     AtworksAgentConfig,
     RunResult,
     RunStatus,
-    mask_body,
+    mask_body_paths,
     policy_from_config,
 )
 from atworks_host.store import Store
@@ -281,7 +281,7 @@ def generate(
         nonlocal batch, ingested, batches_done
         if not batch:
             return
-        ingested += store.ingest(batch, briefing_tz, mask=lambda b: mask_body(b, policy))
+        ingested += store.ingest(batch, briefing_tz, mask=lambda b: mask_body_paths(b, policy))
         batches_done += 1
         batch = []
         if not quiet and progress_every and batches_done % progress_every == 0:

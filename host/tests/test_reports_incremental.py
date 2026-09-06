@@ -146,6 +146,107 @@ async def test_parity_row_says_expired_when_the_body_is_gone(tmp_path):
     assert {r["verdict"] for r in reports.parity(job.job_id)["rows"]} == {"equal"}
 
 
+# -- C2: a masked leaf is never judged -----------------------------------------------------------
+
+
+async def _one_env_pair_job(backend, envs=("legacy", "renewed"), api_id="api-002"):
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="parity", api_ids=[api_id], target_envs=list(envs)),
+        ActorKind.AGENT)
+    return await backend.apply_job(SESSION, job.job_id)
+
+
+async def test_a_difference_hidden_inside_a_masked_field_never_reads_equal_on_body(tmp_path):
+    """Final review C2, exactly. Two bodies whose ONLY difference sat in a PII-shaped leaf both
+    read `***` after capture-time masking, so `compare_bodies` calls them equal -- and the report
+    published that as `verdict: equal, basis: "body"`, i.e. a value-equality claim over a value
+    nobody was allowed to compare. The masked paths recorded at capture now take those leaves out
+    of the judgement and mark the row `basis: "masked"` with a note naming them."""
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    applied = await _one_env_pair_job(backend)
+    at = datetime(2026, 9, 5, 9, tzinfo=UTC)
+    runs = [
+        RunResult(run_id="run-L", api_id="api-002", executed_at=at, target_env="legacy",
+                  status=RunStatus.PASS),
+        RunResult(run_id="run-R", api_id="api-002", executed_at=at, target_env="renewed",
+                  status=RunStatus.PASS),
+    ]
+    # what `bodies` holds: identical AFTER masking, different before it
+    stored = {"run-L": {"holder": "***", "amount": 100},
+              "run-R": {"holder": "***", "amount": 100}}
+
+    async def body_loader(run_id: str):
+        return stored[run_id]
+
+    async def masked_loader(run_id: str):
+        return ["$.holder"]
+
+    reports = Reports(tmp_path / "masked")
+    await reports.write(applied, runs, body_loader=body_loader, masked_paths_loader=masked_loader)
+    [row] = reports.parity(applied.job_id)["rows"]
+    assert row["basis"] == "masked"                       # NOT "body"
+    assert row["masked_paths"] == ["$.holder"]
+    assert row["note"] == "마스킹된 필드 포함 — 값 동등성 미판정: $.holder"
+    assert "$.holder" not in row["diff_paths"]
+
+    # ...and with nothing recorded as masked the very same inputs are a plain body equality --
+    # which is the shape the bug shipped as.
+    plain = Reports(tmp_path / "plain")
+    await plain.write(applied, runs, body_loader=body_loader)
+    [before] = plain.parity(applied.job_id)["rows"]
+    assert (before["basis"], before["verdict"], before["note"]) == ("body", "equal", None)
+
+
+async def test_a_real_diff_on_an_unmasked_path_still_reports_beside_the_masked_note(tmp_path):
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    applied = await _one_env_pair_job(backend)
+    at = datetime(2026, 9, 5, 9, tzinfo=UTC)
+    runs = [
+        RunResult(run_id="run-L", api_id="api-002", executed_at=at, target_env="legacy",
+                  status=RunStatus.PASS),
+        RunResult(run_id="run-R", api_id="api-002", executed_at=at, target_env="renewed",
+                  status=RunStatus.PASS),
+    ]
+    stored = {"run-L": {"holder": "***", "amount": 100},
+              "run-R": {"holder": "***", "amount": 200}}
+
+    async def body_loader(run_id: str):
+        return stored[run_id]
+
+    async def masked_loader(run_id: str):
+        return ["$.holder"]
+
+    reports = Reports(tmp_path)
+    await reports.write(applied, runs, body_loader=body_loader, masked_paths_loader=masked_loader)
+    block = reports.parity(applied.job_id)
+    [row] = block["rows"]
+    assert row["verdict"] == "value_diff"                 # the vocabulary is unchanged
+    assert row["diff_paths"] == ["$.amount"]              # masked path excluded, real one kept
+    assert row["basis"] == "masked" and block["value_diff_count"] == 1
+
+
+async def test_a_real_execution_marks_the_masked_api_and_leaves_the_others_on_body(tmp_path):
+    """End to end through the scheduler: api-001's stub body carries an email and a resident id,
+    api-004's carries neither -- so exactly one of the two rows turns `masked`."""
+    backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
+    reports = Reports(tmp_path, capture_disabled=backend.capture_disabled)
+    sched = Scheduler(backend, reports, SESSION)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="legacy/renewed", api_ids=["api-001", "api-004"],
+        target_envs=["legacy", "renewed"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-05",
+                               count=1)]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+
+    rows = {r["api_id"]: r for r in reports.parity(job.job_id)["rows"]}
+    assert rows["api-001"]["basis"] == "masked"
+    assert rows["api-001"]["masked_paths"] == ["$.contact", "$.ssn"]
+    assert "$.contact" in rows["api-001"]["note"]
+    assert not any(p in rows["api-001"]["diff_paths"] for p in ("$.contact", "$.ssn"))
+    assert rows["api-004"]["basis"] == "body" and rows["api-004"]["masked_paths"] == []
+
+
 # -- scheduler ----------------------------------------------------------------------------------
 
 

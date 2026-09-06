@@ -277,18 +277,42 @@ def test_overwriting_an_already_ingested_run_rebuilds_the_materialized_tables():
     assert {w.api_id: w for w in store.watermarks()} == {w.api_id: w for w in store.recompute_watermarks()}
 
 
-def test_masked_bodies_go_through_the_same_call():
-    """The Task 6 hook: `ingest(mask=...)` rewrites bodies on the way in. Default stores them
-    unchanged, which is what this task ships."""
+def test_masked_bodies_and_their_paths_go_through_the_same_call():
+    """The Task 6 hook, widened by final review C2: `ingest(mask=...)` returns the masked body
+    AND the paths it rewrote, and both are stored -- capture is the only moment anything knows
+    which leaves were replaced. No hook stores the body unchanged with no masked paths."""
     store = Store(":memory:")
     run = RunResult(run_id="r1", api_id="api-001", executed_at=BASE, target_env="dev",
                     status=RunStatus.PASS, response_body={"card": "4111-1111", "ok": True})
-    store.ingest([run], mask=lambda body: {**body, "card": "****"})
+    store.ingest([run], mask=lambda body: ({**body, "card": "****"}, ["$.card"]))
     assert store.get_body("r1") == {"card": "****", "ok": True}
+    assert store.get_body_masked_paths("r1") == ["$.card"]
 
     plain = Store(":memory:")
     plain.ingest([run])
     assert plain.get_body("r1") == {"card": "4111-1111", "ok": True}
+    assert plain.get_body_masked_paths("r1") == []
+    assert plain.get_body_masked_paths("no-such-run") == []
+
+
+def test_masked_paths_are_recorded_for_a_real_execution():
+    """End to end through the Mock: api-001's stub body carries an email and a resident id, and
+    exactly those two leaves come back as the run's masked paths."""
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+
+    async def run_it():
+        job = await backend.stage_job(SESSION, JobDraft(
+            kind=JobKind.RUN_NOW, summary="one", api_ids=["api-001"], target_envs=["dev"]),
+            ActorKind.AGENT)
+        await backend.apply_job(SESSION, job.job_id)
+        return await backend.execute_job_once(SESSION, job.job_id)
+
+    [produced] = asyncio.run(run_it())
+    assert backend.store.get_body_masked_paths(produced.run_id) == ["$.contact", "$.ssn"]
+    assert asyncio.run(backend.get_body_masked_paths(SESSION, produced.run_id)) == ["$.contact", "$.ssn"]
+    # ...and a body that carries no PII shape records nothing
+    assert backend.store.get_body(produced.run_id)["path"] == backend.apis["api-001"].path
 
 
 # -- the Mock's execution path -------------------------------------------------------------------
