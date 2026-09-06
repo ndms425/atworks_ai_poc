@@ -63,6 +63,20 @@ def test_dynamic_context_renders_operator_line_only_when_present():
     assert "scope: 2 APIs you ran" in with_role
 
 
+def test_dynamic_context_operator_line_uses_the_true_scope_count_not_the_capped_sample():
+    # scope_api_ids is a bounded (<=20) sample; scope_api_count is the true count, and the
+    # operator_line must show that, not len(scope_api_ids) (FIX #2).
+    rendered = build_dynamic_context(
+        atworks_context={
+            "project": "p", "operator": "jihoon", "operator_role": "qa",
+            "scope_api_ids": [f"api-{i:03d}" for i in range(20)],
+            "scope_api_count": 25,
+        },
+        attached_items=[],
+    )
+    assert "scope: 25 APIs you ran" in rendered
+
+
 def test_dynamic_context_byte_stable_without_operator_role():
     base = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[])
     same = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[])

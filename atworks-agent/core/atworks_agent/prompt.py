@@ -154,7 +154,10 @@ def build_dynamic_context(
         rendered = json.dumps(atworks_context, ensure_ascii=False, default=str)
         payload["project"] = atworks_context if len(rendered) <= context_max_chars else {"note": "context omitted (too large)"}
         if atworks_context.get("operator_role"):
-            scope_count = len(atworks_context.get("scope_api_ids", []))
+            # scope_api_count is the true count; scope_api_ids is a bounded (<=20) sample of it.
+            # Fall back to len(scope_api_ids) only for a caller that hasn't been updated to send
+            # scope_api_count yet.
+            scope_count = atworks_context.get("scope_api_count", len(atworks_context.get("scope_api_ids", [])))
             payload["operator_line"] = (
                 f"operator: {atworks_context['operator']} ({atworks_context['operator_role']}) "
                 f"· scope: {scope_count} APIs you ran"

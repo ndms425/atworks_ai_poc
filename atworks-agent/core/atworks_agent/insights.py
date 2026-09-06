@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 
-from .aggregation import aggregate
+from .aggregation import _keys, aggregate
 from .config import AtworksAgentConfig
 from .types import (
     ApiSpec,
@@ -78,7 +78,6 @@ def candidate_insights(
         apis = {api_id: api for api_id, api in apis.items() if api_id in scope}
         jobs = [j for j in jobs if any(a in scope for a in j.api_ids)]
 
-    run_lookup = {r.run_id: r.api_id for r in runs}
     candidates: list[InsightCandidate] = []
 
     # -- regression_suspect ------------------------------------------------------------
@@ -104,11 +103,14 @@ def candidate_insights(
     for g in aggregate(runs, apis, "api_env_data", flaky_min_transitions=config.flaky_min_transitions):
         if not g.flaky:
             continue
-        cell_api = g.key.split("|", 1)[0]
+        cell_api, cell_env, cell_data = g.key.split("|", 2)
+        # The raw key's trailing segment is "-" when the run carried no test_data_label — drop
+        # it from the LABEL only (candidate_id keeps the raw key: it's the narrative cache join).
+        label_parts = [cell_api, cell_env] + ([cell_data] if cell_data and cell_data != "-" else [])
         candidates.append(InsightCandidate(
             candidate_id=f"flaky_cell:{g.key}",
             kind="flaky_cell",
-            label=f"{KIND_LABEL['flaky_cell']} · {g.key}",
+            label=f"{KIND_LABEL['flaky_cell']} · {' · '.join(label_parts)}",
             figures={"transitions": g.transitions, "runs": g.count},
             api_ids=_capped([cell_api]),
             ref_ids=_capped(g.run_ids[:5]),
@@ -117,13 +119,17 @@ def candidate_insights(
     # -- top_failed_rule -------------------------------------------------------------
     by_rule = aggregate(runs, apis, "failed_rule", flaky_min_transitions=config.flaky_min_transitions)
     for g in sorted(by_rule, key=lambda g: (-g.fail, g.key))[:3]:
-        rule_api_id_set = {run_lookup[rid] for rid in g.run_ids if rid in run_lookup}
+        # aggregate() buckets a run under g.key when g.key is one of _keys(run, "failed_rule");
+        # run_ids on the group is capped at aggregation.MAX_RUN_IDS, so it undercounts distinct
+        # APIs for any rule/bucket hit by more than 50 runs. Recount over the SOURCE runs using
+        # the same bucketing predicate aggregate() used, rather than re-deriving a new one.
+        rule_api_id_set = {r.api_id for r in runs if g.key in _keys(r, "failed_rule")}
         candidates.append(InsightCandidate(
             candidate_id=f"top_failed_rule:{g.key}",
             kind="top_failed_rule",
             label=f"{KIND_LABEL['top_failed_rule']} · {g.key}",
             # figures reports the TRUE api count; api_ids is a bounded (<=20) sample of it.
-            figures={"fail": g.fail, "apis": len(rule_api_id_set)},
+            figures={"fail": g.fail, "error": g.error, "apis": len(rule_api_id_set)},
             api_ids=_capped_set(rule_api_id_set),
             ref_ids=_capped(g.run_ids[:5]),
         ))

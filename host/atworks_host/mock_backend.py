@@ -371,4 +371,4 @@ class MockAtworks(AtworksBackend):
         return {"project": session.project_id, "allowed_targets": list(self._config.allowed_target_envs),
                 "recent_counts": {"fail": fails, "error": errors, "pending_jobs": len(self.ledger.pending())},
                 "operator": session.operator, "operator_role": session.role,
-                "scope_api_ids": sorted(scope)[:20]}
+                "scope_api_ids": sorted(scope)[:20], "scope_api_count": len(scope)}

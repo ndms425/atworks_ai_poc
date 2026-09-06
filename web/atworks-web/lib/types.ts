@@ -471,6 +471,8 @@ export interface InsightPanelData {
   name: string;
   role: OperatorRole;
   scope_api_ids: string[];
+  /** True count of the operator's in-scope APIs; scope_api_ids is a bounded (<=20) sample of it. */
+  scope_size: number;
   scope_fallback: boolean;
   window_days: number;
   generated_at: string;

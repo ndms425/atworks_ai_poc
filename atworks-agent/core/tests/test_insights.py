@@ -137,6 +137,33 @@ def test_pm_orders_stale_pending_first_and_role_tables_hold_full_order():
     assert pm[0].kind == "stale_pending"
 
 
+def test_flaky_cell_label_is_humanized_but_candidate_id_keeps_the_raw_key():
+    apis = {"api-004": api("api-004", NOW - timedelta(days=100))}
+    # No test_data_label -> raw key "api-004|dev|-"; label must drop the trailing "-".
+    no_data_runs = [
+        run("n1", "api-004", NOW - timedelta(days=8), status=RunStatus.PASS),
+        run("n2", "api-004", NOW - timedelta(days=7), status=RunStatus.FAIL, rules=["r"]),
+        run("n3", "api-004", NOW - timedelta(days=6), status=RunStatus.PASS),
+        run("n4", "api-004", NOW - timedelta(days=5), status=RunStatus.FAIL, rules=["r"]),
+    ]
+    out = candidate_insights(no_data_runs, apis, [], None, "developer", CFG, NOW)
+    cell = next(c for c in out if c.kind == "flaky_cell")
+    assert cell.candidate_id == "flaky_cell:api-004|dev|-"
+    assert cell.label == f"{KIND_LABEL['flaky_cell']} · api-004 · dev"
+
+    # With a test_data_label -> raw key "api-004|dev|정상 결제"; label keeps it.
+    with_data_runs = [
+        run("d1", "api-004", NOW - timedelta(days=8), status=RunStatus.PASS, data="정상 결제"),
+        run("d2", "api-004", NOW - timedelta(days=7), status=RunStatus.FAIL, rules=["r"], data="정상 결제"),
+        run("d3", "api-004", NOW - timedelta(days=6), status=RunStatus.PASS, data="정상 결제"),
+        run("d4", "api-004", NOW - timedelta(days=5), status=RunStatus.FAIL, rules=["r"], data="정상 결제"),
+    ]
+    out2 = candidate_insights(with_data_runs, apis, [], None, "developer", CFG, NOW)
+    cell2 = next(c for c in out2 if c.kind == "flaky_cell")
+    assert cell2.candidate_id == "flaky_cell:api-004|dev|정상 결제"
+    assert cell2.label == f"{KIND_LABEL['flaky_cell']} · api-004 · dev · 정상 결제"
+
+
 def test_empty_scope_yields_no_candidates():
     runs, apis, jobs = _rich_fixture()
     empty = candidate_insights(runs, apis, jobs, scope=set(), role="developer", config=CFG, now=NOW)
@@ -146,10 +173,13 @@ def test_empty_scope_yields_no_candidates():
 
 
 def test_many_apis_in_one_bucket_do_not_crash_and_lists_are_capped():
-    apis = {f"api-{i}": api(f"api-{i}", NOW - timedelta(days=100)) for i in range(25)}
+    # 60 APIs, each with exactly one error run, feeding the SAME synthetic "(error) HTTP 500"
+    # bucket -- more than aggregation.MAX_RUN_IDS(50), so figures["apis"] can only be a true
+    # count if it's recounted over the source runs rather than derived from g.run_ids.
+    apis = {f"api-{i}": api(f"api-{i}", NOW - timedelta(days=100)) for i in range(60)}
     runs = [
         run(f"r{i}", f"api-{i}", NOW - timedelta(days=1), status=RunStatus.ERROR, http_status=500)
-        for i in range(25)
+        for i in range(60)
     ]
     out = candidate_insights(runs, apis, [], None, "developer", CFG, NOW)
     for c in out:
@@ -158,4 +188,23 @@ def test_many_apis_in_one_bucket_do_not_crash_and_lists_are_capped():
 
     error_bucket = next(c for c in out if c.kind == "top_failed_rule" and c.candidate_id.endswith("HTTP 500"))
     assert len(error_bucket.api_ids) == 20
-    assert error_bucket.figures["apis"] == 25
+    assert error_bucket.figures["apis"] == 60
+    assert error_bucket.figures["error"] == 60
+    assert "error" in error_bucket.figures
+
+
+def test_top_failed_rule_apis_count_is_the_true_distinct_count_not_a_run_id_sample():
+    # 8 APIs each with 20 failing runs on the same rule: 160 runs total, well over
+    # aggregation.MAX_RUN_IDS(50), but only 8 distinct APIs -- figures["apis"] must reflect
+    # that true distinct count, not len(g.run_ids[:50]).
+    apis = {f"api-{i}": api(f"api-{i}", NOW - timedelta(days=100)) for i in range(8)}
+    runs = [
+        run(f"r{i}-{j}", f"api-{i}", NOW - timedelta(hours=j), status=RunStatus.FAIL, rules=["rule_common"])
+        for i in range(8)
+        for j in range(20)
+    ]
+    out = candidate_insights(runs, apis, [], None, "developer", CFG, NOW)
+    rule_bucket = next(c for c in out if c.kind == "top_failed_rule" and c.candidate_id.endswith("rule_common"))
+    assert rule_bucket.figures["apis"] == 8
+    assert rule_bucket.figures["fail"] == 160
+    assert rule_bucket.figures["error"] == 0

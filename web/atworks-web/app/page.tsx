@@ -4,21 +4,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AssistantRail, Inspector, type PortalNavItem, PortalShell, type Prefill, useMerchantChat, useSession } from "web-shared";
+import { AssistantRail, Inspector, Notice, type PortalNavItem, PortalShell, type Prefill, useMerchantChat, useSession } from "web-shared";
 import AssistantPanel from "@/components/AssistantPanel";
-import OperatorPicker, { readStoredOperatorId } from "@/components/OperatorPicker";
+import OperatorPicker, { OPERATOR_STORAGE_KEY, readStoredOperatorId } from "@/components/OperatorPicker";
 import ScreenHighlightOverlay from "@/components/ScreenHighlightOverlay";
 import ApisView from "@/components/views/ApisView";
 import HomeView from "@/components/views/HomeView";
 import JobsView from "@/components/views/JobsView";
 import RulesView from "@/components/views/RulesView";
 import RunsView from "@/components/views/RunsView";
-import { actOnRule, api, UNREACHABLE } from "@/lib/api";
+import { actOnRule, api, fetchOperators, UNREACHABLE } from "@/lib/api";
 import { useScreenHighlight } from "@/lib/useScreenHighlight";
 import type { RuleAction } from "@/lib/useRuleActions";
 import type {
   AttachedItem,
   JobSpec,
+  OperatorProfile,
   OperatorRole,
   ScreenDirective,
   ScreenFilter,
@@ -50,6 +51,40 @@ export default function PortalPage() {
   const [operatorId, setOperatorId] = useState<string>(() => readStoredOperatorId() ?? DEFAULT_OPERATOR_ID);
   const session = useSession(api, { body: { operator_id: operatorId } });
   const [view, setView] = useState<PortalView>("home");
+  const [operators, setOperators] = useState<OperatorProfile[]>([]);
+  const [staleOperatorNotice, setStaleOperatorNotice] = useState(false);
+  // Guards the recovery below to at most one attempt per mount -- if the fallback operator id
+  // itself somehow fails to start a session, this must not loop retrying forever.
+  const staleOperatorFallbackTried = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchOperators().then((data) => {
+      if (!cancelled && data) setOperators(data.operators);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // An unknown or stale `atworks-operator` localStorage value (a deleted/renamed operator id)
+  // makes POST /session fail: useSession settles with sessionId === null and operator id was
+  // requested. Distinguish that from "still loading" via session.loading (both otherwise look
+  // identical), then recover: forget the bad id, fall back to a real operator, and say so (M1).
+  useEffect(() => {
+    if (session.loading || session.sessionId !== null) return;
+    if (staleOperatorFallbackTried.current) return;
+    staleOperatorFallbackTried.current = true;
+    try {
+      localStorage.removeItem(OPERATOR_STORAGE_KEY);
+    } catch {
+      // Storage may be unavailable; the fallback below still applies for this session.
+    }
+    const fallbackId = operators[0]?.operator_id ?? DEFAULT_OPERATOR_ID;
+    setStaleOperatorNotice(true);
+    setOperatorId(fallbackId);
+  }, [session.loading, session.sessionId, operators]);
+
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [prefill, setPrefill] = useState<Prefill | null>(null);
@@ -277,6 +312,10 @@ export default function PortalPage() {
             ) : null}
             {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} intent={screenIntent} onScreen={onScreen} /> : null}
           </>
+        ) : staleOperatorNotice ? (
+          <div className="p-6">
+            <Notice>선택한 운영자를 찾을 수 없어 기본 운영자로 전환했습니다.</Notice>
+          </div>
         ) : null}
       </PortalShell>
       {highlights ? <ScreenHighlightOverlay payload={highlights} onDismiss={() => setHighlights(null)} /> : null}

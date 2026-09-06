@@ -137,6 +137,9 @@ async def test_context_carries_role_and_scope(client):
     fixture_apis_minseong_ran = {"api-001", "api-003", "api-004", "api-005", "api-009"}
     assert set(ctx["scope_api_ids"])
     assert set(ctx["scope_api_ids"]) <= fixture_apis_minseong_ran
+    # scope_api_count is the true count (FIX #2); with this fixture it happens to equal the
+    # (unbounded here) sample length, but the two fields are read independently downstream.
+    assert ctx["scope_api_count"] == len(ctx["scope_api_ids"])
 
 
 async def test_chat_streams_sse_with_attachments(client):

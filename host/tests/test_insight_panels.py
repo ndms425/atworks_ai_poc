@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from atworks_agent import AtworksAgentConfig, AtworksSessionContext, InsightNarrative
+from atworks_agent.types import ApiSpec, RunResult, RunStatus
 from atworks_host.insights import InsightPanels
 from atworks_host.mock_backend import MockAtworks
 
@@ -111,15 +112,24 @@ async def test_fallback_when_narrator_returns_empty_or_disabled(tmp_path):
     assert all(item.narrative is None for item in panel.items)
     assert all(item.candidate.label for item in panel.items)
 
-    # (b) narration disabled outright: narrator must never be called
+    # (b) narration disabled outright: narrator must never be called, and the disabled state
+    # must never write a cache file (FIX #5) -- so re-enabling later same-day doesn't stick to
+    # a deterministic result cached while the switch was off.
     counter: dict = {}
     config2, backend2 = _make_backend(now)
     config2 = config2.model_copy(update={"enable_insight_narration": False})
     panels2 = InsightPanels(tmp_path / "b", config2, narrator=_counting_narrator(counter))
-    panel2 = await panels2.build(backend2, _session("minseong", now), now)
+    session2 = _session("minseong", now)
+    panel2 = await panels2.build(backend2, session2, now)
     assert counter.get("calls", 0) == 0
     assert panel2.generated_by == "deterministic"
     assert all(item.narrative is None for item in panel2.items)
+    date2 = panels2._date_for(now)
+    assert not (tmp_path / "b" / "minseong" / date2 / "narrative.json").exists()
+
+    panel2b = await panels2.build(backend2, session2, now)
+    assert counter.get("calls", 0) == 0
+    assert panel2b.generated_by == "deterministic"
 
 
 async def test_scope_fallback_flag_for_operator_with_no_runs(tmp_path):
@@ -183,3 +193,70 @@ async def test_cached_narrative_for_stale_candidate_id_is_ignored(tmp_path):
     panel = await panels.build(backend, session, now)
     assert panel.generated_by == "deterministic"
     assert all(item.narrative is None for item in panel.items)
+
+
+def _noting_narrator(dropped_notes: list[str]):
+    async def narrator(candidates, role, *, notes=None):
+        del candidates, role
+        if notes is not None:
+            notes.extend(dropped_notes)
+        return []
+    return narrator
+
+
+async def test_scope_size_is_the_true_count_while_scope_api_ids_stays_capped(tmp_path):
+    now = datetime.now(UTC)
+    config, backend = _make_backend(now)
+    # Replace the fixture's runs entirely with 25 APIs run by "minseong" in-window, so the true
+    # scope size (25) diverges from the 20-cap on scope_api_ids (FIX #2).
+    apis = {
+        f"api-extra-{i}": ApiSpec(
+            api_id=f"api-extra-{i}", method="GET", path=f"/extra/{i}", name=f"api-extra-{i}",
+            updated_at=now - timedelta(days=10),
+        )
+        for i in range(25)
+    }
+    backend.apis = apis
+    backend.runs = {
+        f"run-extra-{i}": RunResult(
+            run_id=f"run-extra-{i}", api_id=f"api-extra-{i}", executed_at=now - timedelta(days=1),
+            target_env="dev", status=RunStatus.PASS, executed_by="minseong",
+        )
+        for i in range(25)
+    }
+    panels = InsightPanels(tmp_path, config, narrator=_counting_narrator({}, narrate_all=False))
+    panel = await panels.build(backend, _session("minseong", now), now)
+    assert panel.scope_size == 25
+    assert len(panel.scope_api_ids) == 20
+
+
+async def test_corrupt_cache_is_treated_as_a_miss_and_rewritten(tmp_path):
+    now = datetime.now(UTC)
+    config, backend = _make_backend(now)
+    counter: dict = {}
+    panels = InsightPanels(tmp_path, config, narrator=_counting_narrator(counter))
+    session = _session("minseong", now)
+    date = panels._date_for(now)
+    folder = tmp_path / "minseong" / date
+    folder.mkdir(parents=True)
+    (folder / "narrative.json").write_text("{not valid json at all", encoding="utf-8")
+
+    panel = await panels.build(backend, session, now)
+
+    assert counter["calls"] == 1
+    assert panel.generated_by == "agent"
+    cached = json.loads((folder / "narrative.json").read_text(encoding="utf-8"))
+    assert cached["narratives"]
+    assert not (folder / "narrative.json.tmp").exists()
+
+
+async def test_narrator_drop_notes_are_logged(tmp_path, caplog):
+    now = datetime.now(UTC)
+    config, backend = _make_backend(now)
+    panels = InsightPanels(tmp_path, config, narrator=_noting_narrator(["dropped unknown-candidate-id"]))
+    session = _session("minseong", now)
+
+    with caplog.at_level("WARNING"):
+        await panels.build(backend, session, now)
+
+    assert any("dropped unknown-candidate-id" in record.message for record in caplog.records)

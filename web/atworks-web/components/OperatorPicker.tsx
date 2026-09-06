@@ -3,6 +3,7 @@
 
 "use client";
 
+import { useEffect } from "react";
 import { useResource } from "web-shared";
 import { fetchOperators } from "@/lib/api";
 import { ROLE_KO } from "@/lib/types";
@@ -29,19 +30,28 @@ function storeOperatorId(operatorId: string) {
 export default function OperatorPicker({ value, onChange }: { value: string; onChange: (operatorId: string) => void }) {
   const { data } = useResource(fetchOperators, []);
   const operators = data?.operators ?? [];
+  // If the stored/current id isn't among the loaded options (a stale localStorage value, or a
+  // race before page.tsx's own recovery kicks in), show the first option instead of a blank
+  // <select> -- and tell the caller, so its state doesn't keep pointing at a nonexistent id.
+  const known = operators.some((o) => o.operator_id === value);
+  const selected = !known && operators.length > 0 ? operators[0].operator_id : value;
+
+  useEffect(() => {
+    if (selected !== value) onChange(selected);
+  }, [selected, value, onChange]);
 
   if (operators.length === 0) return null;
 
   return (
     <select
       aria-label="운영자 선택"
-      value={value}
+      value={selected}
       onChange={(event) => {
         const operatorId = event.target.value;
         storeOperatorId(operatorId);
         onChange(operatorId);
       }}
-      className="w-full min-w-0 truncate rounded-lg border border-(--line-strong) bg-(--card) px-2 py-1 text-[12px] font-medium text-(--ink) outline-none focus-visible:border-(--accent)"
+      className="w-full max-w-full min-w-0 truncate rounded-lg border border-(--line-strong) bg-(--card) px-2 py-1 text-[12px] font-medium text-(--ink) outline-none focus-visible:border-(--accent)"
     >
       {operators.map((operator) => (
         <option key={operator.operator_id} value={operator.operator_id}>

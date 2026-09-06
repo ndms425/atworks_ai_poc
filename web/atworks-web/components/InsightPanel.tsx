@@ -63,9 +63,11 @@ export default function InsightPanel({
   // change to either (a new load) drops the override so the next fetch's result shows instead.
   const [override, setOverride] = useState<InsightPanelData | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
 
   useEffect(() => {
     setOverride(null);
+    setRefreshError(false);
   }, [refreshKey, operatorId]);
 
   const data = override ?? loaded;
@@ -73,7 +75,12 @@ export default function InsightPanel({
   const onRefreshClick = async () => {
     setBusy(true);
     const next = await refreshInsightPanel();
-    if (next) setOverride(next);
+    if (next) {
+      setOverride(next);
+      setRefreshError(false);
+    } else {
+      setRefreshError(true);
+    }
     setBusy(false);
   };
 
@@ -81,7 +88,7 @@ export default function InsightPanel({
     return (
       <Panel title="AI 인사이트">
         <div className="px-[18px] py-3">
-          <Notice>The aTworks AI host isn&apos;t reachable, so insights can&apos;t load.</Notice>
+          <Notice>인사이트 패널을 불러올 수 없습니다 (비활성화되었거나 호스트 미접속).</Notice>
         </div>
       </Panel>
     );
@@ -96,7 +103,7 @@ export default function InsightPanel({
     );
   }
 
-  const scope = data.scope_fallback ? "범위: 전체" : `내 범위 API ${data.scope_api_ids.length}개`;
+  const scope = data.scope_fallback ? "범위: 전체" : `내 범위 API ${data.scope_size}개`;
   const title = `AI 인사이트 — ${data.name} · ${ROLE_KO[data.role]} · ${scope}`;
 
   return (
@@ -114,6 +121,11 @@ export default function InsightPanel({
         </>
       }
     >
+      {refreshError ? (
+        <div className="px-[18px] pt-3">
+          <Notice>새로 분석에 실패했습니다. 잠시 후 다시 시도하세요.</Notice>
+        </div>
+      ) : null}
       {data.items.length === 0 ? (
         <div className="px-[18px] py-3">
           <Notice>표시할 인사이트가 없습니다.</Notice>

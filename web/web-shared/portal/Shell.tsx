@@ -127,7 +127,10 @@ export function PortalShell<V extends string>({
               <div className="truncate text-[11.5px] text-(--ink-soft)">{operator.role}</div>
             </div>
           </div>
-          {operatorControl ? <div className="min-w-0">{operatorControl}</div> : null}
+          {/* Rendered only alongside the name/role block above (hidden in the collapsed icon
+              rail below xl) -- a full-width <select> in that narrow rail would otherwise be
+              clipped or overflow it. */}
+          {operatorControl ? <div className="hidden min-w-0 max-w-full xl:block">{operatorControl}</div> : null}
         </div>
       </aside>
 

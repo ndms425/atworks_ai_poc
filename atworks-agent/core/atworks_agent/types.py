@@ -116,6 +116,7 @@ class InsightPanel(BaseModel):
     name: str
     role: OperatorRole
     scope_api_ids: list[str] = Field(default_factory=list)
+    scope_size: int = 0   # true count of the operator's in-scope APIs; scope_api_ids is a bounded (<=20) sample
     scope_fallback: bool = False
     window_days: int
     generated_at: datetime

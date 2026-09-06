@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -21,6 +23,8 @@ from atworks_agent import (
     InsightPanel,
 )
 from atworks_agent.insights import candidate_insights, operator_scope
+
+logger = logging.getLogger(__name__)
 
 # 운영자 id 모양만 통과시킨다: OperatorProfile.operator_id의 패턴과 같다. 세그먼트 구분자
 # (``/``, ``\``)도, ``..``도 이 안엔 들어갈 수 없다 — 캐시 경로에 그대로 잇는 유일한 방어선이다.
@@ -54,10 +58,14 @@ class InsightPanels:
         # narrate_insights already fails open to [], but this callable is a seam a caller
         # could swap for something that doesn't — never let a narrator exception surface
         # here and break the panel.
+        notes: list[str] = []
         try:
-            result = await self.narrator(candidates, role)
+            result = await self.narrator(candidates, role, notes=notes)
         except Exception:
             return []
+        finally:
+            for note in notes:
+                logger.warning("insight narrator dropped an item: %s", note)
         return list(result) if result else []
 
     async def build(
@@ -80,26 +88,46 @@ class InsightPanels:
         folder = self._folder(session.operator, date)
         cache_path = folder / "narrative.json"
 
+        cache_hit = False
+        generated_at_raw: str | None = None
+        narratives: list[InsightNarrative] = []
         if cache_path.exists() and not refresh:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            generated_at_raw = cached.get("generated_at")
-            narratives = [InsightNarrative.model_validate(n) for n in cached.get("narratives", [])]
-        else:
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                generated_at_raw = cached["generated_at"]
+                datetime.fromisoformat(generated_at_raw)
+                narratives = [InsightNarrative.model_validate(n) for n in cached.get("narratives", [])]
+                cache_hit = True
+            except Exception as exc:
+                # A corrupt/partial narrative.json (bad JSON, a stale schema, a garbled date)
+                # must never 500 the panel for the rest of the day — log it and fall through to
+                # treating this as a cache miss, which overwrites the file below.
+                logger.warning("insight narrative cache read failed for %s/%s: %s", session.operator, date, exc)
+
+        if not cache_hit:
             narratives = await self._narrate(cands, role) if cfg.enable_insight_narration else []
             generated_at_raw = now.isoformat()
-            folder.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(
-                json.dumps(
-                    {
-                        "generated_at": generated_at_raw,
-                        "generated_by": "agent" if narratives else "deterministic",
-                        "narratives": [n.model_dump(mode="json") for n in narratives],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
+            # Don't write the cache when narration is disabled outright, so the demo switch
+            # (ATWORKS_INSIGHT_NARRATION=0) isn't sticky for the rest of the day. But DO keep
+            # caching an empty result when the narrator ran and failed (returned []) — without
+            # this, every Home load re-attempts narration and eats the full timeout while the
+            # model endpoint is down.
+            if cfg.enable_insight_narration:
+                folder.mkdir(parents=True, exist_ok=True)
+                tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+                tmp_path.write_text(
+                    json.dumps(
+                        {
+                            "generated_at": generated_at_raw,
+                            "generated_by": "agent" if narratives else "deterministic",
+                            "narratives": [n.model_dump(mode="json") for n in narratives],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                os.replace(tmp_path, cache_path)
 
         narrative_by_id = {n.candidate_id: n for n in narratives}
         items = [InsightItem(candidate=c, narrative=narrative_by_id.get(c.candidate_id)) for c in cands]
@@ -112,6 +140,7 @@ class InsightPanels:
             name=name,
             role=role,
             scope_api_ids=sorted(scope)[:20],
+            scope_size=len(scope),
             scope_fallback=scope_fallback,
             window_days=cfg.scope_window_days,
             generated_at=generated_at,
