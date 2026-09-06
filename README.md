@@ -124,6 +124,63 @@ status, apis의 검색어)를 건다. 답변이 화면의 특정 항목에 근�
 승인해"처럼 대리 승인을 채팅으로 요청해도 되지 않는 기존 동작은 그대로 유지된다: 승인은 여전히
 Jobs/Rules 페이지의 사람 버튼 클릭만이 한다.
 
+## Scale — 점진 축적, 보존, 증명 하네스
+
+목표 규모는 **API 5만 · 하루 평균 1만 run(리허설 피크 5만) · 핫 200만 run · 운영자 500명**이고,
+설계 결정은 하나다: **질의 시점 스캔 → 인입 시점 물질화.** 인입 지점은 `record_execution` 하나뿐이라,
+`Store.ingest`가 `runs`/`bodies` 적재와 같은 트랜잭션에서 `current_state`(셀별 최신 상태 + 전환 카운터),
+`rollup_day`(일 × 셀 집계 + `failed_rule_counts`/`http_status_counts`), `api_watermark`,
+`operator_api`(운영자↔API 인덱스)를 함께 갱신한다. 이후 모든 읽기(집계 카드·Home 타일·브리핑·인사이트
+패널·`select_where`)는 작은 표를 읽는다 — 표본도 없고, 조용한 절단도 없다. 목록은 전부
+`Page[T] {items, next_cursor, total}` 봉투 + keyset 커서(불투명)로 돌아온다.
+
+보존은 스케줄러 tick 꼬리에서 하루 1회(LLM 0회): 핫 `runs` 180일 → `runs_archive`로 **이관**(삭제 아님,
+`archived=true`로만 조회), `bodies` 90일 **삭제**(유일하게 지우는 데이터, 캡처 시 마스킹 필수), 인사이트
+서술 캐시 30일 회전, 세션 유휴 24시간 스윕. 롤업·워터마크·현재상태·리포트·브리핑·감사 로그는 영구다.
+승인 클릭마다 감사 로그 2행(실행 전/후)이 남고 `GET /api/atworks/audit`로 읽는다 — 채팅 턴은 0행이다.
+
+Mock 백엔드는 dict가 아니라 **SQLite**(`host/atworks_host/store.py`) 위에서 돈다. 그 DDL·인덱스·쿼리가
+그대로 자바(Oracle/Tibero/PostgreSQL) 어댑터의 청사진이다.
+
+```bash
+ATWORKS_STORE_PATH=./atworks.sqlite python -m atworks_host.main   # 파일 저장소로 기동(기본 :memory:)
+```
+
+### 하네스 실행
+
+```bash
+# 1) 합성 데이터셋 생성 (전체 세트 ~6분, sqlite 약 1.8GB)
+.venv/Scripts/python.exe scripts/scale/generate.py --out <dir> \
+    --apis 50000 --days 180 --per-day 11000 --peak-day 120:50000 --operators 500
+# 2) SLO 벤치
+.venv/Scripts/python.exe scripts/scale/bench.py --db <dir> --json bench.json
+# 3) 축소 세트로 도는 opt-in 테스트 (기본 suite에서는 제외돼 있다)
+.venv/Scripts/python.exe -m pytest -m scale -q
+```
+
+SLO 상한은 전부 `AtworksAgentConfig`의 `slo_*` 필드다(코드가 곧 기준):
+
+| 경로 | 상한 | 2,019,000 run 실측 |
+|---|---|---|
+| `get_context` | 50 ms | 21.4 ms |
+| `list_runs` 페이지(50건) | 200 ms | 30.9 ms |
+| `count_runs`(fail, 30일) | 50 ms | 2.7 ms |
+| `aggregate_runs`(5개 축 중 최악) | 300 ms | **346.5 ms** (`group_by=http_status`) |
+| `simulate_rule`(30일) | 1 s | 0.1 ms |
+| `insights.build`(결정론 부분) | 500 ms | **728 ms** |
+| 브리핑 생성 | 5 s | 157.9 ms |
+| 400셀 실행 중 채팅 SSE 지연 | 100 ms | 61.8 ms |
+| 보존 작업 1일치 | 30 s | **127.9 s**(단, 200만 run **전량**이 한 번에 만료되는 상한 시나리오) |
+
+굵은 세 줄은 상한을 넘겨 **기록으로 남긴** 항목이다(상한을 낮추지 않았다). 보존 행은 200만 run
+전량이 하루에 만료되는 상한 시나리오라 실제 하루치(≈1.1만 run)로 환산하면 1초 미만이다. 나머지 두
+줄은 뿌리가 같다: 이 데이터 모양에서 `rollup_day`가 101만 행(run 202만 건 = **롤업 1행당 run 2건**)
+이라 "작은 표 읽기"가 여전히 30일 창 17만 행 GROUP BY이고, `failed_rule`/`http_status` 축은 그 위에
+행마다 JSON 맵을 `json_each`로 펼친다(어떤 인덱스도 덮을 수 없는 구간). 시간이 전부 SQL 안에 있고
+파이썬 쪽은 10ms 미만이다. 축소·중간 세트(45만 run)에서는 두 줄 다 녹색이다. 다음 수는 두 맵 축을
+JSON이 아니라 `(day, rule)`·`(day, http_status)` 자체 롤업 행으로 물질화하는 것 — 이번 브랜치 범위
+밖이다. 자세한 진단은 `.superpowers/sdd/2026-09-06-scale-architecture/task-11-report.md`.
+
 ## 사용자별 AI 인사이트 패널
 
 포털 사이드바에서 운영자(`GET /operators` 픽스처 3명, 역할 developer/qa/pm)를 고르면

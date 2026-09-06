@@ -32,21 +32,39 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `record_execution(job_id, run_ids, schedule_index)` exactly once whatever the outcome so no slot
   re-runs. Size caps are **re-derived at execution** by `enforce_execution_matrix` after any LATE
   re-resolution (over the limit = a guardrail note, no runs, a spent slot); the ABC docstring
-  states both obligations for REST. `Scheduler.tick` also generates the daily briefing at its tail
-  (`briefings.maybe_generate(now)`, LLM-free, idempotent per date — file existence is the guard).
+  states both obligations for REST. Inside one call the matrix is walked in `max_concurrency`(4)
+  batches with an `await` between batches (the target server sees at most that many cells at once),
+  and the produced runs are handed to the store in `ingest_chunk_size`(50) chunks — two different
+  dials, generation vs. write. The ingest is **failure-safe and partial**: a chunk that commits is
+  committed, and `record_execution` is still called exactly once with whatever landed, so a crash
+  mid-matrix spends the slot and never double-runs it. A `JobSpec` no longer accumulates every run
+  id — `run_count` plus `recent_run_ids` (newest first, ≤50) replace the unbounded `run_ids` list,
+  and a reader that needs a job's whole history queries `list_runs(job_id=…)` / `count_runs_by_job`.
+  The scheduler iterates `active_jobs` (`remaining_executions > 0`) rather than the whole ledger.
+  `Scheduler.tick` also generates the daily briefing at its tail (`briefings.maybe_generate(now)`,
+  LLM-free, idempotent per date — file existence is the guard) and then runs the retention job
+  (`retention.maybe_run(now)`, also LLM-free, once per local day).
 - **Language / path / shell:** Python 3.11+, pydantic v2, FastAPI + SSE. Role package
   `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (5), turn loop
   `atworks-agent/runtime/atworks_agent_runtime/orchestrator.py`, host `host/atworks_host/`, web
   `web/` (Task 15). Windows; Git Bash; `.venv/Scripts/python.exe`; `pytest -q` from the repo root.
 - **Backend:** one ABC, `AtworksBackend` (`atworks-agent/core/atworks_agent/backend.py`) — the only
-  contact with aTworks. MVP runs on a Mock backend; a REST adapter
-  (`host/atworks_host/rest_backend.py`) is the whole Java integration. Behind each method:
-  `search_apis` / `get_api` → the API-spec registry; `list_runs` / `get_run` / `count_runs` → the
-  run-history store (its DSL, not the model, decides pass/fail); `stage_job` / `get_pending_jobs` /
-  `apply_job` / `discard_job` → the job queue (`stage` proposes, `apply` is the sole state change);
+  contact with aTworks. MVP runs on a Mock backend — `MockAtworks` over a **SQLite `Store`**
+  (`host/atworks_host/store.py`, `ATWORKS_STORE_PATH`, default `:memory:`), not dicts, so every
+  read is real SQL over real indexes and the DDL doubles as the Java-side schema blueprint; a REST
+  adapter (`host/atworks_host/rest_backend.py`) is the whole Java integration. Behind each method:
+  `search_apis` / `get_api` → the API-spec registry; `list_runs` / `get_run` / `count_runs` /
+  `count_runs_by_job` / `runs_by_ids` / `get_body` → the run-history store (its DSL, not the model,
+  decides pass/fail); `aggregate_runs` / `summarize_insights` / `current_state` / `watermarks` /
+  `operator_scope` → the **materialized** reads (Scale bullet below): rollups, per-cell latest
+  state, per-API watermarks and the operator↔API index, none of them a run scan and none of them a
+  sample; `stage_job` / `get_pending_jobs` / `apply_job` / `discard_job` / `get_job` /
+  `applied_jobs` / `all_jobs` / `active_jobs` → the job queue (`stage` proposes, `apply` is the
+  sole state change); `audit` / `append_audit` → the append-only audit log;
   `execute_job_once` → the execution engine, called by the scheduler with no LLM in it;
   `get_context` → the project profile that fills the per-request context block;
-  `stage_rule` / `apply_rule` / `discard_rule` / `get_pending_rules` / `list_rules` / `simulate_rule`
+  `stage_rule` / `apply_rule` / `discard_rule` / `get_pending_rules` / `get_rule` / `list_rules` /
+  `simulate_rule`
   → the rule ledger (`stage` drafts a structured `ValidationRule` on a session-seen API param,
   `apply` stamps `effective_from` and is the sole state change, `simulate_rule` is a read-only
   impact preview). A value rule is the API's success criterion independent of HTTP status; it only
@@ -78,13 +96,78 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `RuleRecommendation`s built only from rules already applied to peer APIs' same-named params (an
   unmatched param suggests nothing). Each recommended target still stages and is approved as its
   own rule. `stage_profile` / `get_pending_profiles` / `apply_profile` / `discard_profile` /
-  `list_profiles` / `get_parity_report` → the comparison-profile ledger and the parity report
+  `get_profile` / `list_profiles` / `get_parity_report` → the comparison-profile ledger and the
+  parity report
   (below): `execute_job_once` now captures `RunResult.response_body: dict | None` at execution
   time (Mock's `stub_response` injects a volatile `serverTime` and a real `api-004` `$.limit`
   difference between targets); `stage_profile` drafts an ignore-spec (`ProfileDraft` → the
   `ProfileLedger`, mirroring the rule ledger), `apply_profile` stamps `effective_from` and, if a
   parity report already exists for the profile's job, re-diffs it from the STORED response
   bodies with no new backend call and no new run.
+- **Scale & retention** (`docs/superpowers/specs/2026-09-06-scale-architecture-design.md`): the
+  deployment is months of accumulation — 50k APIs, ~10k runs/day (rehearsal peak 50k), ~2M hot
+  runs, 500 operators. The one decision behind all of it is **query-time scanning →
+  ingest-time materialization**. There is exactly one ingest point (`record_execution`, once per
+  schedule occurrence), so `Store.ingest` folds four derived tables into the same transaction as
+  the `runs`/`bodies` insert: `current_state` (latest run per `(api, env, data)` cell plus a
+  `transitions_total` counter bumped on every pass↔non-pass flip), `rollup_day` (per day × cell
+  `count/pass/fail/error/transitions/p95` plus `failed_rule_counts` and `http_status_counts`, each
+  a `{key: {count, fail, error}}` map so a grouped read keeps its own split), `api_watermark`
+  (`last_pass_at`, `first_non_pass_at`, `last_non_pass_at`, `latest_status`, the API's
+  `updated_at`) and `operator_api` (`(operator, api)` → last executed, run count). Ingest runs in
+  `ingest_chunk_size` chunks with an `await` between them, which is what keeps a chat SSE turn
+  responsive while a 400-cell matrix is being written. "Numbers are computed by deterministic
+  code" is unchanged — it just moved to ingest time. Nothing here is a sample: the old 2000-run
+  sampling is gone, and so is every silent truncation.
+  **The paged contract.** Every list read returns `Page[T] {items, next_cursor, total}`;
+  `RunsQuery` (since/until/status/api_id/executed_by/job_id/archived/cursor/`limit ≤ 200`) and
+  `AggregateQuery` (since/until/group_by/`scope_api_ids`/`scope_operator`/`order_by`
+  (`"failures" | "transitions"`)/`include_run_ids`/limit) are the two query shapes. Cursors are
+  **keyset** over `(executed_at DESC, run_id DESC)`, server-made and opaque
+  (`atworks_agent/cursor.py` — base64url JSON; no offsets, so a deep page still costs O(page)).
+  `summarize_insights(since, until, scope_operator)` answers the flaky/regression tiles as SQL
+  COUNTs rather than by counting a ranked group list (which saturated: a cell that flips once
+  ranks last by failure volume and never entered the top 500). `operator_scope` is EXACT via the
+  `operator_api` join, not an id list the caller ships (that list capped a 16k-API operator at 100
+  alphabetically-first APIs). `count_runs_by_job` gives the briefing "which jobs ran, how many
+  runs" without materializing a run.
+  **Retention tiers**, all `AtworksAgentConfig` fields, run by `Retention.maybe_run(now)` at the
+  scheduler tick's tail, once per local day, LLM-free, each step stamping a `retention_state` row
+  (`<step>:<YYYY-MM-DD>`) so a repeat tick is a no-op: hot `runs` **180 d**
+  (`retention_hot_days`) → moved per-day into `runs_archive` (**moved, never deleted**; read back
+  only through an explicit `RunsQuery.archived=True`, same predicates, same keyset order, same
+  envelope), the archive purged only once `retention_cold_until` has actually passed (None =
+  kept forever, which is the default); `bodies` **90 d**
+  (`retention_body_days`) and bodies are the ONLY data ever deleted; the insight narration cache
+  **30 d** (`insights_cache_days`); sessions **24 h idle** (`session_idle_hours`, swept by
+  `TimestampedSessionStore`); rollups, watermarks, current state, reports, briefings and the audit
+  log are **permanent** — they are small and they are the evidence. Response bodies are masked
+  **at capture**, before they reach `bodies` (`atworks_agent/masking.py`, five default rules —
+  Korean resident id, card, account, phone, email — with `masking_disabled_groups` letting an API
+  group opt out of body capture entirely). A parity row that has no body to compare says which
+  reason: `본문 캡처 해제` (the group opted out) or `본문 만료` (outside the 90-day window), and
+  falls back to a status-only verdict rather than inventing one. A body never reaches the model at
+  all: `run_record` carries `has_body: bool` and not the body, and `last_listed_run_ids` is capped
+  at `PROVENANCE_CAP` (200) while the card's population comes from the envelope's `total`.
+  **Audit log.** Every host approval surface writes TWO append-only rows — the bare action before
+  the executor call and `<action>:<ok|blocked|error>` after — so a route that dies mid-flight still
+  leaves the attempt on the record; the backend's own `apply_*` adds an `applied` row. Read at
+  `GET /audit`. The model never reaches this path: it is written around the approval mark, which
+  only an authenticated host click can set. Chat turns write zero rows.
+  **SLOs** live in config (`slo_get_context_ms` 50, `slo_list_runs_ms` 200, `slo_aggregate_ms` 300,
+  `slo_insights_ms` 500, `slo_simulate_rule_ms` 1000, `slo_briefing_ms` 5000, `slo_sse_latency_ms`
+  100, `slo_retention_ms` 30 000) and are measured by `scripts/scale/bench.py` against a dataset
+  built by `scripts/scale/generate.py`; `pytest -m scale` (deselected by default via `pytest.ini`)
+  runs a reduced set, `ATWORKS_SCALE_FULL=1` the spec's numbers. The full set the branch was
+  proved on: `--apis 50000 --days 180 --per-day 11000 --peak-day 120:50000 --operators 500`
+  (2,019,000 runs, 1.76 GB SQLite).
+  **REST-adapter obligations** (all stated in the ABC docstrings, because they are the contract a
+  Java implementation must honour, not Mock trivia): `record_execution` receives runs **in
+  chronological order** and must materialize in that order (the watermark/transition counters are
+  order-dependent); run ids are derived by the execution engine, not by the caller; cursors are
+  produced and interpreted by the server only; `total` is the count after the filter and
+  independent of `limit`; list order is `executed_at DESC, run_id DESC`; and operator scope is a
+  server-side join, never an id list.
 - **Identity and credentials:** auth mechanism is none in MVP. Operator profiles
   (`host/atworks_host/fixtures/operators.json`, roles `developer`/`qa`/`pm`) are bound once at
   `POST /api/atworks/session {operator_id}` via `sessions.start(operator_id)`; unknown id → 400,
@@ -105,7 +188,18 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
 - **Surfaces and renderer modes:** the host serves the chat turn as SSE (`POST /api/atworks/chat`),
   the portal reads `/apis` `/runs` `/jobs`, the card buttons `/changes/{job_id}/apply|discard`
   (reference route names, so the web-shared hooks bind unchanged), plus `/scheduler/tick`
-  (LLM-free) and `/reports/{job_id}`. Also `GET /runs/insights` (session; flaky/regression_suspect
+  (LLM-free) and `/reports/{job_id}`. **Every list route answers in one paged envelope**
+  `{items, next_cursor, total}` — `/apis` `/runs` `/jobs` `/rules` `/profiles` `/audit`, default
+  `limit` 50, `ge=1, le=200`, `cursor` an opaque server string the web only echoes back, `total`
+  the count AFTER the filter and independent of `limit` (the legacy `apis`/`runs`/`population` keys
+  are gone). `/rules` also takes `?status=` (staged/applied/discarded), served by the ledger, not by
+  splitting a page. `GET /audit` is the read-only append-only log. `GET /home/summary` (session)
+  fills Home's tiles + briefing header in ONE call from `count_runs`×2 + `get_pending_jobs` +
+  `summarize_insights` + `Briefings.latest()`'s header — no run list crosses it. A report is now
+  three files, not one growing blob: `runs.jsonl` (appended per execution, bodies never in it),
+  `parity.json` (the value block plus the run-id pairs it was computed from, so a re-diff needs no
+  new run) and `data.json` (job/summary/matrix/parity/provenance), with `index.html` embedding the
+  summary plus the newest 200 rows. Also `GET /runs/insights` (session; flaky/regression_suspect
   counts for the Home tile) and the briefing pair `GET /briefings/latest` (session, JSON) /
   `GET /briefings/{date}` (no session, HTML, `SAFE_DATE`-gated, same shape as `/reports/{job_id}`).
   The report's run rows link back with `?attach=run:{run_id}` (`ATWORKS_PORTAL_ORIGIN`, default
