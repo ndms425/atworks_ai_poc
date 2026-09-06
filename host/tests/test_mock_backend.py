@@ -391,9 +391,11 @@ async def test_audit_pages_same_timestamp_rows_by_seq_numerically_not_lexicograp
     # rows once seq reaches double digits; the fix zero-pads seq so the tie-break is numeric.
     b = _backend()
     at = datetime(2026, 9, 3, 12, tzinfo=UTC)
-    b._audit = [
+    # Task 4 (scale spec 2026-09-06): audit lives in the store's audit_log table now, not an
+    # in-memory list -- insert_audit_entries lets the test pin explicit seq values directly.
+    b.store.insert_audit_entries([
         AuditEntry(seq=9, at=at, operator="minseong", action="apply_job", target_kind="job", target_id="job-9", session_id="s"),
         AuditEntry(seq=10, at=at, operator="minseong", action="apply_job", target_kind="job", target_id="job-10", session_id="s"),
-    ]
+    ])
     page = await b.audit(SESSION, limit=50)
     assert [e.seq for e in page.items] == [10, 9]

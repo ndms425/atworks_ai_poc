@@ -1,0 +1,490 @@
+"""Golden-parity + schema tests for the SQLite-backed Store (scale spec 2026-09-06, Task 4).
+
+The golden tests keep a copy of the *pre-Task-4* dict-based filtering/paging code (the oracle
+functions below, copied verbatim from the mock_backend.py this task replaced) and assert that
+Store's SQL-backed reads return exactly what that code returned, for the same fixture data and the
+same query shapes. `current_state`/`watermarks` compare as dict-by-key (their list order was never
+a documented contract of the old dict code -- it fell out of python dict iteration order) while
+every ordered read (search_apis/list_runs/aggregate_runs/runs_by_ids) compares list-for-list.
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+
+from atworks_agent import (
+    AggregateQuery,
+    ApiSpec,
+    ApiWatermark,
+    AuditEntry,
+    CellState,
+    Page,
+    RunResult,
+    RunsQuery,
+    RunStatus,
+    ScopeSummary,
+    decode_cursor,
+    encode_cursor,
+    operator_scope,
+)
+from atworks_agent.aggregation import GROUP_BY, aggregate
+from atworks_host.store import Store
+
+KST = timezone(timedelta(hours=9))
+FIXTURES = Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures"
+
+
+def _load_fixture_apis() -> dict[str, ApiSpec]:
+    return {row["api_id"]: ApiSpec(**row) for row in json.loads((FIXTURES / "apis.json").read_text(encoding="utf-8"))}
+
+
+def _load_fixture_runs() -> dict[str, RunResult]:
+    return {row["run_id"]: RunResult(**row) for row in json.loads((FIXTURES / "runs.json").read_text(encoding="utf-8"))}
+
+
+def _store_with_fixtures() -> Store:
+    store = Store(":memory:")
+    store.load_fixtures(FIXTURES, briefing_tz="Asia/Seoul")
+    return store
+
+
+# -- oracle: the pre-Task-4 dict implementation, unchanged -------------------------------------
+
+
+def _oracle_page(rows: list, cursor, limit: int, *, key) -> Page:
+    ordered = sorted(rows, key=key, reverse=True)
+    total = len(ordered)
+    if cursor:
+        after = decode_cursor(cursor)
+        ordered = [row for row in ordered if key(row) < after]
+    items = ordered[:limit]
+    next_cursor = encode_cursor(*key(items[-1])) if len(ordered) > limit else None
+    return Page(items=items, next_cursor=next_cursor, total=total)
+
+
+def _oracle_search_apis(apis, query="", group=None, updated_after=None, cursor=None, limit=20) -> Page[ApiSpec]:
+    q = (query or "").lower()
+    rows = [a for a in apis.values()
+            if (not q or q in f"{a.method} {a.path} {a.name}".lower())
+            and (group is None or a.group == group)
+            and (updated_after is None or a.updated_at >= updated_after)]
+    return _oracle_page(rows, cursor, limit, key=lambda a: (a.updated_at, a.api_id))
+
+
+def _oracle_filter_runs(runs, since, status, api_id, *, until=None, executed_by=None, job_id=None) -> list[RunResult]:
+    rows = [r for r in runs.values()
+            if (since is None or r.executed_at >= since)
+            and (until is None or r.executed_at < until)
+            and (status is None or (r.status.value != "pass" if status == "non_pass" else r.status.value == status))
+            and (api_id is None or r.api_id == api_id)
+            and (executed_by is None or r.executed_by == executed_by)
+            and (job_id is None or r.job_id == job_id)]
+    return sorted(rows, key=lambda r: r.executed_at, reverse=True)
+
+
+def _oracle_list_runs(runs, q: RunsQuery) -> Page[RunResult]:
+    rows = _oracle_filter_runs(runs, q.since, q.status, q.api_id, until=q.until, executed_by=q.executed_by, job_id=q.job_id)
+    return _oracle_page(rows, q.cursor, q.limit, key=lambda r: (r.executed_at, r.run_id))
+
+
+def _oracle_count_runs(runs, since=None, until=None, status=None, api_id=None) -> int:
+    return sum(
+        1 for r in runs.values()
+        if (since is None or r.executed_at >= since)
+        and (until is None or r.executed_at < until)
+        and (status is None or (r.status.value != "pass" if status == "non_pass" else r.status.value == status))
+        and (api_id is None or r.api_id == api_id)
+    )
+
+
+def _oracle_aggregate_runs(runs, apis, q: AggregateQuery, flaky_min: int):
+    rows = [r for r in runs.values()
+            if (q.since is None or r.executed_at >= q.since)
+            and (q.until is None or r.executed_at < q.until)
+            and (q.scope_api_ids is None or r.api_id in q.scope_api_ids)]
+    groups = aggregate(rows, apis, q.group_by, flaky_min_transitions=flaky_min)
+    return groups[: q.limit]
+
+
+def _oracle_current_state(runs, scope_api_ids=None) -> list[CellState]:
+    cells: dict[tuple[str, str, str | None], list[RunResult]] = defaultdict(list)
+    for r in runs.values():
+        if scope_api_ids is not None and r.api_id not in scope_api_ids:
+            continue
+        cells[(r.api_id, r.target_env, r.test_data_label)].append(r)
+    result: list[CellState] = []
+    for (api_id, env, data_label), rows in cells.items():
+        rows.sort(key=lambda r: r.executed_at)
+        transitions = sum(
+            1 for prev, cur in zip(rows, rows[1:], strict=False)
+            if (prev.status.value != "pass") != (cur.status.value != "pass")
+        )
+        latest = rows[-1]
+        result.append(CellState(
+            api_id=api_id, target_env=env, test_data_label=data_label, run_id=latest.run_id,
+            status=latest.status, executed_at=latest.executed_at, transitions_total=transitions,
+        ))
+    return result
+
+
+def _oracle_watermarks(runs, api_ids=None, first_non_pass_since=None) -> list[ApiWatermark]:
+    by_api: dict[str, list[RunResult]] = defaultdict(list)
+    for r in runs.values():
+        if api_ids is not None and r.api_id not in api_ids:
+            continue
+        by_api[r.api_id].append(r)
+    result: list[ApiWatermark] = []
+    for api_id, rows in by_api.items():
+        rows.sort(key=lambda r: r.executed_at)
+        passes = [r.executed_at for r in rows if r.status.value == "pass"]
+        non_passes = [r for r in rows if r.status.value != "pass"]
+        first_non_pass = non_passes[0].executed_at if non_passes else None
+        if first_non_pass_since is not None and (first_non_pass is None or first_non_pass < first_non_pass_since):
+            continue
+        result.append(ApiWatermark(
+            api_id=api_id, last_pass_at=passes[-1] if passes else None,
+            first_non_pass_at=first_non_pass,
+            last_non_pass_at=non_passes[-1].executed_at if non_passes else None,
+            latest_status=rows[-1].status if rows else None,
+        ))
+    return result
+
+
+def _oracle_operator_scope(runs, operator_id: str, window_days: int, now: datetime) -> ScopeSummary:
+    scope = operator_scope(list(runs.values()), operator_id, window_days, now)
+    return ScopeSummary(api_ids=sorted(scope)[:100], total=len(scope))
+
+
+def _by_key(cells: list[CellState]) -> dict:
+    return {(c.api_id, c.target_env, c.test_data_label): c for c in cells}
+
+
+def _by_api(marks: list[ApiWatermark]) -> dict:
+    return {m.api_id: m for m in marks}
+
+
+# -- schema / fixtures --------------------------------------------------------------------------
+
+
+def test_init_schema_is_idempotent():
+    store = Store(":memory:")
+    store.init_schema()
+    store.init_schema()
+    store.init_schema()
+    tables = {r["name"] for r in store.conn().execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert tables >= {
+        "apis", "runs", "runs_archive", "bodies", "current_state", "rollup_day",
+        "api_watermark", "operator_api", "audit_log", "retention_state",
+    }
+
+
+def test_fixtures_load_12_apis_and_30_runs():
+    store = _store_with_fixtures()
+    apis_count = store.conn().execute("SELECT COUNT(*) FROM apis").fetchone()[0]
+    runs_count = store.conn().execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    assert apis_count == 12
+    assert runs_count == 30
+
+
+# -- golden: search_apis ---------------------------------------------------------------------
+
+
+def test_search_apis_matches_oracle_across_shapes():
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    shapes = [
+        {},
+        {"query": "contract"},
+        {"query": "환불"},
+        {"group": "payment"},
+        {"updated_after": datetime(2026, 8, 27, tzinfo=KST)},
+        {"limit": 3},
+    ]
+    for shape in shapes:
+        expected = _oracle_search_apis(apis, **shape)
+        actual = store.search_apis(**shape)
+        assert actual.total == expected.total
+        assert [a.api_id for a in actual.items] == [a.api_id for a in expected.items]
+        # Cursors are opaque to callers (cursor.py's own contract) -- the Store normalizes every
+        # stored timestamp to UTC (module docstring), so its raw cursor bytes legitimately differ
+        # from the oracle's (which round-trips the fixture's original +09:00 offset unchanged);
+        # what must match is what the cursor *means*, so compare decoded (instant, id) pairs.
+        assert (decode_cursor(actual.next_cursor) if actual.next_cursor else None) == (
+            decode_cursor(expected.next_cursor) if expected.next_cursor else None)
+        assert actual.items == expected.items
+
+
+# -- golden: list_runs / count_runs -------------------------------------------------------------
+
+
+def test_list_runs_matches_oracle_across_query_shapes():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    shapes = [
+        RunsQuery(limit=50),
+        RunsQuery(status="fail", limit=50),
+        RunsQuery(status="non_pass", limit=50),
+        RunsQuery(api_id="api-003", limit=50),
+        RunsQuery(executed_by="jihoon", limit=50),
+        RunsQuery(job_id="job-does-not-exist", limit=50),
+        RunsQuery(since=datetime(2026, 9, 2, tzinfo=KST), limit=50),
+        RunsQuery(until=datetime(2026, 9, 2, tzinfo=KST), limit=50),
+        RunsQuery(limit=5),
+    ]
+    for q in shapes:
+        expected = _oracle_list_runs(runs, q)
+        actual = store.list_runs(q)
+        assert [r.run_id for r in actual.items] == [r.run_id for r in expected.items], q
+        assert actual.total == expected.total, q
+        assert (decode_cursor(actual.next_cursor) if actual.next_cursor else None) == (
+            decode_cursor(expected.next_cursor) if expected.next_cursor else None), q
+        assert actual.items == expected.items, q
+
+
+def test_count_runs_matches_oracle():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    for kwargs in [
+        {},
+        {"status": "fail"},
+        {"status": "error"},
+        {"status": "non_pass"},
+        {"api_id": "api-001"},
+        {"since": datetime(2026, 9, 2, tzinfo=KST)},
+        {"until": datetime(2026, 9, 2, tzinfo=KST)},
+    ]:
+        assert store.count_runs(**kwargs) == _oracle_count_runs(runs, **kwargs)
+
+
+def test_get_run_and_runs_by_ids_match_oracle():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    some_ids = ["run-0001", "run-0005", "run-0099-missing", "run-0002"]
+    assert store.get_run("run-0001") == runs["run-0001"]
+    assert store.get_run("nope") is None
+    assert store.runs_by_ids(some_ids) == [runs[i] for i in some_ids if i in runs]
+
+
+def test_get_body_roundtrips_and_is_none_for_fixture_runs():
+    store = _store_with_fixtures()
+    assert store.get_body("run-0001") is None   # fixture runs carry no response_body
+    assert store.get_body("nope") is None
+    run = RunResult(run_id="run-body-1", api_id="api-001", executed_at=datetime.now(UTC),
+                     target_env="dev", status=RunStatus.PASS, response_body={"limit": 42})
+    store.upsert_run(run)
+    assert store.get_body("run-body-1") == {"limit": 42}
+    assert store.get_run("run-body-1").response_body == {"limit": 42}
+
+
+# -- golden: aggregate_runs (all 5 group_bys) ---------------------------------------------------
+
+
+def test_aggregate_runs_matches_oracle_for_every_group_by():
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    for group_by in GROUP_BY:
+        q = AggregateQuery(group_by=group_by, limit=500)
+        expected = _oracle_aggregate_runs(runs, apis, q, flaky_min=2)
+        actual = store.fetch_runs(since=q.since, until=q.until, api_ids=q.scope_api_ids)
+        actual_groups = aggregate(actual, apis, q.group_by, flaky_min_transitions=2)[: q.limit]
+        assert actual_groups == expected, group_by
+
+
+def test_aggregate_runs_respects_scope_api_ids_and_since():
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    q = AggregateQuery(group_by="api", scope_api_ids=["api-003", "api-007"], limit=500)
+    expected = _oracle_aggregate_runs(runs, apis, q, flaky_min=2)
+    actual = store.fetch_runs(since=q.since, until=q.until, api_ids=q.scope_api_ids)
+    actual_groups = aggregate(actual, apis, q.group_by, flaky_min_transitions=2)[: q.limit]
+    assert actual_groups == expected
+
+
+# -- golden: current_state / watermarks / operator_scope -----------------------------------------
+
+
+def test_current_state_matches_oracle():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    expected = _by_key(_oracle_current_state(runs))
+    actual = _by_key(store.current_state())
+    assert actual == expected
+
+
+def test_current_state_respects_scope_api_ids():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    scope = ["api-003", "api-007"]
+    expected = _by_key(_oracle_current_state(runs, scope_api_ids=scope))
+    actual = _by_key(store.current_state(scope))
+    assert actual == expected
+    assert set(k[0] for k in actual) <= set(scope)
+
+
+def test_watermarks_matches_oracle():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    expected = _by_api(_oracle_watermarks(runs))
+    actual = _by_api(store.watermarks())
+    assert actual == expected
+
+
+def test_watermarks_respects_first_non_pass_since():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    since = datetime(2026, 9, 3, tzinfo=KST)
+    expected = _by_api(_oracle_watermarks(runs, first_non_pass_since=since))
+    actual = _by_api(store.watermarks(first_non_pass_since=since))
+    assert actual == expected
+
+
+def test_operator_scope_ids_matches_oracle():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    now = datetime(2026, 9, 3, 14, tzinfo=KST)
+    for operator_id, window_days in [("minseong", 30), ("jihoon", 30), ("sora", 1), ("nobody", 30)]:
+        expected = _oracle_operator_scope(runs, operator_id, window_days, now)
+        actual_ids = store.operator_scope_ids(operator_id, window_days, now)
+        actual = ScopeSummary(api_ids=sorted(actual_ids)[:100], total=len(actual_ids))
+        assert actual == expected, (operator_id, window_days)
+
+
+# -- keyset paging exhaustiveness (300-run synthetic insert) -------------------------------------
+
+
+def test_list_runs_keyset_paging_is_exhaustive_over_300_synthetic_runs():
+    store = Store(":memory:")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    synthetic = [
+        RunResult(
+            run_id=f"synthetic-{i:04d}", api_id=f"api-{i % 7}",
+            executed_at=base + timedelta(minutes=i), target_env="dev",
+            status=RunStatus.PASS if i % 3 else RunStatus.FAIL,
+        )
+        for i in range(300)
+    ]
+    store.insert_runs(synthetic, briefing_tz="UTC")
+
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        page = store.list_runs(RunsQuery(limit=37, cursor=cursor))
+        assert page.total == 300
+        seen.extend(r.run_id for r in page.items)
+        pages += 1
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+        assert pages <= 20
+    assert pages >= 3
+    assert len(seen) == 300
+    assert len(set(seen)) == 300   # no duplicates
+    assert set(seen) == {r.run_id for r in synthetic}   # no gaps
+
+
+# -- audit: keyset, same-`at` seq tie-break -------------------------------------------------------
+
+
+def test_audit_pages_same_timestamp_rows_by_seq_numerically():
+    store = Store(":memory:")
+    at = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    store.insert_audit_entries([
+        AuditEntry(seq=9, at=at, operator="minseong", action="apply_job", target_kind="job",
+                   target_id="job-9", session_id="s"),
+        AuditEntry(seq=10, at=at, operator="minseong", action="apply_job", target_kind="job",
+                   target_id="job-10", session_id="s"),
+    ])
+    page = store.audit(limit=50)
+    assert [e.seq for e in page.items] == [10, 9]
+
+
+def test_audit_keyset_paging_exhaustive():
+    store = Store(":memory:")
+    at = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    for i in range(25):
+        store.append_audit(at + timedelta(seconds=i), "minseong", "apply_job", "job", f"job-{i}", "s")
+    seen: list[int] = []
+    cursor = None
+    pages = 0
+    while True:
+        page = store.audit(cursor=cursor, limit=7)
+        assert page.total == 25
+        seen.extend(e.seq for e in page.items)
+        pages += 1
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+        assert pages <= 10
+    assert pages >= 3
+    assert len(seen) == 25 and len(set(seen)) == 25
+
+
+# -- EXPLAIN QUERY PLAN: list_runs / count_runs(api_id) use an index --------------------------
+
+
+def _assert_no_unindexed_scan(rows, table: str) -> None:
+    pattern = re.compile(rf"\b(SCAN|SEARCH)\s+{table}\b")
+    for row in rows:
+        detail = row["detail"]
+        if pattern.search(detail):
+            assert "INDEX" in detail, f"unindexed access on {table!r}: {detail!r}"
+
+
+def test_list_runs_query_plan_uses_an_index():
+    store = _store_with_fixtures()
+    plan = store.conn().execute(
+        "EXPLAIN QUERY PLAN SELECT runs.*, bodies.body AS body FROM runs "
+        "LEFT JOIN bodies ON bodies.run_id = runs.run_id "
+        "WHERE api_id = ? ORDER BY executed_at DESC, run_id DESC LIMIT 11",
+        ("api-001",),
+    ).fetchall()
+    _assert_no_unindexed_scan(plan, "runs")
+
+    plan_no_filter = store.conn().execute(
+        "EXPLAIN QUERY PLAN SELECT runs.*, bodies.body AS body FROM runs "
+        "LEFT JOIN bodies ON bodies.run_id = runs.run_id "
+        "ORDER BY executed_at DESC, run_id DESC LIMIT 11"
+    ).fetchall()
+    _assert_no_unindexed_scan(plan_no_filter, "runs")
+
+
+def test_count_runs_by_api_id_query_plan_uses_an_index():
+    store = _store_with_fixtures()
+    plan = store.conn().execute(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM runs WHERE api_id = ?", ("api-001",),
+    ).fetchall()
+    _assert_no_unindexed_scan(plan, "runs")
+    detail = " | ".join(row["detail"] for row in plan)
+    assert "INDEX" in detail
+
+
+# -- SLO smoke: every fixture-scale read completes well under 10ms ------------------------------
+
+
+def test_slo_smoke_fixture_reads_are_fast():
+    store = _store_with_fixtures()
+    checks = [
+        lambda: store.search_apis(query="v1", limit=20),
+        lambda: store.list_runs(RunsQuery(limit=50)),
+        lambda: store.count_runs(status="fail"),
+        lambda: store.fetch_runs(api_id="api-001"),
+        lambda: store.current_state(),
+        lambda: store.watermarks(),
+        lambda: store.operator_scope_ids("minseong", 30, datetime(2026, 9, 3, 14, tzinfo=KST)),
+        lambda: store.runs_by_ids(["run-0001", "run-0002"]),
+        lambda: store.get_body("run-0001"),
+        lambda: store.audit(limit=50),
+    ]
+    for check in checks:
+        start = time.perf_counter()
+        check()
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        assert elapsed_ms < 10, f"{check} took {elapsed_ms:.2f}ms"

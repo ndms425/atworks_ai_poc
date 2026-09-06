@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -52,6 +51,7 @@ from atworks_agent.aggregation import aggregate
 from atworks_agent.types import Binding
 
 from .reports import Reports
+from .store import Store
 
 
 def _page(rows: list, cursor: str | None, limit: int, *, key) -> Page:
@@ -108,10 +108,73 @@ def stub_response(api: ApiSpec, env: str, data: TestDataSet | None, seq: int) ->
     return body
 
 
+class _RunsView:
+    """Dict-compat facade over ``Store``'s ``runs`` table. ``MockAtworks.runs`` is a *property*
+    returning this, not a plain dict -- scale spec 2026-09-06 Task 4 removes the in-memory run
+    dict entirely, runs live only in SQL. This view exists purely so the pre-existing test suite's
+    ``backend.runs[...]`` / ``.values()`` / ``.items()`` / ``.keys()`` / ``len(...)`` / membership
+    checks, and wholesale ``backend.runs = {...}`` reassignment (see the property's setter below)
+    keep working unmodified: every access here goes straight to the Store, nothing is cached."""
+
+    def __init__(self, store: Store, briefing_tz: str) -> None:
+        self._store = store
+        self._briefing_tz = briefing_tz
+
+    def __getitem__(self, run_id: str) -> RunResult:
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        return run
+
+    def __setitem__(self, run_id: str, run: RunResult) -> None:
+        self._store.upsert_run(run, self._briefing_tz)
+
+    def __contains__(self, run_id: object) -> bool:
+        return isinstance(run_id, str) and self._store.get_run(run_id) is not None
+
+    def __iter__(self):
+        return iter(self._store.run_ids())
+
+    def __len__(self) -> int:
+        return self._store.run_count()
+
+    def get(self, run_id: str, default: RunResult | None = None) -> RunResult | None:
+        run = self._store.get_run(run_id)
+        return run if run is not None else default
+
+    def keys(self) -> list[str]:
+        return self._store.run_ids()
+
+    def values(self) -> list[RunResult]:
+        return self._store.all_runs()
+
+    def items(self) -> list[tuple[str, RunResult]]:
+        return [(r.run_id, r) for r in self._store.all_runs()]
+
+
+class _ApisDict(dict):
+    """A real ``dict`` (O(1) reads -- JobLedger/RuleLedger hold this exact object as their
+    in-memory api index, scale spec 2026-09-06 Task 4's controller ruling: ``self.apis`` stays a
+    plain dict, unlike ``self.runs``) that also mirrors every point write into the Store's
+    ``apis`` table, so SQL-backed ``search_apis`` stays in sync with in-place mutation (tests
+    redate fixture apis via ``backend.apis[api_id] = api.model_copy(...)`` and then exercise
+    ``search_apis`` indirectly through it)."""
+
+    def __init__(self, store: Store, initial: dict[str, ApiSpec] | None = None) -> None:
+        super().__init__(initial or {})
+        self._store = store
+
+    def __setitem__(self, key: str, value: ApiSpec) -> None:
+        super().__setitem__(key, value)
+        self._store.load_apis([value])
+
+
 class MockAtworks(AtworksBackend):
-    def __init__(self, config: AtworksAgentConfig, fixtures_dir: Path):
+    def __init__(self, config: AtworksAgentConfig, fixtures_dir: Path, store: Store | None = None):
         self._config = config
-        self.apis: dict[str, ApiSpec] = {
+        self.store = store if store is not None else Store(":memory:")
+        self.store.load_fixtures(fixtures_dir, briefing_tz=config.briefing_tz)
+        self.apis = {
             row["api_id"]: ApiSpec(**row) for row in json.loads((fixtures_dir / "apis.json").read_text(encoding="utf-8"))
         }
         self.ledger = JobLedger(config, self.apis)
@@ -120,17 +183,31 @@ class MockAtworks(AtworksBackend):
         self.reports: Reports | None = None
         self.format_library = FormatLibrary(max_size=config.max_format_library)
         self.format_batch_ledger = FormatBatchLedger(config, self.format_library)
-        self.runs: dict[str, RunResult] = {
-            row["run_id"]: RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))
-        }
-        self._run_seq = len(self.runs)
+        self._runs_view = _RunsView(self.store, config.briefing_tz)
+        self._run_seq = self.store.run_count()
         self.operators: dict[str, OperatorProfile] = {
             row["operator_id"]: OperatorProfile(**row)
             for row in json.loads((fixtures_dir / "operators.json").read_text(encoding="utf-8"))
         }
-        # scale (spec 2026-09-06): an in-memory audit log -- Task 4 moves this to SQL.
-        self._audit: list[AuditEntry] = []
-        self._audit_seq = 0
+
+    @property
+    def apis(self) -> _ApisDict:
+        return self._apis
+
+    @apis.setter
+    def apis(self, value: dict[str, ApiSpec]) -> None:
+        self._apis = _ApisDict(self.store, value)
+        self.store.replace_all_apis(value.values())
+
+    @property
+    def runs(self) -> _RunsView:
+        return self._runs_view
+
+    @runs.setter
+    def runs(self, value: dict[str, RunResult]) -> None:
+        # Wholesale replacement (a handful of tests build a purpose-built run set from scratch,
+        # discarding the fixtures entirely) -- deletes every existing run/body row then reinserts.
+        self.store.replace_all_runs(value, self._config.briefing_tz)
 
     def operator_profile(self, operator_id: str) -> OperatorProfile | None:
         return self.operators.get(operator_id)
@@ -139,98 +216,38 @@ class MockAtworks(AtworksBackend):
         return list(self.operators.values())
 
     async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
-        q = (query or "").lower()
-        rows = [a for a in self.apis.values()
-                if (not q or q in f"{a.method} {a.path} {a.name}".lower())
-                and (group is None or a.group == group)
-                and (updated_after is None or a.updated_at >= updated_after)]
-        return _page(rows, cursor, limit, key=lambda a: (a.updated_at, a.api_id))
+        return self.store.search_apis(query=query, group=group, updated_after=updated_after, cursor=cursor, limit=limit)
 
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
 
     async def list_runs(self, session, q: RunsQuery) -> Page[RunResult]:
-        rows = self._filter_runs(
-            q.since, q.status, q.api_id, until=q.until, executed_by=q.executed_by, job_id=q.job_id
-        )
-        return _page(rows, q.cursor, q.limit, key=lambda r: (r.executed_at, r.run_id))
+        return self.store.list_runs(q)
 
     async def get_run(self, session, run_id):
-        return self.runs.get(run_id)
+        return self.store.get_run(run_id)
 
     async def count_runs(self, session, since=None, until=None, status=None, api_id=None):
-        # No sort: a population count never needs an order, only the size of the matching set.
-        return sum(
-            1 for r in self.runs.values()
-            if (since is None or r.executed_at >= since)
-            and (until is None or r.executed_at < until)
-            and (status is None or (r.status.value != "pass" if status == "non_pass" else r.status.value == status))
-            and (api_id is None or r.api_id == api_id)
-        )
-
-    def _filter_runs(self, since, status, api_id, *, until=None, executed_by=None, job_id=None) -> list[RunResult]:
-        rows = [r for r in self.runs.values()
-                if (since is None or r.executed_at >= since)
-                and (until is None or r.executed_at < until)
-                and (status is None or (r.status.value != "pass" if status == "non_pass" else r.status.value == status))
-                and (api_id is None or r.api_id == api_id)
-                and (executed_by is None or r.executed_by == executed_by)
-                and (job_id is None or r.job_id == job_id)]
-        return sorted(rows, key=lambda r: r.executed_at, reverse=True)
+        return self.store.count_runs(since=since, until=until, status=status, api_id=api_id)
 
     async def aggregate_runs(self, session, q: AggregateQuery):
-        rows = [r for r in self.runs.values()
-                if (q.since is None or r.executed_at >= q.since)
-                and (q.until is None or r.executed_at < q.until)
-                and (q.scope_api_ids is None or r.api_id in q.scope_api_ids)]
+        # Windowed/scoped SQL fetch (indexed on executed_at/api_id) narrows the row set; the
+        # grouping/derived-field logic (run_ids, transitions, p95, regression_suspect, ...) is
+        # reused byte-for-byte from aggregation.aggregate so the output is identical by
+        # construction to the pre-SQL dict implementation.
+        rows = self.store.fetch_runs(since=q.since, until=q.until, api_ids=q.scope_api_ids)
         groups = aggregate(rows, self.apis, q.group_by, flaky_min_transitions=self._config.flaky_min_transitions)
         return groups[: q.limit]
 
     async def current_state(self, session, scope_api_ids=None) -> list[CellState]:
-        cells: dict[tuple[str, str, str | None], list[RunResult]] = defaultdict(list)
-        for r in self.runs.values():
-            if scope_api_ids is not None and r.api_id not in scope_api_ids:
-                continue
-            cells[(r.api_id, r.target_env, r.test_data_label)].append(r)
-        result: list[CellState] = []
-        for (api_id, env, data_label), rows in cells.items():
-            rows.sort(key=lambda r: r.executed_at)
-            transitions = sum(
-                1 for prev, cur in zip(rows, rows[1:], strict=False)
-                if (prev.status.value != "pass") != (cur.status.value != "pass")
-            )
-            latest = rows[-1]
-            result.append(CellState(
-                api_id=api_id, target_env=env, test_data_label=data_label, run_id=latest.run_id,
-                status=latest.status, executed_at=latest.executed_at, transitions_total=transitions,
-            ))
-        return result
+        return self.store.current_state(scope_api_ids)
 
     async def watermarks(self, session, api_ids=None, first_non_pass_since=None) -> list[ApiWatermark]:
-        by_api: dict[str, list[RunResult]] = defaultdict(list)
-        for r in self.runs.values():
-            if api_ids is not None and r.api_id not in api_ids:
-                continue
-            by_api[r.api_id].append(r)
-        result: list[ApiWatermark] = []
-        for api_id, rows in by_api.items():
-            rows.sort(key=lambda r: r.executed_at)
-            passes = [r.executed_at for r in rows if r.status.value == "pass"]
-            non_passes = [r for r in rows if r.status.value != "pass"]
-            first_non_pass = non_passes[0].executed_at if non_passes else None
-            if first_non_pass_since is not None and (first_non_pass is None or first_non_pass < first_non_pass_since):
-                continue
-            result.append(ApiWatermark(
-                api_id=api_id, last_pass_at=passes[-1] if passes else None,
-                first_non_pass_at=first_non_pass,
-                last_non_pass_at=non_passes[-1].executed_at if non_passes else None,
-                latest_status=rows[-1].status if rows else None,
-            ))
-        return result
+        return self.store.watermarks(api_ids, first_non_pass_since)
 
     async def operator_scope(self, session, operator_id: str, window_days: int) -> ScopeSummary:
         now = session.local_now() or datetime.now(UTC)
-        scope = operator_scope(list(self.runs.values()), operator_id, window_days, now)
+        scope = self.store.operator_scope_ids(operator_id, window_days, now)
         return ScopeSummary(api_ids=sorted(scope)[:100], total=len(scope))
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind) -> JobSpec:
@@ -261,7 +278,7 @@ class MockAtworks(AtworksBackend):
         return [j for j in self.ledger.applied() if j.remaining_executions > 0]
 
     async def runs_by_ids(self, session, run_ids):
-        return [self.runs[i] for i in run_ids if i in self.runs]
+        return self.store.runs_by_ids(run_ids)
 
     async def record_execution(self, session, job_id, run_ids, schedule_index):
         return self.ledger.record_execution(job_id, run_ids, schedule_index)
@@ -317,9 +334,7 @@ class MockAtworks(AtworksBackend):
         window_runs = 0
         known_inputs = 0
         would_fail = 0
-        for run in self.runs.values():
-            if run.api_id != draft.api_id or run.executed_at < floor:
-                continue
+        for run in self.store.fetch_runs(api_id=draft.api_id, since=floor):
             window_runs += 1
             if run.job_id is None or run.test_data_label is None:
                 continue
@@ -389,21 +404,17 @@ class MockAtworks(AtworksBackend):
         return recommendations[:limit]
 
     async def get_body(self, session, run_id: str) -> dict | None:
-        run = self.runs.get(run_id)
-        return run.response_body if run is not None else None
+        return self.store.get_body(run_id)
 
     async def audit(self, session, cursor=None, limit=50) -> Page[AuditEntry]:
-        # seq is zero-padded to a fixed width so the tie-break orders numerically, not
-        # lexicographically (str(9) > str(10) would otherwise mis-page same-timestamp rows).
-        return _page(self._audit, cursor, limit, key=lambda e: (e.at, f"{e.seq:020d}"))
+        # seq is zero-padded to a fixed width in the cursor id so the tie-break orders
+        # numerically, not lexicographically (str(9) > str(10) would otherwise mis-page
+        # same-timestamp rows) -- see Store.audit.
+        return self.store.audit(cursor, limit)
 
     async def append_audit(self, session, action: str, target_kind: str, target_id: str) -> None:
-        self._audit_seq += 1
         now = session.local_now() or datetime.now(UTC)
-        self._audit.append(AuditEntry(
-            seq=self._audit_seq, at=now, operator=session.operator, action=action,
-            target_kind=target_kind, target_id=target_id, session_id=session.session_id,
-        ))
+        self.store.append_audit(now, session.operator, action, target_kind, target_id, session.session_id)
 
     async def get_format(self, session, name: str) -> FormatDefinition | None:
         return self.format_library.get(name)
@@ -484,14 +495,14 @@ class MockAtworks(AtworksBackend):
                         duration_ms=100 + self._run_seq % 50,
                         response_body=stub_response(api, env, data, self._run_seq), job_id=job_id,
                         executed_by=job.applied_by)
-                    self.runs[run.run_id] = run
+                    self.store.upsert_run(run, self._config.briefing_tz)
                     produced.append(run)
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
         return produced
 
     async def get_context(self, session):
-        fails = len(self._filter_runs(None, "fail", None))
-        errors = len(self._filter_runs(None, "error", None))
+        fails = self.store.count_runs(status="fail")
+        errors = self.store.count_runs(status="error")
         now = session.local_now() or datetime.now(UTC)
         scope = operator_scope(list(self.runs.values()), session.operator, self._config.scope_window_days, now)
         return {"project": session.project_id, "allowed_targets": list(self._config.allowed_target_envs),
