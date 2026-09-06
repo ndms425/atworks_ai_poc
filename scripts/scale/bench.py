@@ -6,17 +6,18 @@ change, no special mode::
     MockAtworks(config, dataset_dir, store=Store(dataset_dir / "scale.sqlite"))
 
 and times every path §12 puts an SLO on, printing one row per path with the measured milliseconds,
-the ``config.slo_*`` limit, and PASS/FAIL. A path that does not exist yet prints ``n/a (T9)`` and
-does not count toward the exit status; exit is 1 iff a **measured** row breached its limit, and
-the full table is always printed first.
+the ``config.slo_*`` limit, and PASS/FAIL. A path that cannot be measured on this dataset (no API
+declares the probe's param, say) prints ``n/a`` and does not count toward the exit status; exit is
+1 iff a **measured** row breached its limit, and the full table is always printed first.
 
 Timing rule: best of 3 timed calls after 1 warm-up, except ``insights.build`` and
 ``briefing.generate``, which run **once** (they write files and are seconds-scale; a best-of-3
 would only measure a warm page cache).
 
-Measurement order matters: the SSE-latency probe executes a real 400-cell job, which *writes* 400
-runs into the dataset, so it runs last -- every read row above it sees the dataset exactly as
-generated. Run the bench on a throwaway copy if you care about the file staying pristine.
+Measurement order matters, and the last two rows both MUTATE the dataset: the retention probe moves
+the whole run set into the cold partition and drops every body, and the SSE-latency probe then
+executes a real 400-cell job that writes 400 fresh runs. Both run after every read row, so those
+see the dataset exactly as generated. Run the bench on a throwaway copy -- ``test_scale`` does.
 """
 from __future__ import annotations
 
@@ -44,7 +45,8 @@ from atworks_agent.aggregation import GROUP_BY
 from atworks_host.briefing import Briefings
 from atworks_host.insights import InsightPanels
 from atworks_host.mock_backend import MockAtworks
-from atworks_host.store import Store
+from atworks_host.retention import Retention
+from atworks_host.store import Store, _parse_iso
 
 DEFAULT_DB = Path(__file__).resolve().parent / "out"
 
@@ -184,12 +186,31 @@ async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
         await briefings.generate(backend, session, now)
         rows.append(Row("briefing.generate", config.slo_briefing_ms, (time.perf_counter() - start) * 1000))
 
-    # -- retention day job: Task 9 owns it -----------------------------------------------
-    rows.append(Row("retention day job", config.slo_retention_ms, note="not implemented yet (T9)"))
+    # -- retention day job (Task 9) -------------------------------------------------------
+    #    `now` is pushed past the newest run by the whole hot window, so the ENTIRE dataset ages
+    #    out in this one pass -- an upper bound on any real day's work, not a typical one.
+    rows.append(_retention_probe(store, config, work_dir))
 
-    # -- SSE latency while a 400-cell job executes. Writes 400 runs -- keep it last. ---------
+    # -- SSE latency while a 400-cell job executes. Writes 400 runs -- keep it last. Its runs
+    #    are stamped "now", so the retention pass above (which archived everything older) left
+    #    the write path exactly as a production one: an empty-ish hot partition it appends to.
     rows.append(await _sse_probe(backend, session, config, amount_apis))
     return rows
+
+
+def _retention_probe(store: Store, config: AtworksAgentConfig, work_dir: Path | None) -> Row:
+    newest = store.conn().execute("SELECT MAX(executed_at) FROM runs").fetchone()[0]
+    if newest is None:
+        return Row("retention day job", config.slo_retention_ms, note="empty dataset")
+    when = _parse_iso(newest) + timedelta(days=config.retention_hot_days + 1)
+    with tempfile.TemporaryDirectory(dir=work_dir) as tmp:
+        retention = Retention(store, config, Path(tmp) / "insights")
+        start = time.perf_counter()
+        counts = retention.run(when)
+        ms = (time.perf_counter() - start) * 1000
+    return Row("retention day job", config.slo_retention_ms, ms,
+               note=f"archived {counts['runs_archived']:,}, bodies {counts['bodies_deleted']:,} "
+                    f"(whole set ages out)")
 
 
 async def _sse_probe(backend: MockAtworks, session: AtworksSessionContext,

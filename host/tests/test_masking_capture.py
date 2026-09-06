@@ -104,7 +104,9 @@ async def test_a_different_group_still_captures_its_body():
 
 async def test_parity_report_marks_a_disabled_capture_row_status_only_with_the_korean_note(tmp_path):
     backend = _backend(masking_disabled_groups=("contract",))   # api-001 opted out
-    reports = Reports(tmp_path)
+    # capture_disabled is what lets the report say "캡처 해제" rather than "만료" (create_app
+    # wires this from the backend for the real host).
+    reports = Reports(tmp_path, capture_disabled=backend.capture_disabled)
     sched = Scheduler(backend, reports, SESSION)
     job = await backend.stage_job(
         SESSION, JobDraft(

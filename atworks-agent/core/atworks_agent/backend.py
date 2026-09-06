@@ -62,7 +62,11 @@ class AtworksBackend(ABC):
         페이지 경계가 안정적이다). ``q.cursor``는 서버가 만든 불투명 문자열 — 이 순서에서 그 지점
         이후의 다음 페이지를 낸다. ``Page.total``은 이 필터를 적용한 전체 건수, ``q.limit``과
         무관하다. 모든 ``executed_at``은 timezone-aware여야 한다(naive 값을 aware ``q.since``와
-        비교하면 하위에서 ``TypeError``가 난다)."""
+        비교하면 하위에서 ``TypeError``가 난다).
+
+        ``q.archived``가 True면 **콜드 파티션**(``retention_hot_days``를 넘겨 이관된 실행)을 읽는다 —
+        같은 술어, 같은 keyset 순서, 같은 봉투로 다른 파티션을 볼 뿐이다. 기본값 False가 핫
+        파티션이고, 콜드는 명시적으로 요청해야만 보인다(spec §6)."""
 
     @abstractmethod
     async def get_run(self, session: AtworksSessionContext, run_id: str) -> RunResult | None: ...
@@ -180,7 +184,8 @@ class AtworksBackend(ABC):
 
     @abstractmethod
     async def applied_jobs(self, session: AtworksSessionContext) -> list[JobSpec]:
-        """승인(applied) 상태인 job 전체. 스케줄러가 매 tick마다 순회하는 대상."""
+        """승인(applied) 상태인 job 전체 — 소진된 것까지 포함한다. 스케줄러가 매 tick마다 순회하는
+        대상은 이제 ``active_jobs``(남은 슬롯이 있는 것만)다."""
 
     @abstractmethod
     async def all_jobs(
@@ -397,7 +402,13 @@ class AtworksBackend(ABC):
         딱 하나, ``remaining_executions``가 이미 0이어서 애초에 소비할 슬롯이 없을 때뿐이다 — 그때는
         아무 것도 기록하지 않고 빈 리스트를 돌려준다. LATE 재평가와 상한 초과 스킵은 계마다가 아니라
         실행 1회당 한 번 적용된다. apply 이후 guardrail이 다시 걸린 실행 시도는 빈 결과와 함께
-        ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다."""
+        ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다.
+
+        REST 구현 의무(이벤트 루프, spec §9): 400셀짜리 매트릭스 하나가 채팅 SSE 턴을 굶기면 안 된다
+        — 실행 자체도, **인입(쓰기)도** ``max_concurrency`` 크기의 배치로 나누고 배치 사이에 제어를
+        돌려줘야 한다(끊기지 않는 400건 트랜잭션 하나가 정확히 이 SLO를 깨뜨렸다). 배치마다 트랜잭션
+        하나이고, 인입은 ``run_id`` 기준 멱등이라 중간에 끊겨도 커밋된 배치는 정확하며 재인입해도
+        어떤 집계도 이중 계산되지 않는다. ``record_execution``은 그래도 실행당 정확히 한 번이다."""
 
     # -- 선택 --------------------------------------------------------------------------
     @abstractmethod

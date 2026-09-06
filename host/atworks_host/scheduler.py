@@ -16,11 +16,11 @@ from atworks_agent import (
     JobSchedule,
     JobStatus,
     ProfileStatus,
-    collect_runs,
 )
 
 from .briefing import Briefings
 from .reports import Reports
+from .retention import Retention
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +36,23 @@ def due_at(schedule: JobSchedule, index: int) -> datetime | None:
 
 class Scheduler:
     def __init__(self, backend: AtworksBackend, reports: Reports, session: AtworksSessionContext | None,
-                 briefings: Briefings | None = None):
+                 briefings: Briefings | None = None, retention: Retention | None = None):
         self.backend = backend
         self.reports = reports
         self.session = session or AtworksSessionContext(session_id="scheduler", project_id="default", operator="scheduler")
         self.briefings = briefings
+        self.retention = retention
         self._lock = asyncio.Lock()
 
     async def tick(self, now: datetime) -> list[str]:
         async with self._lock:
             executed: list[str] = []
-            for job in list(await self.backend.applied_jobs(self.session)):
+            # scale spec §9: `active_jobs` (applied AND remaining_executions > 0), not every applied
+            # job ever. An exhausted job is not fetched, not inspected and not touched -- at 500
+            # operators' worth of finished schedules that is the difference between a tick that
+            # costs O(due) and one that costs O(history). The guard below stays as a belt-and-
+            # braces check on a backend whose `active_jobs` is looser than the ABC promises.
+            for job in list(await self.backend.active_jobs(self.session)):
                 if job.status is not JobStatus.APPLIED or job.remaining_executions <= 0:
                     continue
                 try:
@@ -79,6 +85,13 @@ class Scheduler:
                 except Exception:
                     # The briefing is a convenience artifact; a failure must not stall job execution.
                     logger.exception("daily briefing failed")
+            if self.retention is not None:
+                try:
+                    # Once per local day, guarded inside maybe_run (spec §6). Same seat as the
+                    # briefing and the same rule: housekeeping never stalls or fails a tick.
+                    self.retention.maybe_run(now)
+                except Exception:
+                    logger.exception("retention job failed")
             return executed
 
     async def _execute_one(self, job_id: str, schedule_index: int | None, report: bool) -> bool:
@@ -99,16 +112,20 @@ class Scheduler:
         if report:
             try:
                 current = await self.backend.get_job(self.session, job_id)
-                # scale spec §4: job.run_ids no longer grows, so the report gathers the job's
-                # whole run set by paging list_runs(job_id=...) -- run_count is the exact
-                # population, and cap>=1 keeps a zero-count job from asking for zero rows.
-                every = await collect_runs(
-                    self.backend, self.session, cap=max(current.run_count, 1), job_id=job_id,
-                )
-                # list_runs pages newest-first; the report's "latest run per cell" resolves a
-                # same-timestamp tie by taking the last one it sees, so hand it chronological
-                # order (oldest first, run_id breaking ties) exactly as the old id-list did.
-                every = sorted(every, key=lambda r: (r.executed_at, r.run_id))
+                # scale spec §9: the report is INCREMENTAL now. This occurrence's runs are
+                # appended to runs.jsonl and the report re-renders from that file -- the
+                # scheduler no longer pages the job's whole run history back out of the store on
+                # every occurrence (a 400-cell job × 14 schedule slots was 5,600 records
+                # round-tripped through the process to rewrite one summary).
+                # The runs are handed over WITHOUT bodies; parity fetches the two bodies per
+                # compared cell it actually needs through this loader, inside the 90-day window.
+                # Oldest-first, run_id breaking ties: the report resolves a same-timestamp cell
+                # tie by taking the last one it sees.
+                fresh = sorted(produced, key=lambda r: (r.executed_at, r.run_id))
+
+                async def body_loader(run_id: str) -> dict | None:
+                    return await self.backend.get_body(self.session, run_id)
+
                 # A re-write (a later scheduled occurrence, or a profile approved before the
                 # job's first run) must still honor every APPLIED comparison profile — the
                 # profile is durable once approved, and can't be re-staged. Listing profiles
@@ -131,7 +148,8 @@ class Scheduler:
                     await self.backend.add_guardrail_note(
                         self.session, job_id, f"profile lookup failed: {type(profile_error).__name__}"
                     )
-                self.reports.write(current, every, ignore_paths=ignore_paths, per_api_ignore=per_api_ignore or None)
+                await self.reports.write(current, fresh, body_loader=body_loader,
+                                         ignore_paths=ignore_paths, per_api_ignore=per_api_ignore or None)
             except Exception as error:
                 # Report failure: log and note it, but do NOT record a second execution.
                 # The execution already happened.

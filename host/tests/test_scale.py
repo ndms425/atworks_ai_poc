@@ -18,10 +18,11 @@ What this asserts today:
    run counts and on the first/last run id.
 3. **The bench runs end-to-end** and its table is printed into the captured output.
 
-What it does NOT assert yet: the SLOs themselves. Tasks 8/9 rewire the host reads; each path turns
-green there, and flipping ``SLO_ASSERT[path] = True`` is the one-line change that locks it in.
-The baseline (Task 7 report) is that ``aggregate_runs`` breaches at every size, and ``get_context``,
-``insights.build`` and the SSE latency probe breach from a few hundred thousand runs upward.
+Which SLOs it asserts: whatever ``SLO_ASSERT`` names True. Tasks 8 and 9 rewired the host reads and
+the write path; each row turned green there, and flipping ``SLO_ASSERT[path] = True`` is the
+one-line change that locks it in. The baseline (Task 7 report) was that ``aggregate_runs`` breached
+at every size, and ``get_context``, ``insights.build`` and the SSE latency probe breached from a
+few hundred thousand runs upward.
 """
 from __future__ import annotations
 
@@ -62,10 +63,15 @@ SIZES = (
 #
 # Task 8 turned the aggregate/context/insight/briefing reads on: they read rollup_day,
 # api_watermark, current_state and operator_api instead of scanning (or sampling) runs, and every
-# one of them is green on the reduced set AND on the 450k-run mid set. The rows still False are
-# other tasks' -- the list/count/simulate reads were already inside their budget before Task 8
-# (nothing was rewired, so there is nothing here to guard), retention does not exist until T9, and
-# the SSE row is T9's chunked ingest.
+# one of them is green on the reduced set AND on the 450k-run mid set.
+#
+# Task 9 turned on the last two: `retention day job` (the whole set ages out in one pass -- an
+# upper bound on any real day: reduced 986ms, mid 8.0s, limit 30s) and `chat SSE latency during
+# 400-cell execute`, which the chunked WRITE fixed -- the unbroken 400-run `store.ingest` measured
+# 162ms on the mid set in Task 7 and now measures 18ms (reduced 12ms, limit 100ms).
+#
+# The rows still False were never rewired by any of these tasks: the list/count/simulate reads
+# were already inside their budget before Task 8, so there is nothing here to guard.
 SLO_ASSERT: dict[str, bool] = {
     "get_context": True,
     "list_runs page 1 (limit 50)": False,
@@ -80,8 +86,8 @@ SLO_ASSERT: dict[str, bool] = {
     "simulate_rule (30d, amount)": False,
     "insights.build (deterministic)": True,
     "briefing.generate": True,
-    "retention day job": False,
-    "chat SSE latency during 400-cell execute": False,
+    "retention day job": True,
+    "chat SSE latency during 400-cell execute": True,
 }
 
 
@@ -237,9 +243,9 @@ def test_bench_runs_end_to_end_and_records_its_table(bench_rows: list) -> None:
     assert len(names) == len(set(names))
     assert sum(1 for n in names if n.startswith("aggregate_runs group_by=")) == 5
     retention = next(r for r in rows if r.name == "retention day job")
-    assert retention.ms is None and retention.verdict == "n/a"   # Task 9 owns it
+    assert retention.ms is not None and "whole set ages out" in retention.note   # Task 9 owns it
     measured = [r for r in rows if r.counts]
-    assert len(measured) >= 12 and all(r.ms is not None and r.ms >= 0 for r in measured)
+    assert len(measured) >= 13 and all(r.ms is not None and r.ms >= 0 for r in measured)
 
     breaches = [f"{r.name} {r.ms:,.1f}ms > {r.limit_ms}ms" for r in rows if r.counts and r.verdict == "FAIL"]
     print(f"[scale] baseline breaches ({len(breaches)}): {breaches}")

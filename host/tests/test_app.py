@@ -245,7 +245,7 @@ async def test_report_opens_without_session_header(client):
     )
     await backend.apply_job(session, job.job_id)
     runs = await backend.execute_job_once(session, job.job_id, None)
-    reports.write(job, runs)
+    await reports.write(job, runs, body_loader=lambda rid: backend.get_body(session, rid))
     r = await client.get(f"/api/atworks/reports/{job.job_id}")
     assert r.status_code == 200
     assert r.headers["content-type"] == "text/html; charset=utf-8"

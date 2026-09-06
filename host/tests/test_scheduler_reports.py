@@ -28,6 +28,14 @@ SESSION = AtworksSessionContext(session_id="sched", project_id="mes", operator="
 FIXTURES = Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures"
 
 
+def _body_loader(backend):
+    """What the scheduler hands `Reports.write`: bodies are fetched from the store one run at a
+    time, only for the cells parity compares — never carried in the run records themselves."""
+    async def load(run_id: str):
+        return await backend.get_body(SESSION, run_id)
+    return load
+
+
 async def test_tick_runs_due_jobs_only_and_writes_report(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
     reports = Reports(tmp_path)
@@ -74,7 +82,7 @@ async def test_report_html_escapes_json_and_uses_client_side_escaping(tmp_path):
     backend.runs[run.run_id] = run
     applied = backend.ledger.record_execution(job.job_id, [run.run_id], None)
 
-    path = reports.write(applied, [run])
+    path = await reports.write(applied, [run], body_loader=_body_loader(backend))
     html = path.read_text(encoding="utf-8")
 
     assert "\\u003c" in html
@@ -99,7 +107,7 @@ async def test_report_html_escapes_the_script_data_double_escape_sequence(tmp_pa
                  api_ids=["api-001"], target_envs=["dev"]),
         ActorKind.AGENT,
     )
-    path = reports.write(job, [])
+    path = await reports.write(job, [], body_loader=_body_loader(backend))
     html = path.read_text(encoding="utf-8")
 
     assert "<!--<script" not in html
@@ -141,7 +149,8 @@ async def test_report_failure_does_not_consume_a_second_slot(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
 
     class BrokenReports(Reports):
-        def write(self, job, runs, *, generator="refresh_runner", ignore_paths=(), per_api_ignore=None):
+        async def write(self, job, new_runs, *, body_loader, generator="refresh_runner",
+                        ignore_paths=(), per_api_ignore=None):
             raise OSError("disk full")
 
     sched = Scheduler(backend, BrokenReports(tmp_path), SESSION)
@@ -217,7 +226,8 @@ class RecordingBackend(AtworksBackend):
         raise NotImplementedError
 
     async def get_body(self, session, run_id):
-        raise NotImplementedError
+        self.calls.append("get_body")
+        return None
 
     async def audit(self, session, cursor=None, limit=50):
         raise NotImplementedError
@@ -226,7 +236,8 @@ class RecordingBackend(AtworksBackend):
         raise NotImplementedError
 
     async def active_jobs(self, session):
-        raise NotImplementedError
+        self.calls.append("active_jobs")
+        return [self.job]
 
     async def stage_job(self, session, draft, actor_kind):
         raise NotImplementedError
@@ -427,8 +438,11 @@ async def test_report_matrix_uses_the_latest_run_per_cell(tmp_path):
 
     second = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
     rows = {r["api_id"]: r for r in second["matrix"]["rows"]}
-    # Latest-run semantics: the matrix reflects the second execution, not a merge of both.
-    assert len(second["runs"]) == 8
+    # Latest-run semantics: the matrix reflects the second execution, not a merge of both --
+    # runs.jsonl accumulated BOTH occurrences (8 rows), data.json carries only the count.
+    assert second["runs_total"] == 8
+    assert "runs" not in second
+    assert len(reports.all_runs(job.job_id)) == 8
     assert rows["api-007"]["cells"]["stg"]["run_id"] != first_stg_run_id
     assert rows["api-007"]["differs"] is True
 
@@ -473,7 +487,7 @@ async def test_report_by_env_shows_zeros_for_an_env_that_produced_no_runs(tmp_pa
     dev_only = [r for r in produced if r.target_env == "dev"]
     applied = backend.ledger.get(job.job_id)
 
-    reports.write(applied, dev_only)
+    await reports.write(applied, dev_only, body_loader=_body_loader(backend))
 
     data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
     assert data["summary"]["by_env"]["stg"] == {"total": 0, "pass": 0, "fail": 0, "error": 0}
@@ -538,7 +552,7 @@ async def test_rediff_reapplies_ignore_paths_without_touching_the_backend(tmp_pa
     backend, reports, job = await _parity_report(tmp_path)
     runs_before = len(backend.runs)
 
-    path = reports.rediff(job.job_id, ["$.serverTime"])
+    path = await reports.rediff(job.job_id, ["$.serverTime"], body_loader=_body_loader(backend))
 
     assert len(backend.runs) == runs_before   # no new runs, no backend call at all
     data = json.loads((tmp_path / job.job_id / "data.json").read_text(encoding="utf-8"))
@@ -598,8 +612,8 @@ async def test_tick_survives_a_scheduling_failure_and_still_runs_the_good_job(tm
             self.notes: list[tuple[str, str]] = []
             self.executed_job_ids: list[str] = []
 
-        async def applied_jobs(self, session):
-            self.calls.append("applied_jobs")
+        async def active_jobs(self, session):
+            self.calls.append("active_jobs")
             return [bad_job, good_job]
 
         async def execute_job_once(self, session, job_id, schedule_index=None):
@@ -627,7 +641,8 @@ async def test_report_rows_link_back_to_the_portal_attach_url(tmp_path):
     job = await backend.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="now", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
     await backend.apply_job(SESSION, job.job_id)
     produced = await backend.execute_job_once(SESSION, job.job_id)
-    html = reports.write(backend.ledger.get(job.job_id), produced).read_text(encoding="utf-8")
+    path = await reports.write(backend.ledger.get(job.job_id), produced, body_loader=_body_loader(backend))
+    html = path.read_text(encoding="utf-8")
     assert "?attach=run:" in html   # template builds the link from data.portal_origin
     assert "portal.local:3110" in html.replace("\\u003c", "<")
 
@@ -648,6 +663,6 @@ async def test_scheduler_uses_only_the_backend_abc(tmp_path):
 
     assert executed == ["job-01"]
     assert "execute_job_once" in backend.calls
-    assert "applied_jobs" in backend.calls
+    assert "active_jobs" in backend.calls
     assert not hasattr(backend, "ledger")
     assert not hasattr(backend, "runs")

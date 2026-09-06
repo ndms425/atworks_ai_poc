@@ -296,7 +296,9 @@ class MockAtworks(AtworksBackend):
         return self.ledger.pending()
 
     async def apply_job(self, session, job_id):
-        return self.ledger.apply(job_id, actor=session.operator)
+        applied = self.ledger.apply(job_id, actor=session.operator)
+        self._audit(session, "applied", "job", job_id)
+        return applied
 
     async def discard_job(self, session, job_id, actor_kind):
         return self.ledger.discard(job_id, actor=session.operator, actor_kind=actor_kind)
@@ -338,6 +340,7 @@ class MockAtworks(AtworksBackend):
         라이브러리 만원) 규칙 적용 자체는 실패시키지 않고 guardrail_notes에 한 줄 남긴다 -- 라이브러리
         추가는 inert하므로 판정에는 아무 영향이 없다."""
         applied = self.rule_ledger.apply(rule_id, actor=session.operator)
+        self._audit(session, "applied", "rule", rule_id)
         if applied.save_format_as and applied.pattern:
             added, skip_reason = self.format_library.add(FormatDefinition(
                 name=applied.save_format_as, pattern=applied.pattern,
@@ -402,8 +405,13 @@ class MockAtworks(AtworksBackend):
         는 건드리지 않는다). 아직 리포트가 없는 job이면 재-diff는 조용히 건너뛴다: 프로파일 발효 자체는
         실패시키지 않는다."""
         applied = self.profile_ledger.apply(profile_id, actor=session.operator)
+        self._audit(session, "applied", "profile", profile_id)
         if self.reports is not None and self.reports.read_html(applied.job_id) is not None:
-            self.reports.rediff(applied.job_id, applied.ignore_paths, applied.per_api_ignore)
+            async def body_loader(run_id: str) -> dict | None:
+                return await self.get_body(session, run_id)
+
+            await self.reports.rediff(applied.job_id, applied.ignore_paths, applied.per_api_ignore,
+                                      body_loader=body_loader)
         return applied
 
     async def discard_profile(self, session, profile_id, actor_kind):
@@ -452,6 +460,13 @@ class MockAtworks(AtworksBackend):
         return self.store.audit(cursor, limit)
 
     async def append_audit(self, session, action: str, target_kind: str, target_id: str) -> None:
+        self._audit(session, action, target_kind, target_id)
+
+    def _audit(self, session, action: str, target_kind: str, target_id: str) -> None:
+        """Append-only audit row (spec §2). Every `apply_*` below writes one the moment the
+        ledger state actually changes -- so "사람이 이 시각에 승인했다" is evidence held by the
+        backend itself, not by whichever route happened to call it. A held apply (no host
+        approval mark) never reaches these methods, so it writes nothing."""
         now = session.local_now() or datetime.now(UTC)
         self.store.append_audit(now, session.operator, action, target_kind, target_id, session.session_id)
 
@@ -471,7 +486,9 @@ class MockAtworks(AtworksBackend):
         return self.format_batch_ledger.pending()
 
     async def apply_format_batch(self, session, batch_id):
-        return self.format_batch_ledger.apply(batch_id, actor=session.operator)
+        applied = self.format_batch_ledger.apply(batch_id, actor=session.operator)
+        self._audit(session, "applied", "format_batch", batch_id)
+        return applied
 
     async def discard_format_batch(self, session, batch_id, actor_kind):
         return self.format_batch_ledger.discard(batch_id, actor=session.operator, actor_kind=actor_kind)
@@ -554,13 +571,29 @@ class MockAtworks(AtworksBackend):
                     executed_by=job.applied_by)
                 produced.append(run)
             await asyncio.sleep(0)
-        # One transaction for the whole execution (spec §4): runs + bodies + the four
-        # materialized tables move together, then exactly one record_execution for the slot.
+        # The WRITE is chunked the same way the matrix loop is (Task 9, spec §9): one
+        # `max_concurrency`-sized slice per transaction with a yield between, so a 400-cell job
+        # can no longer park the event loop inside one unbroken ingest -- that single call was
+        # the whole SSE-latency breach the Task 7 bench measured. Each slice is its own
+        # transaction (runs + bodies + the four materialized tables move together, spec §4), and
+        # `ingest` is idempotent per run_id, so a crash mid-execution leaves committed slices
+        # correct and re-ingesting them adds no delta anywhere. `record_execution` still happens
+        # exactly ONCE at the end, whatever the outcome -- the slot contract is unchanged.
         # `mask` rewrites each body on its way into `bodies` -- store-boundary masking only,
         # per Task 5's `ingest(mask=...)` hook.
-        self.store.ingest(produced, self._config.briefing_tz, mask=lambda b: mask_body(b, policy))
+        for start in range(0, len(produced), self._config.max_concurrency):
+            self.store.ingest(produced[start:start + self._config.max_concurrency],
+                              self._config.briefing_tz, mask=lambda b: mask_body(b, policy))
+            await asyncio.sleep(0)
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
         return produced
+
+    def capture_disabled(self, api_id: str) -> bool:
+        """Is this API's group opted out of response-body capture (`masking_disabled_groups`)?
+        The report asks so a missing body can say WHICH of the two reasons it is -- capture off
+        vs. aged past `retention_body_days` -- instead of one vague note covering both."""
+        api = self.apis.get(api_id)
+        return api is not None and not body_capture_enabled(api, policy_from_config(self._config))
 
     async def get_context(self, session):
         # Windowed counts (spec §9: count_runs ×2 over 30 days + operator_scope). Without the

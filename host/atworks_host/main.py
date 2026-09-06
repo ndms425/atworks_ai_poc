@@ -10,7 +10,7 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 
-from atworks_agent import AtworksAgentConfig
+from atworks_agent import AtworksAgentConfig, AtworksSessionState
 from atworks_agent_runtime import AtworksAgent
 from atworks_agent_runtime.insight_narrator import narrate_insights
 
@@ -19,7 +19,9 @@ from .briefing import Briefings
 from .insights import InsightPanels
 from .mock_backend import MockAtworks
 from .reports import Reports
+from .retention import Retention, TimestampedSessionStore
 from .scheduler import Scheduler
+from .store import Store
 from .streaming import spawn_background
 
 HERE = Path(__file__).resolve().parent
@@ -49,13 +51,24 @@ def build() -> tuple:
         model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"),
         enable_insight_narration=os.environ.get("ATWORKS_INSIGHT_NARRATION", "1") != "0",
     )
-    backend = MockAtworks(config, HERE / "fixtures")
+    # ATWORKS_STORE_PATH picks the SQLite file the Mock runs on; unset keeps the demo's
+    # ephemeral ":memory:" store (fixtures reloaded every boot). Point it at a file and runs,
+    # bodies, rollups and the audit log survive a restart -- which is also what makes the
+    # retention job's cold partition mean anything.
+    store = Store(os.environ.get("ATWORKS_STORE_PATH", ":memory:"))
+    backend = MockAtworks(config, HERE / "fixtures", store=store)
     agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
     portal_origin = os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110")
+    # `capture_disabled` is wired by create_app (one place, so the test client gets it too).
     reports = Reports(HERE / "reports_out", portal_origin=portal_origin)
     briefings = Briefings(HERE / "briefings_out", config, portal_origin=portal_origin)
-    insights = InsightPanels(HERE / "insights_out", config, narrator=functools.partial(narrate_insights, agent.client, config))
-    scheduler = Scheduler(backend, reports, None, briefings=briefings)
+    insights_dir = HERE / "insights_out"
+    insights = InsightPanels(insights_dir, config, narrator=functools.partial(narrate_insights, agent.client, config))
+    # One session store shared by the router and the retention sweep -- built here, not inside
+    # create_app, so the idle TTL really reaches the sessions this process serves.
+    sessions = TimestampedSessionStore(AtworksSessionState)
+    retention = Retention(store, config, insights_dir, sessions)
+    scheduler = Scheduler(backend, reports, None, briefings=briefings, retention=retention)
 
     async def loop() -> None:
         while True:
@@ -73,7 +86,7 @@ def build() -> tuple:
         spawn_background(loop())
 
     app = create_app(agent=agent, backend=backend, scheduler=scheduler, reports=reports, briefings=briefings,
-                      insights=insights, on_startup=[start_loop])
+                      insights=insights, sessions=sessions, on_startup=[start_loop])
     return app, backend, scheduler
 
 

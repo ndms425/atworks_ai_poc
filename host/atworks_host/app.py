@@ -21,6 +21,7 @@ from atworks_agent import (
 )
 from atworks_agent.serialization import (
     api_record,
+    audit_record,
     format_batch_record,
     format_record,
     job_record,
@@ -34,6 +35,7 @@ from .briefing import Briefings
 from .insights import InsightPanels
 from .mock_backend import MockAtworks
 from .reports import Reports
+from .retention import TimestampedSessionStore
 from .scheduler import Scheduler
 from .sessions import SessionRecord, SessionStore, session_dependency
 from .streaming import append_user_turn, build_app, stream_turn
@@ -72,15 +74,24 @@ class SessionStart(BaseModel):
 
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
                briefings: Briefings, insights: InsightPanels | None = None,
+               sessions: SessionStore[AtworksSessionState] | None = None,
                on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
     backend.reports = reports  # lets Mock's apply_profile re-diff the target job's stored report
+    if reports.capture_disabled is None:
+        # Lets a report tell "본문 캡처 해제" (this API's group opted out) apart from "본문 만료"
+        # (the 90-day body window passed) instead of one note covering both.
+        reports.capture_disabled = backend.capture_disabled
     # A local route below is itself named `insights` (the existing GET /runs/insights) — Python
     # functions have one flat namespace, so that `async def insights(...)` would silently
     # rebind this parameter for the rest of create_app. Alias it immediately so the panel
     # routes always see the InsightPanels instance, never the shadowing route function.
     insight_panels = insights
     app = build_app("atworks-ai host", on_startup=on_startup)
-    sessions: SessionStore[AtworksSessionState] = SessionStore(AtworksSessionState)
+    # TimestampedSessionStore, not the bare SessionStore: `sessions.py` is byte-identical to the
+    # reference host contract, so the idle-TTL stamp and sweep (spec §6) live in the subclass.
+    # main.py passes the SAME instance it handed the retention job, so the sweep really reaches
+    # the sessions this app serves.
+    sessions = sessions if sessions is not None else TimestampedSessionStore(AtworksSessionState)
     CurrentSession = session_dependency(sessions, "/api/atworks/session")
     router = APIRouter(prefix="/api/atworks")
     Record = SessionRecord[AtworksSessionState]
@@ -89,6 +100,25 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         profile = backend.operator_profile(record.user_id)
         return AtworksSessionContext(session_id=record.session_id, project_id=PROJECT_ID, operator=record.user_id,
                                      role=profile.role if profile is not None else None, now=datetime.now().astimezone())
+
+    async def audit_action(record: Record, action: str, target_kind: str, target_id: str,
+                           outcome: str | None = None) -> None:
+        """One append-only audit row (spec §2). Every host approval surface writes TWO: the
+        bare action name BEFORE the executor call, and `<action>:<ok|blocked|error>` after —
+        so a route that dies mid-flight still leaves the attempt on the record, and the pair
+        says what actually became of it. The model never reaches this: it is written by the
+        route around the approval mark, which only an authenticated host click can set."""
+        await backend.append_audit(context(record), f"{action}:{outcome}" if outcome else action,
+                                   target_kind, target_id)
+
+    @router.get("/audit")
+    async def audit(record: CurrentSession, cursor: str | None = None,
+                    limit: int = Query(50, ge=1, le=200)) -> dict:
+        """읽기 전용 감사 로그(최신순, keyset 커서). "AI가 무엇을 바꿨나 → 아무것도;
+        사람이 이 시각에 승인했다"를 그대로 보여주는 증적."""
+        page = await backend.audit(context(record), cursor=cursor, limit=limit)
+        return {"items": [audit_record(e) for e in page.items],
+                "next_cursor": page.next_cursor, "total": page.total}
 
     @router.post("/session")
     async def start_session(payload: SessionStart | None = None) -> dict:
@@ -178,15 +208,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             record.state.approved_job_ids.add(job_id)
         else:
             record.state.host_action_job_ids.add(job_id)
+        await audit_action(record, action, "job", job_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
         execution = await executor.execute(action, {"job_id": job_id})
         record.state.approved_job_ids.discard(job_id)
         record.state.host_action_job_ids.discard(job_id)
         if execution.is_error:
+            await audit_action(record, action, "job", job_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
         if execution.blocked is not None:
+            await audit_action(record, action, "job", job_id, "blocked")
             return {"ok": False, "change": None, "reason": execution.result_text}
+        await audit_action(record, action, "job", job_id, "ok")
         record.pending_app_events.append(f"Operator {'approved' if action == 'apply_job' else 'dismissed'} job {job_id} from the card.")
         change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
         return {"ok": True, "change": change}
@@ -222,15 +256,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             record.state.approved_rule_ids.add(rule_id)
         else:
             record.state.host_action_rule_ids.add(rule_id)
+        await audit_action(record, action, "rule", rule_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
         execution = await executor.execute(action, {"rule_id": rule_id})
         record.state.approved_rule_ids.discard(rule_id)
         record.state.host_action_rule_ids.discard(rule_id)
         if execution.is_error:
+            await audit_action(record, action, "rule", rule_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
         if execution.blocked is not None:
+            await audit_action(record, action, "rule", rule_id, "blocked")
             return {"ok": False, "change": None, "reason": execution.result_text}
+        await audit_action(record, action, "rule", rule_id, "ok")
         record.pending_app_events.append(
             f"Operator {'approved' if action == 'apply_rule' else 'dismissed'} rule {rule_id} from the card."
         )
@@ -268,15 +306,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             record.state.approved_profile_ids.add(profile_id)
         else:
             record.state.host_action_profile_ids.add(profile_id)
+        await audit_action(record, action, "profile", profile_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
         execution = await executor.execute(action, {"profile_id": profile_id})
         record.state.approved_profile_ids.discard(profile_id)
         record.state.host_action_profile_ids.discard(profile_id)
         if execution.is_error:
+            await audit_action(record, action, "profile", profile_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
         if execution.blocked is not None:
+            await audit_action(record, action, "profile", profile_id, "blocked")
             return {"ok": False, "change": None, "reason": execution.result_text}
+        await audit_action(record, action, "profile", profile_id, "ok")
         record.pending_app_events.append(
             f"Operator {'approved' if action == 'apply_profile' else 'dismissed'} comparison profile {profile_id} from the card."
         )
@@ -312,15 +354,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             record.state.approved_format_batch_ids.add(batch_id)
         else:
             record.state.host_action_format_batch_ids.add(batch_id)
+        await audit_action(record, action, "format_batch", batch_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
         execution = await executor.execute(action, {"batch_id": batch_id})
         record.state.approved_format_batch_ids.discard(batch_id)
         record.state.host_action_format_batch_ids.discard(batch_id)
         if execution.is_error:
+            await audit_action(record, action, "format_batch", batch_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
         if execution.blocked is not None:
+            await audit_action(record, action, "format_batch", batch_id, "blocked")
             return {"ok": False, "change": None, "reason": execution.result_text}
+        await audit_action(record, action, "format_batch", batch_id, "ok")
         record.pending_app_events.append(
             f"Operator {'approved' if action == 'apply_format_batch' else 'dismissed'} format batch {batch_id} from the card."
         )

@@ -39,6 +39,11 @@ class RunsQuery(BaseModel):
     api_id: str | None = None
     executed_by: str | None = None
     job_id: str | None = None   # controller ruling: later tasks read a job's runs through this
+    # Read the COLD partition instead of the hot one (spec §6): runs older than
+    # ``retention_hot_days`` are moved to an archive table, never deleted, and are only ever
+    # visible through an explicit ``archived=True`` read. Same predicates, same keyset order,
+    # same envelope -- the archive is a different partition, not a different contract.
+    archived: bool = False
     cursor: str | None = None
     limit: int = Field(default=50, ge=1, le=200)
 

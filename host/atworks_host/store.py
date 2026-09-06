@@ -192,9 +192,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at_seq ON audit_log(at, seq);
 
+-- One row per retention STEP per local day (spec §3/§6): `partition_key` is `<step>:<YYYY-MM-DD>`
+-- (plus the `daily:<YYYY-MM-DD>` guard row that makes the tick-tail job run once a day), and
+-- `archived_at` is when that step ran. Append/overwrite only; nothing reads it but the day guard.
 CREATE TABLE IF NOT EXISTS retention_state (
-    key TEXT PRIMARY KEY,
-    value TEXT
+    partition_key TEXT PRIMARY KEY,
+    archived_at TEXT NOT NULL
 );
 """
 
@@ -442,6 +445,16 @@ class Store:
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        # `retention_state` was created in Task 4 as a generic (key, value) pair table and never
+        # written by anything; Task 9 gives it the spec's own columns. A store written before
+        # this keeps the old shape (CREATE TABLE IF NOT EXISTS never reshapes), so drop it --
+        # there is by construction nothing in it to lose.
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(retention_state)").fetchall()}
+        if columns and "partition_key" not in columns:
+            self._conn.execute("DROP TABLE retention_state")
+            self._conn.execute(
+                "CREATE TABLE retention_state (partition_key TEXT PRIMARY KEY, archived_at TEXT NOT NULL)"
+            )
 
     # -- fixtures ----------------------------------------------------------------------------
 
@@ -830,8 +843,12 @@ class Store:
             since=q.since, until=q.until, status=q.status, api_id=q.api_id,
             executed_by=q.executed_by, job_id=q.job_id,
         )
+        # The cold partition is the SAME contract read against another table: aliasing it to
+        # `runs` keeps every predicate, the keyset clause and the body join byte-identical, so
+        # an archived page can never drift from a hot one (spec §6 "조회는 명시적 archived=true").
+        source = "runs_archive AS runs" if q.archived else "runs"
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        total = self._conn.execute(f"SELECT COUNT(*) FROM runs {where_sql}", params).fetchone()[0]
+        total = self._conn.execute(f"SELECT COUNT(*) FROM {source} {where_sql}", params).fetchone()[0]
 
         keyset_clauses = list(clauses)
         keyset_params = list(params)
@@ -843,7 +860,7 @@ class Store:
             keyset_params += [_iso(after_dt), _iso(after_dt), after_id]
         keyset_where = f"WHERE {' AND '.join(keyset_clauses)}" if keyset_clauses else ""
         rows = self._conn.execute(
-            f"SELECT runs.*, bodies.body AS body FROM runs LEFT JOIN bodies ON bodies.run_id = runs.run_id "
+            f"SELECT runs.*, bodies.body AS body FROM {source} LEFT JOIN bodies ON bodies.run_id = runs.run_id "
             f"{keyset_where} ORDER BY executed_at DESC, run_id DESC LIMIT ?",
             [*keyset_params, q.limit + 1],
         ).fetchall()
@@ -853,11 +870,12 @@ class Store:
 
     def count_runs(
         self, since: datetime | None = None, until: datetime | None = None,
-        status: str | None = None, api_id: str | None = None,
+        status: str | None = None, api_id: str | None = None, archived: bool = False,
     ) -> int:
         clauses, params = self._runs_predicates(since=since, until=until, status=status, api_id=api_id)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        return self._conn.execute(f"SELECT COUNT(*) FROM runs {where_sql}", params).fetchone()[0]
+        source = "runs_archive" if archived else "runs"
+        return self._conn.execute(f"SELECT COUNT(*) FROM {source} {where_sql}", params).fetchone()[0]
 
     def count_runs_by_job(self, since: datetime | None = None, until: datetime | None = None) -> dict[str, int]:
         """``{job_id: runs in the window}`` in one indexed GROUP BY -- the briefing's "which jobs
@@ -922,6 +940,64 @@ class Store:
         if row is None or row["body"] is None:
             return None
         return json.loads(row["body"])
+
+    # -- retention (Task 9, spec §6) ----------------------------------------------------------
+
+    #: the `runs` columns `runs_archive` mirrors, in order -- the archive adds only `archived_at`.
+    _RUN_COLUMNS = (
+        "run_id, api_id, job_id, target_env, test_data_label, status, http_status, duration_ms, "
+        "executed_at, executed_by, failed_rules, day"
+    )
+
+    def archive_runs_before(self, cutoff: datetime, archived_at: datetime) -> int:
+        """Move (never delete) every run older than ``cutoff`` from the hot partition into
+        ``runs_archive``, in ONE transaction. Returns how many rows moved. Rollups, watermarks,
+        cell state and the report artifacts are permanent and are deliberately untouched: the
+        aggregate reads keep answering identically after a cold move (spec §6)."""
+        moved = self._conn.execute(
+            f"INSERT OR IGNORE INTO runs_archive ({self._RUN_COLUMNS}, archived_at) "
+            f"SELECT {self._RUN_COLUMNS}, ? FROM runs WHERE executed_at < ?",
+            (_iso(archived_at), _iso(cutoff)),
+        ).rowcount
+        self._conn.execute("DELETE FROM runs WHERE executed_at < ?", (_iso(cutoff),))
+        self._conn.commit()
+        return moved
+
+    def delete_bodies_before(self, cutoff: datetime) -> int:
+        """The ONE tier that is actually deleted (spec §6): a captured response body is the only
+        data that can carry personal or financial values, so it is dropped at
+        ``retention_body_days`` and a parity re-diff outside that window falls back to a
+        status-only verdict with a "본문 만료" note."""
+        deleted = self._conn.execute("DELETE FROM bodies WHERE captured_at < ?", (_iso(cutoff),)).rowcount
+        self._conn.commit()
+        return deleted
+
+    def purge_runs_archive(self) -> int:
+        """Cold DELETE -- only ever called once ``retention_cold_until`` is both set and past
+        (project end + 1 year). Retention.run is the only caller, and it is the only place in
+        this codebase that removes a run record at all."""
+        deleted = self._conn.execute("DELETE FROM runs_archive").rowcount
+        self._conn.commit()
+        return deleted
+
+    def get_retention_state(self, partition_key: str) -> datetime | None:
+        row = self._conn.execute(
+            "SELECT archived_at FROM retention_state WHERE partition_key = ?", (partition_key,)
+        ).fetchone()
+        return _parse_iso(row["archived_at"]) if row is not None else None
+
+    def set_retention_state(self, partition_key: str, archived_at: datetime) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO retention_state (partition_key, archived_at) VALUES (?,?)",
+            (partition_key, _iso(archived_at)),
+        )
+        self._conn.commit()
+
+    def retention_state(self) -> dict[str, datetime]:
+        return {
+            r["partition_key"]: _parse_iso(r["archived_at"])
+            for r in self._conn.execute("SELECT * FROM retention_state").fetchall()
+        }
 
     # -- rollup-fed aggregation (Task 8, spec §9) -------------------------------------------
 

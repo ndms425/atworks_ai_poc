@@ -6,6 +6,7 @@ from typing import Any
 from .rules import FormatDefinition, ValidationRule
 from .types import (
     ApiSpec,
+    AuditEntry,
     ComparisonProfile,
     FailedRank,
     FormatBatch,
@@ -63,6 +64,11 @@ def rule_recommendation_record(rec: RuleRecommendation) -> dict[str, Any]:
     record = rec.model_dump(mode="json", exclude_none=True)
     record["rule"] = rule_record(rec.rule)
     return record
+
+
+def audit_record(entry: AuditEntry) -> dict[str, Any]:
+    """감사 로그 1행. append-only 원장의 읽기 모양 — 파생 필드도 별칭도 없다."""
+    return entry.model_dump(mode="json")
 
 
 def format_batch_record(batch: FormatBatch) -> dict[str, Any]:
