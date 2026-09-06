@@ -128,6 +128,52 @@ async def test_overlong_headline_is_rejected_not_truncated_silently(config):
     assert any("top_failed_rule:a" in note for note in notes)
 
 
+async def test_malformed_tool_input_returns_empty_not_raise(config):
+    candidates = [_candidate("top_failed_rule:a")]
+
+    async def handler(**kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(type="tool_use", name="submit_insights", input="not-a-dict")
+            ]
+        )
+
+    client = FakeCreateClient(handler)
+    result = await narrate_insights(client, config, candidates, "developer")
+
+    assert result == []
+
+
+async def test_non_dict_item_and_non_string_field_are_survivable(config):
+    known = _candidate("top_failed_rule:a")
+    candidates = [known]
+
+    async def handler(**kwargs: Any) -> Any:
+        return _tool_use_response([
+            "not-a-dict",
+            {"candidate_id": "top_failed_rule:a", "headline": 123, "why_it_matters": "x", "prompt": "y"},
+            {"candidate_id": "top_failed_rule:a", "headline": "h", "why_it_matters": "w", "prompt": "p"},
+        ])
+
+    client = FakeCreateClient(handler)
+    result = await narrate_insights(client, config, candidates, "developer")
+
+    assert len(result) == 1
+    assert result[0].candidate_id == "top_failed_rule:a"
+
+
+async def test_response_without_tool_use_block_returns_empty(config):
+    candidates = [_candidate("top_failed_rule:a")]
+
+    async def handler(**kwargs: Any) -> Any:
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text="hi")])
+
+    client = FakeCreateClient(handler)
+    result = await narrate_insights(client, config, candidates, "developer")
+
+    assert result == []
+
+
 async def test_request_forces_the_tool_and_fences_candidates(config):
     candidate = _candidate("top_failed_rule:a")
 

@@ -72,12 +72,12 @@ async def narrate_insights(
     if not config.enable_insight_narration or not candidates:
         return []
 
-    known_ids = {c.candidate_id for c in candidates}
-    fenced = ATWORKS_FENCE.fence_payload(
-        [c.model_dump(mode="json") for c in candidates], max_chars=6000
-    )
-    model = config.insight_narration_model or config.model
     try:
+        known_ids = {c.candidate_id for c in candidates}
+        fenced = ATWORKS_FENCE.fence_payload(
+            [c.model_dump(mode="json") for c in candidates], max_chars=6000
+        )
+        model = config.insight_narration_model or config.model
         response = await asyncio.wait_for(
             client.messages.create(
                 model=model,
@@ -89,43 +89,54 @@ async def narrate_insights(
             ),
             timeout=config.insight_narration_timeout_s,
         )
+
+        tool_use = next(
+            (
+                block
+                for block in getattr(response, "content", [])
+                if getattr(block, "type", None) == "tool_use"
+                and getattr(block, "name", None) == "submit_insights"
+            ),
+            None,
+        )
+        if tool_use is None:
+            logger.warning("insight narration response carried no submit_insights tool_use block")
+            return []
+
+        raw_input = tool_use.input
+        raw_items = raw_input.get("items", []) if isinstance(raw_input, dict) else []
+
+        narratives: list[InsightNarrative] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            candidate_id = item.get("candidate_id", "")
+            try:
+                is_known = candidate_id in known_ids
+            except TypeError:
+                is_known = False
+            if not is_known:
+                if notes is not None:
+                    notes.append(f"insight narration dropped unknown candidate_id: {candidate_id!r}")
+                continue
+            try:
+                # Sanitized with a bound well above the schema's own max_length so an
+                # over-long string still fails pydantic validation below, rather than
+                # being silently truncated to fit and passed through. Non-string fields
+                # are not coerced into something that would pass validation — they are
+                # left to fail sanitize_text/model_validate and drop this item only.
+                sanitized = {
+                    "candidate_id": candidate_id,
+                    "headline": ATWORKS_FENCE.sanitize_text(item.get("headline", ""), 2000),
+                    "why_it_matters": ATWORKS_FENCE.sanitize_text(item.get("why_it_matters", ""), 2000),
+                    "prompt": ATWORKS_FENCE.sanitize_text(item.get("prompt", ""), 2000),
+                }
+                narratives.append(InsightNarrative.model_validate(sanitized))
+            except Exception as exc:
+                if notes is not None:
+                    notes.append(f"insight narration dropped invalid item for {candidate_id!r}: {exc}")
+                continue
+        return narratives
     except Exception:
-        logger.warning("insight narration call failed; falling back to no narration", exc_info=True)
+        logger.warning("insight narration failed; falling back to no narration", exc_info=True)
         return []
-
-    tool_use = next(
-        (
-            block
-            for block in getattr(response, "content", [])
-            if getattr(block, "type", None) == "tool_use"
-            and getattr(block, "name", None) == "submit_insights"
-        ),
-        None,
-    )
-    if tool_use is None:
-        logger.warning("insight narration response carried no submit_insights tool_use block")
-        return []
-
-    narratives: list[InsightNarrative] = []
-    for item in tool_use.input.get("items", []):
-        candidate_id = item.get("candidate_id", "")
-        if candidate_id not in known_ids:
-            if notes is not None:
-                notes.append(f"insight narration dropped unknown candidate_id: {candidate_id!r}")
-            continue
-        # Sanitized with a bound well above the schema's own max_length so an over-long
-        # string still fails pydantic validation below, rather than being silently
-        # truncated to fit and passed through.
-        sanitized = {
-            "candidate_id": candidate_id,
-            "headline": ATWORKS_FENCE.sanitize_text(item.get("headline", ""), 2000),
-            "why_it_matters": ATWORKS_FENCE.sanitize_text(item.get("why_it_matters", ""), 2000),
-            "prompt": ATWORKS_FENCE.sanitize_text(item.get("prompt", ""), 2000),
-        }
-        try:
-            narratives.append(InsightNarrative.model_validate(sanitized))
-        except Exception as exc:
-            if notes is not None:
-                notes.append(f"insight narration dropped invalid item for {candidate_id!r}: {exc}")
-            continue
-    return narratives
