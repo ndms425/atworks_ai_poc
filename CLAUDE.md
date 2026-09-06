@@ -174,7 +174,13 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   built by `scripts/scale/generate.py`; `pytest -m scale` (deselected by default via `pytest.ini`)
   runs a reduced set, `ATWORKS_SCALE_FULL=1` the spec's numbers. The full set the branch was
   proved on: `--apis 50000 --days 180 --per-day 11000 --peak-day 120:50000 --operators 500`
-  (2,019,000 runs, 1.76 GB SQLite).
+  (2,019,000 runs, ~1.3 GB SQLite) — 13 of 14 measured rows inside their limit, the exception
+  being `insights.build` (688 ms of 500) for the bench's deliberately WORST operator, whose
+  30-day scope is 33,838 of the 50,000 APIs; a median operator's panel is 199 ms. Documented
+  with the per-read profile in README and the fix-wave report, never by moving the limit. The
+  bench defaults to `--no-mutate`: only the retention probe would destroy the dataset it
+  measures, so that one runs on a copy, and it ages out ONE day partition rather than the whole
+  set. `SLO_ASSERT` in `host/tests/test_scale.py` now asserts EVERY row the bench measures.
   **REST-adapter obligations** (all stated in the ABC docstrings, because they are the contract a
   Java implementation must honour, not Mock trivia): `record_execution` receives runs **in
   chronological order** and must materialize in that order (the watermark/transition counters are

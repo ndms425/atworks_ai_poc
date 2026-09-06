@@ -149,10 +149,11 @@ ATWORKS_STORE_PATH=./atworks.sqlite python -m atworks_host.main   # 파일 저�
 ### 하네스 실행
 
 ```bash
-# 1) 합성 데이터셋 생성 (전체 세트 ~6분, sqlite 약 1.8GB)
+# 1) 합성 데이터셋 생성 (전체 세트 ~6분, sqlite 약 1.3GB)
 .venv/Scripts/python.exe scripts/scale/generate.py --out <dir> \
     --apis 50000 --days 180 --per-day 11000 --peak-day 120:50000 --operators 500
-# 2) SLO 벤치
+# 2) SLO 벤치. 기본이 --no-mutate: 보존 프로브만 sqlite 사본에서 돈다(이 프로브는 run을 콜드
+#    파티션으로 옮기므로 인플레이스로 돌리면 잰 데이터셋을 그 자리에서 파괴한다). --mutate로 끌 수 있다.
 .venv/Scripts/python.exe scripts/scale/bench.py --db <dir> --json bench.json
 # 3) 축소 세트로 도는 opt-in 테스트 (기본 suite에서는 제외돼 있다)
 .venv/Scripts/python.exe -m pytest -m scale -q
@@ -160,26 +161,39 @@ ATWORKS_STORE_PATH=./atworks.sqlite python -m atworks_host.main   # 파일 저�
 
 SLO 상한은 전부 `AtworksAgentConfig`의 `slo_*` 필드다(코드가 곧 기준):
 
-| 경로 | 상한 | 2,019,000 run 실측 |
+| 경로 | 상한 | 2,019,400 run 실측 |
 |---|---|---|
-| `get_context` | 50 ms | 21.4 ms |
+| `get_context` | 50 ms | 23.6 ms |
 | `list_runs` 페이지(50건) | 200 ms | 30.9 ms |
+| `list_runs` 커서 페이지 | 200 ms | 31.3 ms |
 | `count_runs`(fail, 30일) | 50 ms | 2.7 ms |
-| `aggregate_runs`(5개 축 중 최악) | 300 ms | **346.5 ms** (`group_by=http_status`) |
+| `aggregate_runs`(5개 축 중 최악) | 300 ms | 250.5 ms (`group_by=api_env_data`) |
+| `aggregate_runs group_by=http_status` | 300 ms | 13.6 ms (이전 346.5 ms) |
+| `aggregate_runs group_by=failed_rule` | 300 ms | 25.8 ms |
 | `simulate_rule`(30일) | 1 s | 0.1 ms |
-| `insights.build`(결정론 부분) | 500 ms | **728 ms** |
-| 브리핑 생성 | 5 s | 157.9 ms |
-| 400셀 실행 중 채팅 SSE 지연 | 100 ms | 61.8 ms |
-| 보존 작업 1일치 | 30 s | **127.9 s**(단, 200만 run **전량**이 한 번에 만료되는 상한 시나리오) |
+| `insights.build`(결정론 부분) | 500 ms | **687.9 ms** |
+| 브리핑 생성 | 5 s | 157.1 ms |
+| 400셀 실행 중 채팅 SSE 지연 | 100 ms | 55.0 ms |
+| 보존 작업 1일치(한 파티션) | 30 s | 306.6 ms |
 
-굵은 세 줄은 상한을 넘겨 **기록으로 남긴** 항목이다(상한을 낮추지 않았다). 보존 행은 200만 run
-전량이 하루에 만료되는 상한 시나리오라 실제 하루치(≈1.1만 run)로 환산하면 1초 미만이다. 나머지 두
-줄은 뿌리가 같다: 이 데이터 모양에서 `rollup_day`가 101만 행(run 202만 건 = **롤업 1행당 run 2건**)
-이라 "작은 표 읽기"가 여전히 30일 창 17만 행 GROUP BY이고, `failed_rule`/`http_status` 축은 그 위에
-행마다 JSON 맵을 `json_each`로 펼친다(어떤 인덱스도 덮을 수 없는 구간). 시간이 전부 SQL 안에 있고
-파이썬 쪽은 10ms 미만이다. 축소·중간 세트(45만 run)에서는 두 줄 다 녹색이다. 다음 수는 두 맵 축을
-JSON이 아니라 `(day, rule)`·`(day, http_status)` 자체 롤업 행으로 물질화하는 것 — 이번 브랜치 범위
-밖이다. 자세한 진단은 `.superpowers/sdd/2026-09-06-scale-architecture/task-11-report.md`.
+굵은 줄 **하나**가 상한을 넘겨 기록으로 남긴 항목이다(상한을 낮추지 않았다). Task 11에서 붉었던
+세 줄 중 둘은 해결됐다: 두 맵 축(`failed_rule`/`http_status`)은 `rollup_key_day`라는 자체 롤업
+행으로 물질화돼 30일 창이 (일수 × 키) 몇백 행이 됐고(346.5 → 13.6 ms, 180일 전체가 3,077행),
+보존 행은 **하루치 한 파티션**만 만료시키도록 고쳐 재면서 실제 값(306.6 ms)이 나왔다 — 이전의
+127.9 s는 200만 run 전량이 한 번에 만료되는, 아무도 돌리지 않는 상한 시나리오였다.
+
+남은 `insights.build` 687.9 ms의 내역(2M 실측, 시간은 전부 SQL 안이고 파이썬은 10 ms 미만):
+`aggregate_runs(api_env_data, scope_operator, order_by=transitions)` 276 ms +
+`aggregate_runs(failed_rule, scope_operator)` 231 ms + `watermarks(first_non_pass_since)` 34 ms +
+나머지 ~20 ms. 두 집계 모두 **오퍼레이터 스코프**가 걸려 있어 `rollup_key_day`를 쓸 수 없다 — 키
+롤업 행은 이미 모든 API를 가로질러 합산돼 있어 뒤늦게 api_id로 거를 수가 없고, 그래서 스코프가
+걸린 맵 축은 정확한 `json_each` 경로로 남는다(정확도가 먼저다).
+
+그리고 이 숫자는 벤치가 **일부러 최악의 오퍼레이터**(실행 건수 1위)를 고르기 때문에 나온다. 그
+오퍼레이터의 30일 스코프는 33,838개 API — 카탈로그 5만 개의 2/3라서 "스코프"가 사실상 프로젝트
+전체다. 같은 데이터셋의 중앙값 오퍼레이터(948개 API)는 **199 ms**, 최소 오퍼레이터(441개)는
+269 ms로 상한 안에 넉넉히 들어온다. 자세한 진단은
+`.superpowers/sdd/2026-09-06-scale-architecture/final-fix-wave-report.md`.
 
 ## 사용자별 AI 인사이트 패널
 

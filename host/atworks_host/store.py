@@ -1814,7 +1814,17 @@ class Store:
         breaking ties), which is both deterministic and index-served. No caller depends on api_id
         order: every one of them re-sorts (`insights` by first_non_pass_at, `resolve_select_where`
         by api_updated_at) or dict-ifies by api_id."""
-        clauses, params = _operator_scope_clause(scope_operator, scope_since)
+        # `keep_outer_index` when a since-predicate is present, for the reason
+        # `_operator_scope_clause` documents: the scope subquery is an indexable term, and left
+        # indexable the planner drives the whole query off `operator_api` and probes the
+        # watermark PK once per scoped API -- 33,801 probes for the busiest operator on the full
+        # bench set, to return 279 rows. Marked non-indexable, it seeks
+        # `idx_api_watermark_first_non_pass` instead and filters the handful that survive:
+        # measured 103ms -> 34ms at 2M runs. With no since-predicate there is no outer index to
+        # protect, so the scope stays indexable and drives, which is right for that shape.
+        anchored = first_non_pass_since is not None or last_non_pass_since is not None
+        clauses, params = _operator_scope_clause(
+            scope_operator, scope_since, keep_outer_index=anchored)
         if api_ids is not None:
             placeholders = ",".join("?" for _ in api_ids)
             clauses.append(f"api_id IN ({placeholders})" if api_ids else "0")
