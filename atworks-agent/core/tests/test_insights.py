@@ -8,9 +8,11 @@ CFG = AtworksAgentConfig(model="m")
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
 
 
-def run(run_id, api_id, executed_at, env="dev", status=RunStatus.PASS, rules=(), executed_by=None, data=None):
+def run(run_id, api_id, executed_at, env="dev", status=RunStatus.PASS, rules=(), executed_by=None, data=None,
+        http_status=None):
     return RunResult(run_id=run_id, api_id=api_id, executed_at=executed_at, target_env=env,
-                      test_data_label=data, status=status, failed_rules=list(rules), executed_by=executed_by)
+                      test_data_label=data, status=status, failed_rules=list(rules), executed_by=executed_by,
+                      http_status=http_status)
 
 
 def api(api_id, updated_at, method="GET", path="/x"):
@@ -120,3 +122,40 @@ def test_scope_none_means_project_wide():
     ids = {c.candidate_id for c in out}
     assert "regression_suspect:api-A" in ids
     assert "regression_suspect:api-Z" in ids
+
+
+def test_pm_orders_stale_pending_first_and_role_tables_hold_full_order():
+    runs, apis, jobs = _rich_fixture()
+    dev = candidate_insights(runs, apis, jobs, None, "developer", CFG, NOW)
+    dev_order = ROLE_PRIORITY["developer"]
+    priorities = [c.priority for c in dev]
+    assert priorities == sorted(priorities)
+    for c in dev:
+        assert c.priority == dev_order.index(c.kind)
+
+    pm = candidate_insights(runs, apis, jobs, None, "pm", CFG, NOW)
+    assert pm[0].kind == "stale_pending"
+
+
+def test_empty_scope_yields_no_candidates():
+    runs, apis, jobs = _rich_fixture()
+    empty = candidate_insights(runs, apis, jobs, scope=set(), role="developer", config=CFG, now=NOW)
+    assert empty == []
+    project_wide = candidate_insights(runs, apis, jobs, scope=None, role="developer", config=CFG, now=NOW)
+    assert project_wide != []
+
+
+def test_many_apis_in_one_bucket_do_not_crash_and_lists_are_capped():
+    apis = {f"api-{i}": api(f"api-{i}", NOW - timedelta(days=100)) for i in range(25)}
+    runs = [
+        run(f"r{i}", f"api-{i}", NOW - timedelta(days=1), status=RunStatus.ERROR, http_status=500)
+        for i in range(25)
+    ]
+    out = candidate_insights(runs, apis, [], None, "developer", CFG, NOW)
+    for c in out:
+        assert len(c.api_ids) <= 20
+        assert len(c.ref_ids) <= 20
+
+    error_bucket = next(c for c in out if c.kind == "top_failed_rule" and c.candidate_id.endswith("HTTP 500"))
+    assert len(error_bucket.api_ids) == 20
+    assert error_bucket.figures["apis"] == 25

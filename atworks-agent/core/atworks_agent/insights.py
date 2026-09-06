@@ -45,6 +45,22 @@ def _severity(figures: dict[str, int | str]) -> int:
     return int(figures.get("fail") or figures.get("transitions") or figures.get("age_hours") or 0)
 
 
+_MAX_IDS = 20  # InsightCandidate.api_ids / ref_ids schema cap (types.py) — never exceed it
+
+
+def _capped_set(ids) -> list[str]:
+    """Bound an id collection to the schema's max_length so construction can never raise, no matter
+    how many APIs/runs land in one bucket. Sorted first (ids may come from a set, whose iteration
+    order isn't deterministic) so the truncated sample stays stable across calls."""
+    return sorted(set(ids))[:_MAX_IDS]
+
+
+def _capped(ids: list[str]) -> list[str]:
+    """Bound an already-ordered id list (e.g. newest-first run ids) to the schema's max_length
+    without disturbing that order."""
+    return ids[:_MAX_IDS]
+
+
 def candidate_insights(
     runs: Sequence[RunResult],
     apis: Mapping[str, ApiSpec],
@@ -69,7 +85,8 @@ def candidate_insights(
     for g in aggregate(runs, apis, "api", flaky_min_transitions=config.flaky_min_transitions):
         if not g.regression_suspect:
             continue
-        assert g.first_non_pass_at is not None and g.api_updated_at is not None  # regression implies both
+        if g.first_non_pass_at is None or g.api_updated_at is None:
+            continue  # regression_suspect implies both are set; skip defensively if not
         candidates.append(InsightCandidate(
             candidate_id=f"regression_suspect:{g.key}",
             kind="regression_suspect",
@@ -79,8 +96,8 @@ def candidate_insights(
                 "first_failure_at": g.first_non_pass_at.isoformat(),
                 "api_updated_at": g.api_updated_at.isoformat(),
             },
-            api_ids=[g.key],
-            ref_ids=g.run_ids[:5],
+            api_ids=_capped([g.key]),
+            ref_ids=_capped(g.run_ids[:5]),
         ))
 
     # -- flaky_cell ----------------------------------------------------------------------
@@ -93,21 +110,22 @@ def candidate_insights(
             kind="flaky_cell",
             label=f"{KIND_LABEL['flaky_cell']} · {g.key}",
             figures={"transitions": g.transitions, "runs": g.count},
-            api_ids=[cell_api],
-            ref_ids=g.run_ids[:5],
+            api_ids=_capped([cell_api]),
+            ref_ids=_capped(g.run_ids[:5]),
         ))
 
     # -- top_failed_rule -------------------------------------------------------------
     by_rule = aggregate(runs, apis, "failed_rule", flaky_min_transitions=config.flaky_min_transitions)
     for g in sorted(by_rule, key=lambda g: (-g.fail, g.key))[:3]:
-        rule_api_ids = sorted({run_lookup[rid] for rid in g.run_ids if rid in run_lookup})
+        rule_api_id_set = {run_lookup[rid] for rid in g.run_ids if rid in run_lookup}
         candidates.append(InsightCandidate(
             candidate_id=f"top_failed_rule:{g.key}",
             kind="top_failed_rule",
             label=f"{KIND_LABEL['top_failed_rule']} · {g.key}",
-            figures={"fail": g.fail, "apis": len(rule_api_ids)},
-            api_ids=rule_api_ids,
-            ref_ids=g.run_ids[:5],
+            # figures reports the TRUE api count; api_ids is a bounded (<=20) sample of it.
+            figures={"fail": g.fail, "apis": len(rule_api_id_set)},
+            api_ids=_capped_set(rule_api_id_set),
+            ref_ids=_capped(g.run_ids[:5]),
         ))
 
     # -- env_divergence ------------------------------------------------------------------
@@ -134,8 +152,8 @@ def candidate_insights(
             kind="env_divergence",
             label=f"{KIND_LABEL['env_divergence']} · {api_id}",
             figures={"envs": envs_str},
-            api_ids=[api_id],
-            ref_ids=sorted(r.run_id for r in latest_per_env.values()),
+            api_ids=_capped([api_id]),
+            ref_ids=_capped_set(r.run_id for r in latest_per_env.values()),
         ))
 
     # -- stale_pending ---------------------------------------------------------------
@@ -145,14 +163,15 @@ def candidate_insights(
         age = now - job.created_at
         if age < timedelta(hours=config.stale_pending_hours):
             continue
-        job_api_ids = sorted(set(job.api_ids))
+        job_api_id_set = set(job.api_ids)
         candidates.append(InsightCandidate(
             candidate_id=f"stale_pending:{job.job_id}",
             kind="stale_pending",
             label=f"{KIND_LABEL['stale_pending']} · {job.job_id}",
-            figures={"age_hours": int(age.total_seconds() // 3600), "apis": len(job_api_ids)},
-            api_ids=job_api_ids,
-            ref_ids=[job.job_id],
+            # figures reports the TRUE api count; api_ids is a bounded (<=20) sample of it.
+            figures={"age_hours": int(age.total_seconds() // 3600), "apis": len(job_api_id_set)},
+            api_ids=_capped_set(job_api_id_set),
+            ref_ids=_capped([job.job_id]),
         ))
 
     priority_order = ROLE_PRIORITY[role]
