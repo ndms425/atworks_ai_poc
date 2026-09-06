@@ -8,6 +8,7 @@ import type {
   ComparisonProfile,
   FormatBatch,
   FormatDefinition,
+  HomeSummary,
   InsightPanelData,
   JobSpec,
   OperatorProfile,
@@ -19,10 +20,23 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
 export const api = new AgentApi(API_URL, "/api/atworks");
 export const UNREACHABLE = `The aTworks AI host at ${API_URL} is not reachable. Start it with: python -m atworks_host.main`;
 
-export const fetchApis = (query = "") => api.get<{ apis: ApiSpec[] }>(`/apis?query=${encodeURIComponent(query)}`);
-export const fetchRuns = (status?: string) => api.get<{ population: number; runs: RunResult[] }>(`/runs${status ? `?status=${status}` : ""}`);
-export const fetchJobs = () => api.get<{ jobs: JobSpec[] }>("/jobs");
-export const fetchRules = () => api.get<{ rules: ValidationRule[] }>("/rules");
+/**
+ * How many rows one page of a list holds. The host caps every list route at 200 and defaults to
+ * 50; this is the portal's own choice within that, and it is also the ceiling on how many rows a
+ * view ever renders at once — the `total` in the envelope, not the array length, is what the
+ * header reports.
+ */
+export const PAGE_SIZE = 50;
+
+// Every list read below returns the paged envelope {items, next_cursor, total}. `cursor` is an
+// opaque server string: a view stores what a page handed back and echoes it to ask for the next
+// one — it never builds, parses or offsets one.
+export const fetchApis = (query = "", cursor: string | null = null) =>
+  api.getPage<ApiSpec>("/apis", { query, cursor, limit: PAGE_SIZE });
+export const fetchRuns = (status?: string, cursor: string | null = null) =>
+  api.getPage<RunResult>("/runs", { status, cursor, limit: PAGE_SIZE });
+export const fetchJobs = (cursor: string | null = null) => api.getPage<JobSpec>("/jobs", { cursor, limit: PAGE_SIZE });
+export const fetchRules = (cursor: string | null = null) => api.getPage<ValidationRule>("/rules", { cursor, limit: PAGE_SIZE });
 // /changes/ 가 아니다 — rule_action은 job_action의 미러지만 별도 경로다.
 export const actOnRule = (ruleId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ValidationRule | null }>(`/rules/${encodeURIComponent(ruleId)}/${action}`, {});
@@ -31,12 +45,15 @@ export const fetchFormatBatches = () => api.get<{ format_batches: FormatBatch[] 
 // /changes/ 가 아니다 — format_batch_action은 job_action의 미러지만 별도 경로다 (rule_action과 동일 패턴).
 export const actOnFormatBatch = (batchId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: FormatBatch | null }>(`/format-batches/${encodeURIComponent(batchId)}/${action}`, {});
-export const fetchProfiles = (jobId?: string) =>
-  api.get<{ profiles: ComparisonProfile[] }>(`/profiles${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`);
+export const fetchProfiles = (jobId?: string, cursor: string | null = null) =>
+  api.getPage<ComparisonProfile>("/profiles", { job_id: jobId, cursor, limit: PAGE_SIZE });
 // /changes/ 가 아니다 — profile_action은 rule_action/format_batch_action의 미러지만 별도 경로다.
 export const actOnProfile = (profileId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ComparisonProfile | null }>(`/profiles/${encodeURIComponent(profileId)}/${action}`, {});
 export const fetchInsights = () => api.get<{ flaky: number; regression_suspect: number; window_days: number }>("/runs/insights");
+/** Home's whole above-the-fold state in ONE call — counts, insight flags and the briefing header.
+ * It replaced four parallel reads, two of which downloaded a run page only to count it. */
+export const fetchHomeSummary = () => api.get<HomeSummary>("/home/summary");
 export const fetchOperators = () => api.get<{ operators: OperatorProfile[] }>("/operators");
 export const fetchInsightPanel = () => api.get<InsightPanelData>("/home/insights");
 export const refreshInsightPanel = () => api.post<InsightPanelData>("/home/insights/refresh", {});

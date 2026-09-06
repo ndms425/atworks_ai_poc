@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import {
   ApproveBar,
   AskButton,
@@ -17,9 +17,10 @@ import {
   plural,
   Skeleton,
   useChangeActions,
-  useResource,
 } from "web-shared";
 import { fetchJobs, reportUrl } from "@/lib/api";
+import Pager from "@/components/Pager";
+import { usePagedList } from "@/lib/usePagedList";
 import { useScreenFocus } from "@/lib/useScreenFocus";
 import type { AttachedItem, JobSpec, ScreenFilter, ScreenIntent, ScreenTarget } from "@/lib/types";
 
@@ -76,35 +77,45 @@ export default function JobsView({
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
-  const { data, failed } = useResource(fetchJobs, [refreshKey]);
-  const jobs = data?.jobs ?? [];
+  // Jobs has no filter of its own, so the reset key is constant: the stack only ever moves by the
+  // Pager's own controls, and a refreshKey bump (an approval landing) re-reads the page you are on
+  // instead of throwing you back to page one.
+  const load = useCallback((cursor: string | null) => fetchJobs(cursor), []);
+  const page = usePagedList<JobSpec>(load, "jobs", [refreshKey]);
+  const jobs = page.items;
 
   // JobsView has no filter of its own, so there's nothing to apply-once by nonce — the shared hook
   // handles the whole focus/scroll lifecycle.
   useScreenFocus(intent, "job", jobs.length > 0);
 
-  // Report what's actually on screen so api.screenState stays current for the next chat turn.
+  // Report what's actually on screen so api.screenState stays current for the next chat turn:
+  // the CURRENT PAGE (sliced to 40), which is exactly what the operator can see and point at.
   useEffect(() => {
     onScreen?.({ visible: jobs.slice(0, 40).map((job) => ({ kind: "job", ref_id: job.job_id, label: job.summary })) });
   }, [jobs, onScreen]);
 
   return (
     <div className="ac-reveal flex flex-col gap-4">
-      <PageHeader title="Jobs" subtitle={data ? plural(jobs.length, "job") : undefined} />
-      {failed && !data ? (
+      {/* The subtitle is the envelope's `total` — every job in the ledger, not the rows on screen. */}
+      <PageHeader title="Jobs" subtitle={page.loaded ? plural(page.total, "job") : undefined} />
+      {page.failed && !page.loaded ? (
         <Notice>The aTworks AI host isn&apos;t reachable, so jobs can&apos;t load.</Notice>
-      ) : !data ? (
+      ) : !page.loaded ? (
         <Skeleton className="h-96" />
       ) : jobs.length === 0 ? (
         <Notice>등록된 job이 없습니다.</Notice>
       ) : (
-        <Panel>
-          <ul className="divide-y divide-(--line)">
-            {jobs.map((job) => (
-              <JobRow key={job.job_id} job={job} onAct={onAct} onAttach={onAttach} />
-            ))}
-          </ul>
-        </Panel>
+        <>
+          <Panel>
+            {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
+            <ul className="cv-rows divide-y divide-(--line)">
+              {jobs.map((job) => (
+                <JobRow key={job.job_id} job={job} onAct={onAct} onAttach={onAttach} />
+              ))}
+            </ul>
+          </Panel>
+          <Pager page={page} />
+        </>
       )}
     </div>
   );

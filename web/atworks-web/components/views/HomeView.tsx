@@ -5,28 +5,10 @@
 
 import { useEffect } from "react";
 import { Button, Notice, PageHeader, Panel, plural, Skeleton, StatStrip, StatTile, useResource } from "web-shared";
-import { fetchInsights, fetchJobs, fetchRuns } from "@/lib/api";
+import { fetchHomeSummary } from "@/lib/api";
 import BriefingCard from "@/components/BriefingCard";
 import InsightPanel from "@/components/InsightPanel";
 import type { ScreenFilter, ScreenTarget } from "@/lib/types";
-
-interface HomeCounts {
-  fail: number;
-  error: number;
-  pending: number;
-  flaky: number;
-}
-
-async function loadCounts(): Promise<HomeCounts | null> {
-  const [failRes, errorRes, jobsRes, insightsRes] = await Promise.all([fetchRuns("fail"), fetchRuns("error"), fetchJobs(), fetchInsights()]);
-  if (!failRes || !errorRes || !jobsRes) return null;
-  return {
-    fail: failRes.population,
-    error: errorRes.population,
-    pending: jobsRes.jobs.filter((job) => job.status === "staged").length,
-    flaky: insightsRes?.flaky ?? 0,
-  };
-}
 
 export default function HomeView({
   refreshKey,
@@ -39,7 +21,12 @@ export default function HomeView({
   onAskAssistant: (text: string) => void;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
-  const { data, failed } = useResource(loadCounts, [refreshKey]);
+  // ONE call (Task 10). This used to be four parallel reads whose counts came from the LISTS they
+  // returned: /runs?status=fail and /runs?status=error each downloaded a run page to read its
+  // population, and the pending tile counted staged jobs in a full /jobs download. Every number
+  // below is now a count query the host ran.
+  const { data, failed } = useResource(fetchHomeSummary, [refreshKey]);
+  const total = data ? data.counts.fail + data.counts.error + data.counts.pending_jobs + data.insights.flaky : 0;
 
   // Home has no list of its own to report — just keep api.screenState's view current.
   useEffect(() => {
@@ -62,29 +49,29 @@ export default function HomeView({
       ) : !data ? (
         <Skeleton className="h-36" />
       ) : (
-        <Panel title="Needs attention" subtitle={plural(data.fail + data.error + data.pending + data.flaky, "item")}>
+        <Panel title="Needs attention" subtitle={plural(total, "item")}>
           <StatStrip>
             <StatTile
               label="실패"
-              value={String(data.fail)}
+              value={String(data.counts.fail)}
               onClick={() => onAskAssistant("최근 실패한 api 중 risk 있는 것 가져와")}
               ariaLabel="실패: 어시스턴트에게 물어보기"
             />
             <StatTile
               label="에러"
-              value={String(data.error)}
+              value={String(data.counts.error)}
               onClick={() => onAskAssistant("최근 에러난 api 가져와")}
               ariaLabel="에러: 어시스턴트에게 물어보기"
             />
             <StatTile
               label="승인 대기"
-              value={String(data.pending)}
+              value={String(data.counts.pending_jobs)}
               onClick={() => onAskAssistant("승인 대기 중인 job 보여줘")}
               ariaLabel="승인 대기: 어시스턴트에게 물어보기"
             />
             <StatTile
               label="불안정"
-              value={String(data.flaky)}
+              value={String(data.insights.flaky)}
               onClick={() => onAskAssistant("요즘 왔다갔다 하는 API 뭐야")}
               ariaLabel="불안정: 어시스턴트에게 물어보기"
             />

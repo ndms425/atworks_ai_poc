@@ -6,6 +6,17 @@ import type { AgentEvent, MemoryFact, Order } from "./protocol";
 const SESSION_HEADER = "X-Session-Id";
 
 /**
+ * The envelope every paged list route answers in. `total` is the count AFTER the filter and
+ * independent of the page size, so a header can say "N개 중 M개" honestly; `next_cursor` is an
+ * opaque server string — a client stores it and echoes it back, never parses it.
+ */
+export interface Page<T> {
+  items: T[];
+  next_cursor: string | null;
+  total: number;
+}
+
+/**
  * The client both roles' web apps use; the storefront's cart, orders, and memory reads live here
  * too. The session token travels only in the session header. Reads return null on any failure
  * so callers keep their last good state.
@@ -42,6 +53,18 @@ export class AgentApi {
   async get<T>(path: string, params?: Record<string, string>): Promise<T | null> {
     const query = params && Object.keys(params).length ? `?${new URLSearchParams(params)}` : "";
     return this.request<T>(`${path}${query}`, { headers: this.headers() });
+  }
+
+  /**
+   * One page of a list route. Params that are null, undefined or empty are dropped rather than
+   * sent blank, so an absent cursor or an empty search box leaves the route on its own default.
+   */
+  async getPage<T>(path: string, params: Record<string, string | number | null | undefined> = {}): Promise<Page<T> | null> {
+    const query: Record<string, string> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== null && value !== undefined && value !== "") query[key] = String(value);
+    }
+    return this.get<Page<T>>(path, query);
   }
 
   async post<T>(path: string, body?: unknown): Promise<T | null> {

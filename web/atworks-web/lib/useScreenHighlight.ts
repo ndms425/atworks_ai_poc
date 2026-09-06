@@ -18,6 +18,11 @@ import type { PortalViewId, ScreenHighlightPayload } from "@/lib/types";
  * matched element is a table row the class/attribute go on its first `<td>` instead (the visible
  * cell content still sits inside a positioned ancestor, so the numbered badge anchors correctly).
  * `<li>` rows (jobs, rules) take the class directly.
+ *
+ * Paging (Task 10): "missing targets are silently skipped" now also covers a target on another
+ * cursor page — the model highlights what the operator can see, and `screen_state.visible` reports
+ * exactly the current page, so a target it grounded in that list IS rendered. Paging TO an
+ * off-page target is out of scope (see useScreenFocus).
  */
 export function useScreenHighlight(targets: ScreenHighlightPayload["targets"] | null, deps: { view: PortalViewId; refreshKey: number }) {
   const applied = useRef<HTMLElement[]>([]);

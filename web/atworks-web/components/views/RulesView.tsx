@@ -3,9 +3,11 @@
 
 "use client";
 
-import { useEffect } from "react";
-import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pill, plural, Skeleton, useResource } from "web-shared";
+import { useCallback, useEffect } from "react";
+import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pill, plural, Skeleton } from "web-shared";
 import { fetchRules } from "@/lib/api";
+import Pager from "@/components/Pager";
+import { usePagedList } from "@/lib/usePagedList";
 import { type RuleAction, useRuleActions } from "@/lib/useRuleActions";
 import { useScreenFocus } from "@/lib/useScreenFocus";
 import FormatsView from "@/components/views/FormatsView";
@@ -59,8 +61,12 @@ export default function RulesView({
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
-  const { data, failed } = useResource(fetchRules, [refreshKey]);
-  const rules = data?.rules ?? [];
+  // One paged read over the whole rule ledger; the three panels below split the CURRENT PAGE by
+  // status. The header's count is the envelope's `total`, so it stays honest even though a status
+  // group's panel only ever shows this page's share of it.
+  const load = useCallback((cursor: string | null) => fetchRules(cursor), []);
+  const page = usePagedList<ValidationRule>(load, "rules", [refreshKey]);
+  const rules = page.items;
   const staged = rules.filter((rule) => rule.status === "staged");
   const applied = rules.filter((rule) => rule.status === "applied");
   const discarded = rules.filter((rule) => rule.status === "discarded");
@@ -69,17 +75,18 @@ export default function RulesView({
   // hook handles the whole focus/scroll lifecycle.
   useScreenFocus(intent, "rule", rules.length > 0);
 
-  // Report what's actually on screen so api.screenState stays current for the next chat turn.
+  // Report what's actually on screen so api.screenState stays current for the next chat turn:
+  // the CURRENT PAGE (sliced to 40), which is exactly what the operator can see and point at.
   useEffect(() => {
     onScreen?.({ visible: rules.slice(0, 40).map((rule) => ({ kind: "rule", ref_id: rule.rule_id, label: rule.message })) });
   }, [rules, onScreen]);
 
   return (
     <div className="ac-reveal flex flex-col gap-4">
-      <PageHeader title="Rules" subtitle={data ? plural(rules.length, "rule") : undefined} />
-      {failed && !data ? (
+      <PageHeader title="Rules" subtitle={page.loaded ? plural(page.total, "rule") : undefined} />
+      {page.failed && !page.loaded ? (
         <Notice>The aTworks AI host isn&apos;t reachable, so rules can&apos;t load.</Notice>
-      ) : !data ? (
+      ) : !page.loaded ? (
         <Skeleton className="h-96" />
       ) : rules.length === 0 ? (
         <Notice>등록된 규칙이 없습니다.</Notice>
@@ -87,7 +94,8 @@ export default function RulesView({
         <>
           {staged.length > 0 ? (
             <Panel title="승인 대기">
-              <ul className="divide-y divide-(--line)">
+              {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
+              <ul className="cv-rows divide-y divide-(--line)">
                 {staged.map((rule) => (
                   <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
                 ))}
@@ -96,7 +104,8 @@ export default function RulesView({
           ) : null}
           {applied.length > 0 ? (
             <Panel title="적용됨">
-              <ul className="divide-y divide-(--line)">
+              {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
+              <ul className="cv-rows divide-y divide-(--line)">
                 {applied.map((rule) => (
                   <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
                 ))}
@@ -105,13 +114,15 @@ export default function RulesView({
           ) : null}
           {discarded.length > 0 ? (
             <Panel title="기각됨">
-              <ul className="divide-y divide-(--line)">
+              {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
+              <ul className="cv-rows divide-y divide-(--line)">
                 {discarded.map((rule) => (
                   <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
                 ))}
               </ul>
             </Panel>
           ) : null}
+          <Pager page={page} />
         </>
       )}
       <FormatsView refreshKey={refreshKey} />

@@ -3,8 +3,11 @@
 
 "use client";
 
-import { formatDate, Notice, Panel, Pill, Skeleton, useResource } from "web-shared";
+import { useCallback } from "react";
+import { formatDate, Notice, Panel, Pill, Skeleton } from "web-shared";
 import { fetchProfiles } from "@/lib/api";
+import Pager from "@/components/Pager";
+import { usePagedList } from "@/lib/usePagedList";
 import type { ComparisonProfile } from "@/lib/types";
 
 const STATUS_TONE = {
@@ -58,10 +61,11 @@ function ProfileRow({ profile }: { profile: ComparisonProfile }) {
 /** FormatsView의 미러 — 읽기 전용 참고 목록. /profiles를 읽으며, 승인/기각 액션은 카드(ProfilePreviewCard)에서
  * useProfileActions를 통해서만 나간다 (여기서는 목록만 보여준다). */
 export default function ProfilesView({ refreshKey }: { refreshKey: number }) {
-  const { data, failed } = useResource(fetchProfiles, [refreshKey]);
-  const profiles = data?.profiles ?? [];
+  const load = useCallback((cursor: string | null) => fetchProfiles(undefined, cursor), []);
+  const page = usePagedList<ComparisonProfile>(load, "profiles", [refreshKey]);
+  const profiles = page.items;
 
-  if (failed && !data) {
+  if (page.failed && !page.loaded) {
     return (
       <Panel title="비교 프로파일">
         <div className="px-[18px] py-3">
@@ -70,7 +74,7 @@ export default function ProfilesView({ refreshKey }: { refreshKey: number }) {
       </Panel>
     );
   }
-  if (!data) {
+  if (!page.loaded) {
     return (
       <Panel title="비교 프로파일">
         <div className="p-[18px]">
@@ -89,12 +93,17 @@ export default function ProfilesView({ refreshKey }: { refreshKey: number }) {
     );
   }
   return (
-    <Panel title="비교 프로파일" subtitle={`${profiles.length}개`}>
-      <ul className="divide-y divide-(--line)">
-        {profiles.map((profile) => (
-          <ProfileRow key={profile.profile_id} profile={profile} />
-        ))}
-      </ul>
-    </Panel>
+    <>
+      {/* The subtitle is the envelope's `total` — every profile in the ledger, not this page. */}
+      <Panel title="비교 프로파일" subtitle={`${page.total}개`}>
+        {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
+        <ul className="cv-rows divide-y divide-(--line)">
+          {profiles.map((profile) => (
+            <ProfileRow key={profile.profile_id} profile={profile} />
+          ))}
+        </ul>
+      </Panel>
+      <Pager page={page} />
+    </>
   );
 }

@@ -12,6 +12,13 @@ import type { ScreenIntent, ScreenTargetKind } from "@/lib/types";
  * `focusTick` that bumps on EVERY stash — not by the row-list reference — so a focus-only re-navigate to an
  * already-mounted, unchanged view still scrolls. One ~150ms retry covers rows that render after fetch.
  * A later unrelated refresh never re-scrolls: the stash is cleared after a successful scroll.
+ *
+ * Paging (Task 10): views now render one cursor page at a time, so a focus target can be a real
+ * entity that simply is not on the page in front of the operator. That is a no-op here, by design —
+ * both attempts find no `[data-ref]`, `pending` stays set, and nothing scrolls or throws. Auto-
+ * paging TO the target is out of scope: the keyset contract has no "which page holds run X" read,
+ * so it would take a new `locate` route. Noted for a later task; the directive's own `note` already
+ * names the item in chat, and the operator can page or filter to it.
  */
 export function useScreenFocus(intent: ScreenIntent | null | undefined, kind: ScreenTargetKind, rowsReady: boolean) {
   const lastNonce = useRef<number | null>(null);

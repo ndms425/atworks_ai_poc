@@ -6,6 +6,9 @@
 /** Transport-level directive shape; defined in web-shared (merchant.ts can't import from here). */
 export type { ScreenDirective } from "web-shared";
 
+/** `{items, next_cursor, total}` — the one shape every list route answers in (host Task 10). */
+export type { Page } from "web-shared";
+
 export type ScreenTargetKind = "api" | "run" | "job" | "rule";
 
 export interface ScreenTarget {
@@ -75,6 +78,11 @@ export interface RunResult {
   http_status?: number;
   duration_ms?: number;
   job_id?: string;
+  /** The row's display label, joined from the API mirror on the host's run read paths. Optional
+   * because an aggregation-only read (or a run whose API is gone) leaves them off — fall back to
+   * `api_id`. Their presence is what lets a run list render without downloading every API spec. */
+  api_method?: string;
+  api_path?: string;
 }
 
 export interface FailedRank {
@@ -478,6 +486,14 @@ export interface InsightPanelData {
   generated_at: string;
   generated_by: "agent" | "deterministic";
   items: InsightItem[];
+}
+
+/** `GET /home/summary` — Home's tiles and the briefing header in one call. Every number is a
+ * count query on the host; nothing here is derived from a list the portal downloaded. */
+export interface HomeSummary {
+  counts: { fail: number; error: number; pending_jobs: number };
+  insights: { flaky: number; regression_suspect: number; window_days: number };
+  briefing_header: { date: string; generated_at: string } | null;
 }
 
 export interface Briefing {

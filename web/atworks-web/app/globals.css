@@ -55,6 +55,23 @@ body {
 }
 
 /*
+ * Task 10: cheap virtualization for list rows, with no dependency. `content-visibility: auto`
+ * lets the browser skip layout and paint for rows scrolled out of the panel, and
+ * `contain-intrinsic-size` gives it a height to reserve so the scrollbar stays honest.
+ *
+ * Honest caveat: CSS containment does not apply to internal table elements, so on a `<tr>` this
+ * is inert in today's browsers — it takes effect on the `<li>` rows of the Jobs/Rules/Profiles
+ * panels. The real bound on rendered rows is the page itself (`PAGE_SIZE`, 50, capped at 200 by
+ * the route), which is why no windowing library is needed either way; the declaration stays so a
+ * table row picks the optimization up for free if containment is ever extended to them.
+ */
+.cv-rows > tr,
+.cv-rows > li {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
+}
+
+/*
  * Task 8: numbered screen-highlight boxes. `.ac-highlight` is applied by useScreenHighlight to a
  * `[data-ref]` row (or, for a `<tr>` which can't reliably host `position: relative` + `::before`
  * across browsers, that row's first `<td>` — see the hook) — an outline plus a small numbered
