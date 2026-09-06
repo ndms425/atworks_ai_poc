@@ -157,3 +157,39 @@ def test_build_env_overrides_inherited_shell_variables(monkeypatch, tmp_path):
     # After build(), ANTHROPIC_BASE_URL must be the .env value, not the shell value
     assert os.environ["ANTHROPIC_BASE_URL"] == "https://file.invalid", \
         f"Expected .env value 'https://file.invalid', but got: {os.environ.get('ANTHROPIC_BASE_URL')!r}"
+
+
+def test_build_atworks_insight_narration_env_switch(monkeypatch, tmp_path):
+    """Proves ATWORKS_INSIGHT_NARRATION=0 disables enable_insight_narration on the built
+    config (the deterministic-fallback demo switch), and that it defaults to enabled when
+    unset — mirroring the ATWORKS_TRUST_OS_CA env-override tests above."""
+    monkeypatch.setattr("atworks_host.main.ROOT", tmp_path)
+    (tmp_path / ".env").write_text("")
+    monkeypatch.setenv("ATWORKS_TRUST_OS_CA", "0")
+
+    captured_configs = []
+
+    import atworks_host.main as main
+
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: type('MockAgent', (), {'client': None})())
+    monkeypatch.setattr(
+        "atworks_host.main.MockAtworks",
+        lambda config, *args, **kwargs: captured_configs.append(config) or type('MockBackend', (), {})(),
+    )
+    monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
+    monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
+
+    # Default (unset): enable_insight_narration stays True.
+    monkeypatch.delenv("ATWORKS_INSIGHT_NARRATION", raising=False)
+    main.build()
+    assert captured_configs[-1].enable_insight_narration is True
+
+    # ATWORKS_INSIGHT_NARRATION=0 disables it.
+    monkeypatch.setenv("ATWORKS_INSIGHT_NARRATION", "0")
+    main.build()
+    assert captured_configs[-1].enable_insight_narration is False
+
+    # Any other value (e.g. "1") keeps it enabled.
+    monkeypatch.setenv("ATWORKS_INSIGHT_NARRATION", "1")
+    main.build()
+    assert captured_configs[-1].enable_insight_narration is True

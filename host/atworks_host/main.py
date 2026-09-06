@@ -45,7 +45,10 @@ def build() -> tuple:
         import truststore
 
         truststore.inject_into_ssl()
-    config = AtworksAgentConfig(model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"))
+    config = AtworksAgentConfig(
+        model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"),
+        enable_insight_narration=os.environ.get("ATWORKS_INSIGHT_NARRATION", "1") != "0",
+    )
     backend = MockAtworks(config, HERE / "fixtures")
     agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
     portal_origin = os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110")
