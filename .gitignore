@@ -16,3 +16,7 @@ host/atworks_host/insights_out/
 web/package-lock.json.bak
 web/atworks-web/AGENTS.md
 web/atworks-web/CLAUDE.md
+scripts/scale/out/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
