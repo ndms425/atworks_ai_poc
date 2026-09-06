@@ -21,6 +21,10 @@ from .types import (
     TestDataSet,
 )
 
+# JobSpec.recent_run_ids' own max_length -- the cap lives on the model; this mirrors it so the
+# slice here can never build a list pydantic would then reject.
+MAX_RECENT_RUN_IDS = 50
+
 
 class GuardrailViolation(ValueError):
     def __init__(self, violations: list[str]):
@@ -313,7 +317,13 @@ class JobLedger:
         counts executions (the schedules' counts summed, or 1 for run_now), never individual
         runs; ``schedule_index`` names which schedule occurrence was consumed — without it
         several schedules on one job could not advance independently. Exactly one call per
-        execution, even when the execution produced nothing."""
+        execution, even when the execution produced nothing.
+
+        scale spec 2026-09-06 §4: ``run_ids`` is **no longer appended to** — an every-run list
+        grows without bound over a long-lived scheduled job and is a per-turn payload. The
+        bounded replacement is ``run_count`` (a counter) plus ``recent_run_ids`` (newest first,
+        capped at 50); readers that need the whole set page ``list_runs(RunsQuery(job_id=...))``.
+        The field itself stays on ``JobSpec`` for compatibility, frozen at whatever it holds."""
         job = self._jobs[job_id]
         if schedule_index is not None and not (0 <= schedule_index < len(job.schedules)):
             raise JobNotApplicable(
@@ -321,7 +331,8 @@ class JobLedger:
                 f"({len(job.schedules)} schedules)"
             )
         update: dict[str, Any] = {
-            "run_ids": [*job.run_ids, *run_ids],
+            "run_count": job.run_count + len(run_ids),
+            "recent_run_ids": [*reversed(run_ids), *job.recent_run_ids][:MAX_RECENT_RUN_IDS],
             "executions": job.executions + 1,
         }
         if schedule_index is not None:

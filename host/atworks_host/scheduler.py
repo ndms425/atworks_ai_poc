@@ -16,6 +16,7 @@ from atworks_agent import (
     JobSchedule,
     JobStatus,
     ProfileStatus,
+    collect_runs,
 )
 
 from .briefing import Briefings
@@ -98,7 +99,16 @@ class Scheduler:
         if report:
             try:
                 current = await self.backend.get_job(self.session, job_id)
-                every = await self.backend.runs_by_ids(self.session, current.run_ids)
+                # scale spec §4: job.run_ids no longer grows, so the report gathers the job's
+                # whole run set by paging list_runs(job_id=...) -- run_count is the exact
+                # population, and cap>=1 keeps a zero-count job from asking for zero rows.
+                every = await collect_runs(
+                    self.backend, self.session, cap=max(current.run_count, 1), job_id=job_id,
+                )
+                # list_runs pages newest-first; the report's "latest run per cell" resolves a
+                # same-timestamp tie by taking the last one it sees, so hand it chronological
+                # order (oldest first, run_id breaking ties) exactly as the old id-list did.
+                every = sorted(every, key=lambda r: (r.executed_at, r.run_id))
                 # A re-write (a later scheduled occurrence, or a profile approved before the
                 # job's first run) must still honor every APPLIED comparison profile — the
                 # profile is durable once approved, and can't be re-staged. Listing profiles

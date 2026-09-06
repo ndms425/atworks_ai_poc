@@ -152,7 +152,7 @@ async def test_report_failure_does_not_consume_a_second_slot(tmp_path):
     assert await sched.tick(datetime(2026, 9, 4, 9, 0, tzinfo=KST)) == [job.job_id]
     after = backend.ledger.get(job.job_id)
     assert after.remaining_executions == 2                      # exactly one slot consumed
-    assert len(after.run_ids) == 1                        # the run was produced
+    assert after.run_count == 1                           # the run was produced
     assert any(n.startswith("report failed") for n in after.guardrail_notes)
     assert not any(n.startswith("execution failed") for n in after.guardrail_notes)
 
@@ -186,7 +186,9 @@ class RecordingBackend(AtworksBackend):
         raise NotImplementedError
 
     async def list_runs(self, session, q):
-        raise NotImplementedError
+        # the report path pages this by job_id now (scale spec §4) — run_ids no longer grows
+        self.calls.append("list_runs")
+        return Page(items=[self.run] if q.job_id in (None, self.run.job_id) else [], total=1)
 
     async def get_run(self, session, run_id):
         raise NotImplementedError
@@ -295,7 +297,8 @@ class RecordingBackend(AtworksBackend):
 
     async def execute_job_once(self, session, job_id, schedule_index=None):
         self.calls.append("execute_job_once")
-        self.job = self.job.model_copy(update={"run_ids": [self.run.run_id], "executions": 1})
+        self.job = self.job.model_copy(update={
+            "run_count": 1, "recent_run_ids": [self.run.run_id], "executions": 1})
         return [self.run]
 
     async def get_job(self, session, job_id):
@@ -364,7 +367,7 @@ async def test_two_schedules_due_in_the_same_tick_run_twice(tmp_path):
     assert executed == [job.job_id, job.job_id]     # two schedules due, two executions
     after = backend.ledger.get(job.job_id)
     assert after.executions == 2 and [s.done for s in after.schedules] == [1, 1]
-    assert len(after.run_ids) == 2                  # one api × one env × no data, twice
+    assert after.run_count == 2                     # one api × one env × no data, twice
 
 
 async def _matrix_report(tmp_path):

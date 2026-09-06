@@ -295,9 +295,11 @@ class JobSpec(BaseModel):
     discarded_by_kind: ActorKind | None = None
     run_ids: list[str] = Field(default_factory=list)
     executions: int = Field(default=0, ge=0)   # executions performed; run_now completes at 1
-    # scale (spec 2026-09-06): run_ids grows unbounded across a long-lived scheduled job's
-    # lifetime; run_count/recent_run_ids are the bounded read path Task 5 moves callers onto.
-    # run_ids stays untouched this task for compatibility.
+    # scale (spec 2026-09-06 §4): run_ids grew unbounded across a long-lived scheduled job's
+    # lifetime. Task 5 stopped appending to it -- record_execution now advances run_count and
+    # recent_run_ids (newest first, <=50) instead, and a reader that needs every run of a job
+    # pages list_runs(RunsQuery(job_id=...)). The field stays for compatibility, frozen at
+    # whatever it already held.
     run_count: int = 0
     recent_run_ids: list[str] = Field(default_factory=list, max_length=50)
 

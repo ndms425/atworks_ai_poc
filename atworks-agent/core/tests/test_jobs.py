@@ -105,9 +105,13 @@ def test_record_execution_counts_executions_not_runs():
     assert job.remaining_executions == 3
     ledger.apply(job.job_id, actor="op")
     after_first = ledger.record_execution(job.job_id, ["run-0031", "run-0032"], 0)
-    assert after_first.run_ids == ["run-0031", "run-0032"] and after_first.remaining_executions == 2
+    # scale spec 2026-09-06 §4: run_ids stops growing; the bounded counter + newest-first
+    # window replaces it (run_ids stays on the model, frozen, for compatibility).
+    assert after_first.run_ids == [] and after_first.remaining_executions == 2
+    assert after_first.run_count == 2 and after_first.recent_run_ids == ["run-0032", "run-0031"]
     after_second = ledger.record_execution(job.job_id, ["run-0033", "run-0034"], 0)
-    assert len(after_second.run_ids) == 4 and after_second.remaining_executions == 1
+    assert after_second.run_count == 4 and after_second.remaining_executions == 1
+    assert after_second.recent_run_ids == ["run-0034", "run-0033", "run-0032", "run-0031"]
 
 
 def test_record_execution_advances_only_the_schedule_it_consumed():

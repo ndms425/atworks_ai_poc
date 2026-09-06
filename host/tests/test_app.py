@@ -200,7 +200,8 @@ async def test_apply_then_tick_executes_the_whole_matrix(client_backend):
     assert tr.status_code == 200 and tr.json()["executed"] == [job.job_id]
 
     applied = backend.ledger.get(job.job_id)
-    runs = await backend.runs_by_ids(session, applied.run_ids)
+    assert applied.run_count == expected_runs
+    runs = await backend.runs_by_ids(session, applied.recent_run_ids)
     assert len(runs) == expected_runs
     assert {r.target_env for r in runs} == set(job.target_envs)
 

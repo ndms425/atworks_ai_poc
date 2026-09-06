@@ -370,7 +370,7 @@ def test_list_runs_keyset_paging_is_exhaustive_over_300_synthetic_runs():
         )
         for i in range(300)
     ]
-    store.insert_runs(synthetic, briefing_tz="UTC")
+    store.ingest(synthetic, briefing_tz="UTC")
 
     seen: list[str] = []
     cursor = None

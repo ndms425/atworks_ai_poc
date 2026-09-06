@@ -2,6 +2,7 @@
 낸다. Java 통합 시 이 파일과 같은 인터페이스로 rest_backend.py를 쓴다."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -465,37 +466,45 @@ class MockAtworks(AtworksBackend):
             return []
         produced: list[RunResult] = []
         bindings: list[TestDataSet | None] = list(job.test_data) or [None]
-        for env in job.target_envs:
-            for data in bindings:
-                for api_id in api_ids:
-                    api = self.apis.get(api_id)
-                    if api is None:
+        # The matrix is flattened first so the yield points below are evenly spaced over the
+        # whole envs × data × apis product, not per environment. Mock execution is CPU-only, so
+        # a batch is just "max_concurrency cells then hand the loop back" -- the shape a REST
+        # adapter fills with a real semaphore, and what keeps an SSE turn from starving while a
+        # 400-cell job runs.
+        cells = [(env, data, api_id) for env in job.target_envs for data in bindings for api_id in api_ids]
+        for start in range(0, len(cells), self._config.max_concurrency):
+            for env, data, api_id in cells[start:start + self._config.max_concurrency]:
+                api = self.apis.get(api_id)
+                if api is None:
+                    continue
+                self._run_seq += 1
+                status, rules, http = stub_verdict(api, env, data)
+                # additive: an applied rule effective as of now can only add failures on
+                # top of the legacy stub's verdict, never remove one (fixtures have no
+                # applied rules, so no fixture verdict changes).
+                now = datetime.now(UTC)
+                extra_failed: list[str] = []
+                for r in self.rule_ledger.applied():
+                    if r.api_id != api_id or r.effective_from is None or r.effective_from > now:
                         continue
-                    self._run_seq += 1
-                    status, rules, http = stub_verdict(api, env, data)
-                    # additive: an applied rule effective as of now can only add failures on
-                    # top of the legacy stub's verdict, never remove one (fixtures have no
-                    # applied rules, so no fixture verdict changes).
-                    now = datetime.now(UTC)
-                    extra_failed: list[str] = []
-                    for r in self.rule_ledger.applied():
-                        if r.api_id != api_id or r.effective_from is None or r.effective_from > now:
-                            continue
-                        bound = data.values.get(r.param) if data is not None else None
-                        if not evaluate(r, bound):
-                            extra_failed.append(r.message)
-                    if extra_failed:
-                        status = RunStatus.FAIL if status is RunStatus.PASS else status
-                        rules = [*rules, *extra_failed]
-                    run = RunResult(
-                        run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
-                        target_env=env, test_data_label=data.label if data is not None else None,
-                        status=status, failed_rules=rules, http_status=http,
-                        duration_ms=100 + self._run_seq % 50,
-                        response_body=stub_response(api, env, data, self._run_seq), job_id=job_id,
-                        executed_by=job.applied_by)
-                    self.store.upsert_run(run, self._config.briefing_tz)
-                    produced.append(run)
+                    bound = data.values.get(r.param) if data is not None else None
+                    if not evaluate(r, bound):
+                        extra_failed.append(r.message)
+                if extra_failed:
+                    status = RunStatus.FAIL if status is RunStatus.PASS else status
+                    rules = [*rules, *extra_failed]
+                run = RunResult(
+                    run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
+                    target_env=env, test_data_label=data.label if data is not None else None,
+                    status=status, failed_rules=rules, http_status=http,
+                    duration_ms=100 + self._run_seq % 50,
+                    response_body=stub_response(api, env, data, self._run_seq), job_id=job_id,
+                    executed_by=job.applied_by)
+                produced.append(run)
+            await asyncio.sleep(0)
+        # One transaction for the whole execution (spec §4): runs + bodies + the four
+        # materialized tables move together, then exactly one record_execution for the slot.
+        self.store.ingest(produced, self._config.briefing_tz)
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
         return produced
 

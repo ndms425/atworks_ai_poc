@@ -3,12 +3,18 @@ implement. Task 4 (spec 2026-09-06) moves runs/bodies/audit off python dicts and
 `apis` mirrors into a table too so `search_apis` pages over SQL, but the authoritative in-memory
 index for ledger guardrails stays `MockAtworks.apis` (a plain dict) per the controller ruling.
 
-``current_state`` / ``rollup_day`` / ``api_watermark`` / ``operator_api`` / ``runs_archive`` /
-``retention_state`` are all created here (the full DDL is the blueprint) but Task 4 does not
-populate the materialized ones (``rollup_day``, ``api_watermark`` as a table, ``operator_api``,
-``current_state`` as a table) -- ``current_state()`` / ``watermarks()`` / ``aggregate_runs()`` /
-``operator_scope_ids()`` below compute on demand from the base ``runs`` table with indexed,
-windowed SQL. Task 5 materializes at ingest and switches these reads over.
+``current_state`` / ``rollup_day`` / ``api_watermark`` / ``operator_api`` are materialized at
+**ingest** (Task 5, spec §4): ``ingest()`` is the single write path for runs -- one transaction
+inserts the new runs and their (optionally masked) bodies and folds the same batch into all four
+tables via the pure ``atworks_agent.materialize.rollup_delta``. ``current_state()`` /
+``watermarks()`` / ``operator_scope_ids()`` read those tables by primary key; the Task 4
+on-demand scans survive as ``recompute_*`` **oracles for tests only**. ``aggregate_runs`` still
+reads base ``runs`` through ``fetch_runs`` (Task 8 decides rollup-fed aggregation reads).
+
+NULL sentinel: ``test_data_label`` is written as ``''`` (never NULL) in the four materialized
+tables and mapped back to ``None`` on every read. SQLite treats NULLs as distinct inside a
+non-rowid PRIMARY KEY, so an ``ON CONFLICT`` upsert on a NULL label would never match its own
+previous row and the cell would fan out into one row per ingest.
 
 Timestamp invariant: every ``datetime`` this module writes to a TEXT column is normalized to UTC
 with a fixed-width, always-6-fractional-digit ``strftime("%Y-%m-%dT%H:%M:%S.%f")`` plus a literal
@@ -22,7 +28,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,6 +37,7 @@ from atworks_agent import (
     ApiSpec,
     ApiWatermark,
     AuditEntry,
+    CellKey,
     CellState,
     Page,
     RunResult,
@@ -38,6 +45,8 @@ from atworks_agent import (
     RunStatus,
     decode_cursor,
     encode_cursor,
+    merge_watermark,
+    rollup_delta,
 )
 
 _SCHEMA = """
@@ -175,6 +184,18 @@ def _day_for(executed_at: datetime, briefing_tz: str) -> str:
     return executed_at.astimezone(ZoneInfo(briefing_tz)).date().isoformat()
 
 
+def _label_in(label: str | None) -> str:
+    """``test_data_label`` on the way into a materialized table: NULL becomes ``''`` -- see the
+    module docstring's NULL-sentinel note (a NULL inside a non-rowid PK never conflicts with
+    itself, so upserts on an unbound cell would fan out into one row per ingest)."""
+    return label if label is not None else ""
+
+
+def _label_out(label: str | None) -> str | None:
+    """...and back: ``''`` (or a NULL left by an older row) reads as ``None``."""
+    return label if label else None
+
+
 class Store:
     """Owns the sqlite3 connection and every SQL query MockAtworks needs. Runs/bodies/audit are
     the only state that actually lives here in Task 4 -- job/rule/profile/format ledgers stay
@@ -207,7 +228,7 @@ class Store:
         apis = [ApiSpec(**row) for row in json.loads((fixtures_dir / "apis.json").read_text(encoding="utf-8"))]
         runs = [RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))]
         self.load_apis(apis)
-        self.insert_runs(runs, briefing_tz)
+        self.ingest(runs, briefing_tz)
 
     # -- apis ----------------------------------------------------------------------------------
 
@@ -283,39 +304,217 @@ class Store:
             json.dumps(run.failed_rules), day,
         )
 
-    def insert_runs(self, runs: Iterable[RunResult], briefing_tz: str = "Asia/Seoul") -> None:
-        runs = list(runs)
-        if not runs:
-            return
+    def _write_run_rows(
+        self, runs: Sequence[RunResult], briefing_tz: str, mask: Callable[[dict], dict] | None,
+        *, replace: bool = False,
+    ) -> None:
+        """Raw row writer -- runs + bodies only, no materialization, no commit. Only ``ingest``
+        and ``upsert_run`` call this. ``mask`` is the Task 6 hook: when given it rewrites each
+        response body on its way into ``bodies`` (this task passes nothing, so bodies are stored
+        unchanged -- but through the same call)."""
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         self._conn.executemany(
-            "INSERT OR REPLACE INTO runs (run_id, api_id, job_id, target_env, test_data_label, status, "
+            f"{verb} INTO runs (run_id, api_id, job_id, target_env, test_data_label, status, "
             "http_status, duration_ms, executed_at, executed_by, failed_rules, day) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             [self._run_row(r, briefing_tz) for r in runs],
         )
-        body_rows = [(r.run_id, json.dumps(r.response_body), _iso(r.executed_at))
-                     for r in runs if r.response_body is not None]
+        body_rows = [
+            (r.run_id, json.dumps(mask(r.response_body) if mask is not None else r.response_body),
+             _iso(r.executed_at))
+            for r in runs if r.response_body is not None
+        ]
         if body_rows:
             self._conn.executemany(
-                "INSERT OR REPLACE INTO bodies (run_id, body, captured_at) VALUES (?,?,?)", body_rows,
+                f"{verb} INTO bodies (run_id, body, captured_at) VALUES (?,?,?)", body_rows,
             )
+
+    def ingest(
+        self, runs: Iterable[RunResult], briefing_tz: str = "Asia/Seoul", *,
+        mask: Callable[[dict], dict] | None = None,
+    ) -> int:
+        """**The** write path for runs (spec §4): one transaction inserts the batch and folds it
+        into ``current_state`` / ``rollup_day`` / ``api_watermark`` / ``operator_api``. Returns the
+        number of runs that were actually new.
+
+        Idempotent by construction: run_ids already present are filtered out up front (and the
+        insert itself is ``INSERT OR IGNORE``), so re-ingesting a batch inserts nothing and adds
+        no delta anywhere -- a retried ``record_execution`` cannot double-count a rollup."""
+        batch: dict[str, RunResult] = {}
+        for run in runs:
+            batch.setdefault(run.run_id, run)
+        if not batch:
+            return 0
+        known = self._existing_run_ids(list(batch))
+        fresh = [
+            r if r.day else r.model_copy(update={"day": _day_for(r.executed_at, briefing_tz)})
+            for run_id, r in batch.items() if run_id not in known
+        ]
+        if not fresh:
+            return 0
+        self._write_run_rows(fresh, briefing_tz, mask)
+        self._materialize(fresh)
         self._conn.commit()
+        return len(fresh)
+
+    def _existing_run_ids(self, run_ids: Sequence[str]) -> set[str]:
+        found: set[str] = set()
+        for start in range(0, len(run_ids), 500):   # stay well under SQLite's bound-variable cap
+            chunk = run_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT run_id FROM runs WHERE run_id IN ({placeholders})", list(chunk)
+            ).fetchall()
+            found.update(r["run_id"] for r in rows)
+        return found
 
     def upsert_run(self, run: RunResult, briefing_tz: str = "Asia/Seoul") -> None:
-        """Single-row insert-or-replace -- used by execute_job_once and by the ``MockAtworks.runs``
-        dict-compat view's ``__setitem__`` (tests still poke ``backend.runs[run_id] = run``)."""
-        self.insert_runs([run], briefing_tz)
+        """Single-row write for the ``MockAtworks.runs`` dict-compat view's ``__setitem__``
+        (tests still poke ``backend.runs[run_id] = run`` to redate a fixture run). A *new* run_id
+        goes through ``ingest`` (incremental materialization); overwriting an *existing* run
+        mutates history under the already-folded deltas, which no increment can undo, so that
+        path replaces the row and rebuilds the four materialized tables from scratch. Execution
+        never takes it -- ``execute_job_once`` ingests its whole batch at once."""
+        if run.run_id not in self._existing_run_ids([run.run_id]):
+            self.ingest([run], briefing_tz)
+            return
+        self._write_run_rows([run], briefing_tz, None, replace=True)
         if run.response_body is None:
             self._conn.execute("DELETE FROM bodies WHERE run_id = ?", (run.run_id,))
-            self._conn.commit()
+        self.rebuild_materialized()
+        self._conn.commit()
 
     def replace_all_runs(self, runs: Mapping[str, RunResult] | Iterable[RunResult], briefing_tz: str = "Asia/Seoul") -> None:
         """Wholesale replacement -- backs ``backend.runs = {...}`` in tests that build a
-        purpose-built run set from scratch, discarding the fixtures entirely."""
+        purpose-built run set from scratch, discarding the fixtures entirely. The four
+        materialized tables are cleared with the runs, then rebuilt by the ``ingest`` below."""
         values = list(runs.values()) if isinstance(runs, Mapping) else list(runs)
         self._conn.execute("DELETE FROM runs")
         self._conn.execute("DELETE FROM bodies")
+        self._clear_materialized()
         self._conn.commit()
-        self.insert_runs(values, briefing_tz)
+        self.ingest(values, briefing_tz)
+
+    # -- ingest-time materialization (spec §4) ---------------------------------------------------
+
+    def _clear_materialized(self) -> None:
+        for table in ("current_state", "rollup_day", "api_watermark", "operator_api"):
+            self._conn.execute(f"DELETE FROM {table}")
+
+    def rebuild_materialized(self, briefing_tz: str = "Asia/Seoul") -> None:
+        """Drop the four materialized tables and fold every stored run back in, in one pass. Used
+        when a run already folded in is overwritten (``upsert_run``) -- an increment cannot undo
+        history. No commit here; the caller owns the transaction."""
+        self._clear_materialized()
+        runs = [
+            r if r.day else r.model_copy(update={"day": _day_for(r.executed_at, briefing_tz)})
+            for r in self.fetch_runs()
+        ]
+        if runs:
+            self._materialize(runs)
+
+    def _materialize(self, fresh: Sequence[RunResult]) -> None:
+        """Fold a batch of *new* runs into the four materialized tables. Pure arithmetic lives in
+        ``atworks_agent.materialize.rollup_delta``; this method only reads the rows the batch
+        touches, merges, and writes them back inside the caller's transaction."""
+        prev_state = self._current_state_for(sorted({r.api_id for r in fresh}))
+        rollups, cells, marks, operators = rollup_delta(fresh, prev_state)
+
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO current_state "
+            "(api_id, target_env, test_data_label, run_id, status, executed_at, transitions_total) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(c.api_id, c.target_env, _label_in(c.test_data_label), c.run_id, c.status.value,
+              _iso(c.executed_at), c.transitions_total) for c in cells],
+        )
+
+        for row in rollups:
+            label = _label_in(row.test_data_label)
+            existing = self._conn.execute(
+                'SELECT "count", "pass", fail, error, transitions, p95_duration_ms, failed_rule_counts '
+                "FROM rollup_day WHERE day = ? AND api_id = ? AND target_env = ? AND test_data_label = ?",
+                (row.day, row.api_id, row.target_env, label),
+            ).fetchone()
+            counts = dict(json.loads(existing["failed_rule_counts"] or "{}")) if existing else {}
+            for rule, n in row.failed_rule_counts.items():
+                counts[rule] = counts.get(rule, 0) + n
+            # p95 across merged batches is the documented §4 approximation (max of the per-batch
+            # p95s), NOT an exact percentile over the union -- rollup_day never keeps raw durations.
+            p95 = row.p95_duration_ms
+            if existing is not None and existing["p95_duration_ms"] is not None:
+                p95 = existing["p95_duration_ms"] if p95 is None else max(p95, existing["p95_duration_ms"])
+            self._conn.execute(
+                'INSERT OR REPLACE INTO rollup_day (day, api_id, target_env, test_data_label, "count", '
+                '"pass", fail, error, transitions, p95_duration_ms, failed_rule_counts) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                (row.day, row.api_id, row.target_env, label,
+                 (existing["count"] if existing else 0) + row.count,
+                 (existing["pass"] if existing else 0) + row.passed,
+                 (existing["fail"] if existing else 0) + row.fail,
+                 (existing["error"] if existing else 0) + row.error,
+                 (existing["transitions"] if existing else 0) + row.transitions,
+                 p95, json.dumps(counts)),
+            )
+
+        for mark in marks:
+            row = self._conn.execute(
+                "SELECT * FROM api_watermark WHERE api_id = ?", (mark.api_id,)
+            ).fetchone()
+            merged = merge_watermark(self._row_to_watermark(row) if row else None, mark)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO api_watermark "
+                "(api_id, last_pass_at, first_non_pass_at, last_non_pass_at, latest_status, api_updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (merged.api_id,
+                 _iso(merged.last_pass_at) if merged.last_pass_at else None,
+                 _iso(merged.first_non_pass_at) if merged.first_non_pass_at else None,
+                 _iso(merged.last_non_pass_at) if merged.last_non_pass_at else None,
+                 merged.latest_status.value if merged.latest_status else None,
+                 # api_updated_at stays whatever it was (NULL until Task 8 fills it from ApiSpec).
+                 row["api_updated_at"] if row is not None else None),
+            )
+
+        for delta in operators:
+            row = self._conn.execute(
+                "SELECT last_executed_at, run_count FROM operator_api WHERE operator_id = ? AND api_id = ?",
+                (delta.operator_id, delta.api_id),
+            ).fetchone()
+            last = _iso(delta.last_executed_at)
+            if row is not None and row["last_executed_at"] is not None:
+                last = max(last, row["last_executed_at"])   # fixed-width UTC strings sort chronologically
+            self._conn.execute(
+                "INSERT OR REPLACE INTO operator_api (operator_id, api_id, last_executed_at, run_count) "
+                "VALUES (?,?,?,?)",
+                (delta.operator_id, delta.api_id, last,
+                 (row["run_count"] if row is not None else 0) + delta.run_count),
+            )
+
+    def _current_state_for(self, api_ids: Sequence[str]) -> dict[CellKey, CellState]:
+        if not api_ids:
+            return {}
+        placeholders = ",".join("?" for _ in api_ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM current_state WHERE api_id IN ({placeholders})", list(api_ids)
+        ).fetchall()
+        cells = [self._row_to_cell(r) for r in rows]
+        return {(c.api_id, c.target_env, c.test_data_label): c for c in cells}
+
+    @staticmethod
+    def _row_to_cell(row: sqlite3.Row) -> CellState:
+        return CellState(
+            api_id=row["api_id"], target_env=row["target_env"],
+            test_data_label=_label_out(row["test_data_label"]), run_id=row["run_id"],
+            status=RunStatus(row["status"]), executed_at=_parse_iso(row["executed_at"]),
+            transitions_total=row["transitions_total"],
+        )
+
+    @staticmethod
+    def _row_to_watermark(row: sqlite3.Row) -> ApiWatermark:
+        return ApiWatermark(
+            api_id=row["api_id"],
+            last_pass_at=_parse_iso(row["last_pass_at"]) if row["last_pass_at"] else None,
+            first_non_pass_at=_parse_iso(row["first_non_pass_at"]) if row["first_non_pass_at"] else None,
+            last_non_pass_at=_parse_iso(row["last_non_pass_at"]) if row["last_non_pass_at"] else None,
+            latest_status=RunStatus(row["latest_status"]) if row["latest_status"] else None,
+        )
 
     @staticmethod
     def _row_to_run(row: sqlite3.Row) -> RunResult:
@@ -454,10 +653,61 @@ class Store:
             return None
         return json.loads(row["body"])
 
-    # -- current_state / watermarks / operator_scope (windowed SQL + a bounded python pass per
-    #    group -- see module docstring: Task 5 materializes these, Task 4 computes on demand) ----
+    # -- current_state / watermarks / operator_scope: materialized reads (Task 5) ----------------
 
     def current_state(self, scope_api_ids: Sequence[str] | None = None) -> list[CellState]:
+        """One indexed read of the materialized ``current_state`` table (PK
+        ``(api_id, target_env, test_data_label)``) -- no scan over ``runs``, no python pass."""
+        clauses: list[str] = []
+        params: list = []
+        if scope_api_ids is not None:
+            placeholders = ",".join("?" for _ in scope_api_ids)
+            clauses.append(f"api_id IN ({placeholders})" if scope_api_ids else "0")
+            params.extend(scope_api_ids)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM current_state {where_sql} ORDER BY api_id, target_env, test_data_label",
+            params,
+        ).fetchall()
+        return [self._row_to_cell(r) for r in rows]
+
+    def watermarks(
+        self, api_ids: Sequence[str] | None = None, first_non_pass_since: datetime | None = None,
+    ) -> list[ApiWatermark]:
+        """One indexed read of ``api_watermark`` (PK ``api_id``). ``first_non_pass_since`` is a
+        plain SQL predicate: a NULL ``first_non_pass_at`` fails it, which is exactly the
+        recompute oracle's "no non-pass run at all -> not a candidate"."""
+        clauses: list[str] = []
+        params: list = []
+        if api_ids is not None:
+            placeholders = ",".join("?" for _ in api_ids)
+            clauses.append(f"api_id IN ({placeholders})" if api_ids else "0")
+            params.extend(api_ids)
+        if first_non_pass_since is not None:
+            clauses.append("first_non_pass_at >= ?")
+            params.append(_iso(first_non_pass_since))
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM api_watermark {where_sql} ORDER BY api_id", params,
+        ).fetchall()
+        return [self._row_to_watermark(r) for r in rows]
+
+    def operator_scope_ids(self, operator_id: str, window_days: int, now: datetime) -> set[str]:
+        """One indexed read of ``operator_api`` (PK ``(operator_id, api_id)`` -- the leading
+        column makes this a range scan of one operator's rows, never a scan of ``runs``)."""
+        cutoff = _iso(now - timedelta(days=window_days))
+        rows = self._conn.execute(
+            "SELECT api_id FROM operator_api WHERE operator_id = ? AND last_executed_at >= ?",
+            (operator_id, cutoff),
+        ).fetchall()
+        return {r["api_id"] for r in rows}
+
+    # -- recompute oracles: the Task 4 on-demand implementations, kept ONLY so tests can assert
+    #    the materialized tables above agree with a from-scratch scan of ``runs``. Nothing in the
+    #    host or the agent calls these. ----------------------------------------------------------
+
+    def recompute_current_state(self, scope_api_ids: Sequence[str] | None = None) -> list[CellState]:
+        """Oracle (tests only): current_state recomputed by scanning ``runs``."""
         clauses, params = self._runs_predicates(api_ids=scope_api_ids)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cells = self._conn.execute(
@@ -493,9 +743,10 @@ class Store:
             ))
         return result
 
-    def watermarks(
+    def recompute_watermarks(
         self, api_ids: Sequence[str] | None = None, first_non_pass_since: datetime | None = None,
     ) -> list[ApiWatermark]:
+        """Oracle (tests only): watermarks recomputed by scanning ``runs``."""
         clauses, params = self._runs_predicates(api_ids=api_ids)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         present = self._conn.execute(f"SELECT DISTINCT api_id FROM runs {where_sql}", params).fetchall()
@@ -520,7 +771,8 @@ class Store:
             ))
         return result
 
-    def operator_scope_ids(self, operator_id: str, window_days: int, now: datetime) -> set[str]:
+    def recompute_operator_scope_ids(self, operator_id: str, window_days: int, now: datetime) -> set[str]:
+        """Oracle (tests only): operator scope recomputed by scanning ``runs``."""
         cutoff = _iso(now - timedelta(days=window_days))
         rows = self._conn.execute(
             "SELECT DISTINCT api_id FROM runs WHERE executed_by = ? AND executed_at >= ?",

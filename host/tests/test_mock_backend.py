@@ -127,7 +127,7 @@ async def test_execute_job_once_produces_the_whole_matrix():
     assert {r.test_data_label for r in produced} == {"S1 정상", "S2 음수"}
     after = b.ledger.get(job.job_id)
     assert after.executions == 1 and after.remaining_executions == 0
-    assert len(after.run_ids) == 8
+    assert after.run_count == 8 and len(after.recent_run_ids) == 8
 
 
 async def test_execute_job_once_runs_named_parity_targets_legacy_and_renewed():

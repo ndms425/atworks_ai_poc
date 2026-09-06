@@ -134,8 +134,10 @@ class AtworksBackend(ABC):
 
     @abstractmethod
     async def runs_by_ids(self, session: AtworksSessionContext, run_ids: list[str]) -> list[RunResult]:
-        """id 목록으로 실행 이력 조회(순서 무관, 없는 id는 건너뛴다). 리포트가 job.run_ids로 실행
-        레코드를 모을 때 쓴다."""
+        """id 목록으로 실행 이력 조회(순서 무관, 없는 id는 건너뛴다). ``job.recent_run_ids``(최근 50개)
+        처럼 **이미 손에 든 id 목록**을 레코드로 바꿀 때 쓴다 — 리포트는 더 이상 이 경로가 아니라
+        ``list_runs(RunsQuery(job_id=...))`` 페이징으로 job의 전체 실행을 모은다(scale spec §4:
+        ``job.run_ids``는 더 이상 자라지 않는다)."""
 
     @abstractmethod
     async def record_execution(

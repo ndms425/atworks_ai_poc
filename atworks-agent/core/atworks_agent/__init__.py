@@ -18,6 +18,14 @@ from .jobs import (
     check_job_guardrails,
     enforce_execution_matrix,
 )
+from .materialize import (
+    CellKey,
+    OperatorApiDelta,
+    RollupRow,
+    cell_key,
+    merge_watermark,
+    rollup_delta,
+)
 from .parity import BodyDiff, DiffCluster, apply_ignore, cluster_diffs, compare_bodies
 from .profiles import (
     ProfileDraft,
