@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -124,6 +125,32 @@ async def test_run_digest_refused_without_population():
         {"items": [{"kind": "fail", "ref_id": "run-17", "headline": "y"}]}, _ctx(state), "Shown.",
     )
     assert outcome.is_error and "list_runs" in outcome.result_text
+
+
+async def test_run_digest_run_record_drops_response_body_and_sets_has_body():
+    # Review fix (Task 3 round 1): enrich_run_digest used to dump the RunResult through a bare
+    # model_dump with no exclusion, carrying the raw response_body into a card payload the web
+    # and the model both see. It must go through run_record like every other run serialization.
+    state = _state_with_run()
+    secret_run = RunResult(
+        run_id="run-99", api_id="api-1", executed_at=datetime.now(UTC), target_env="dev",
+        status=RunStatus.FAIL, failed_rules=["amount >= 0"], http_status=200,
+        response_body={"secret": "4111-1111-1111-1111"},
+    )
+    state.remember_run(secret_run)
+    state.last_listed_run_ids = ["run-17", "run-99"]
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_run_digest"],
+        {"items": [{"kind": "fail", "ref_id": "run-99", "headline": "x"}]},
+        _ctx(state), "Shown.",
+    )
+    payload = outcome.events[0].data["payload"]
+    entry = payload["items"][0]
+    assert "response_body" not in entry["run"]
+    assert entry["run"]["has_body"] is True
+    dumped = json.dumps(payload)
+    assert "4111" not in dumped
+    assert '"response_body"' not in dumped
 
 
 async def test_job_preview_joins_staged_record():
@@ -372,6 +399,26 @@ async def test_run_groups_unknown_keys_are_provenance_when_all_and_a_note_when_s
                                   {"group_keys": ["amount <= limit", "nope"]}, _ctx(state), "Shown.")
     assert not some.is_error and "Dropped nope" in some.result_text
     assert some.events[0].data["payload"]["shown"] == 1
+
+
+async def test_run_groups_payload_never_carries_a_cited_runs_response_body():
+    # RunGroup only ever carries run_ids (strings), never embedded RunResult objects, so this
+    # locks in that a group citing a body-bearing run cannot leak it through this card either.
+    state = AtworksSessionState()
+    state.remember_run(RunResult(
+        run_id="run-99", api_id="api-1", executed_at=datetime.now(UTC), target_env="dev",
+        status=RunStatus.FAIL, http_status=200, response_body={"secret": "4111-1111-1111-1111"},
+    ))
+    g = RunGroup(key="amount <= limit", label="amount <= limit", count=1, fail=1, error=0, passed=0, run_ids=["run-99"])
+    state.remember_groups("failed_rule", [g], None)
+    state.last_population = 1
+    outcome = await run_presentation(
+        PRESENTATION_COMPONENTS["present_run_groups"], {"group_keys": ["amount <= limit"]}, _ctx(state), "Shown.",
+    )
+    payload = outcome.events[0].data["payload"]
+    dumped = json.dumps(payload)
+    assert "4111" not in dumped
+    assert '"response_body"' not in dumped
 
 
 class _StubBackend:

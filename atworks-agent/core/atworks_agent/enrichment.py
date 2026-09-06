@@ -21,7 +21,7 @@ from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
 from .rules import FORMAT_EXAMPLES, NAMED_FORMATS
 from .screen import screen_ref_grounded
-from .serialization import format_batch_record, job_record, profile_record, rule_record
+from .serialization import format_batch_record, job_record, profile_record, rule_record, run_record
 from .tools.presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
@@ -94,7 +94,7 @@ async def enrich_run_digest(payload: PresentRunDigestPayload, context: Enrichmen
         # The run record is the deterministic verdict; it overrides whatever kind the
         # model picked so a mislabeled item can never present a pass run as a failure.
         entry["kind"] = run.status.value
-        entry["run"] = _record(run)
+        entry["run"] = run_record(run)
         api = state.seen_apis.get(run.api_id)
         if api is not None:
             entry["api"] = _record(api)
