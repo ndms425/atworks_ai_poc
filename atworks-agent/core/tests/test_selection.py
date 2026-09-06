@@ -51,14 +51,52 @@ async def test_plain_query_group_updated_after_still_work_with_no_basis(wide, co
     assert set(res.api_ids) == {"api-3", "api-4"} and res.basis is None
 
 
-async def test_failed_since_basis_flags_when_the_scan_hits_the_sample_cap(config, monkeypatch):
-    # Task 8: the failed set itself is now EXACT (watermarks, no run sample) -- what can still
-    # truncate is the CATALOGUE scan, capped at CATALOGUE_SCAN_LIMIT. When it comes back at the
-    # cap, APIs past it were never considered, so the basis sentence must say so.
+async def test_failed_since_basis_flags_when_the_scan_hits_the_sample_cap(wide, config, monkeypatch):
+    # Fix round 1: a failed_since selection that ALSO carries a catalogue predicate still starts
+    # from a catalogue page capped at CATALOGUE_SCAN_LIMIT. When that page comes back at the cap,
+    # APIs past it were never considered, so the basis sentence must say so.
     monkeypatch.setattr(selection, "CATALOGUE_SCAN_LIMIT", 1)
-    b = InMemoryBackend(config)  # api-1 and api-2 both have a non-pass run, above the 1-row cap
+    monkeypatch.setattr(selection, "_API_PAGE", 1)
 
-    res = await resolve_select_where(b, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), config, now=T0)
+    res = await resolve_select_where(
+        wide, SESSION, SelectWhere(group="payment", failed_since=T0 - timedelta(hours=1)), config, now=T0)
+
+    assert res.basis is not None and "표본 상한" in res.basis
+
+
+async def test_failed_since_alone_is_not_cut_by_the_catalogue_page(wide, config, monkeypatch):
+    """Fix round 1 (F): with no catalogue predicate to satisfy, the watermark set IS the answer
+    and a 1-row catalogue page must not cut it. The old order intersected the exact watermark
+    result INTO a <=CATALOGUE_SCAN_LIMIT catalogue page, so a project with more APIs than that cap
+    silently lost every failing API outside the newest-updated 1000."""
+    monkeypatch.setattr(selection, "CATALOGUE_SCAN_LIMIT", 1)
+    monkeypatch.setattr(selection, "_API_PAGE", 1)
+
+    res = await resolve_select_where(wide, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), config, now=T0)
+
+    assert set(res.api_ids) == {"api-1", "api-2", "api-4"}   # every failing API, catalogue cap or not
+    assert res.basis is not None and "표본 상한" not in res.basis
+
+
+async def test_failed_since_alone_flags_the_per_job_cap_instead(wide, monkeypatch):
+    """...and the truncation it CAN hit -- more failing APIs than a job may carry -- is still
+    named in the sentence, so the operator never reads a silently short selection."""
+    cfg = AtworksAgentConfig(model="m", max_apis_per_job=1)
+    monkeypatch.setattr(selection, "CATALOGUE_SCAN_LIMIT", 1)
+
+    res = await resolve_select_where(wide, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), cfg, now=T0)
+
+    assert len(res.api_ids) == cfg.max_apis_per_job + 1 == 2
+    assert res.basis is not None and "표본 상한" in res.basis
+
+
+async def test_related_to_truncation_is_named_in_the_basis_sentence(wide, config, monkeypatch):
+    """Fix round 1 (F): a related_to-only selection could hit CATALOGUE_SCAN_LIMIT on either half
+    of its union and the sentence said nothing — the one truncation the basis used to swallow."""
+    monkeypatch.setattr(selection, "CATALOGUE_SCAN_LIMIT", 1)
+    monkeypatch.setattr(selection, "_API_PAGE", 1)
+
+    res = await resolve_select_where(wide, SESSION, SelectWhere(related_to="api-3"), config, now=T0)
 
     assert res.basis is not None and "표본 상한" in res.basis
 

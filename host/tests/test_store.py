@@ -534,6 +534,152 @@ def test_watermarks_respects_first_non_pass_since():
     assert actual == expected
 
 
+# -- fix round 1: server-side operator scope + the two insight counts ---------------------------
+
+
+def _scoped_store() -> tuple[Store, datetime]:
+    """Two operators, 120 APIs each with no overlap, one shared API they BOTH ran. The scope
+    predicate has to answer over all 240 without anyone shipping an id list."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    store.init_schema()
+    apis = [ApiSpec(api_id=f"api-{i:04d}", method="GET", path=f"/v1/x/{i}", name=str(i),
+                    updated_at=now - timedelta(days=300)) for i in range(240)]
+    apis.append(ApiSpec(api_id="api-shared", method="GET", path="/v1/shared", name="shared",
+                        updated_at=now - timedelta(days=300)))
+    store.load_apis(apis)
+    runs = []
+    for i in range(240):
+        operator = "minseong" if i < 120 else "jihoon"
+        runs.append(RunResult(run_id=f"run-{i:04d}", api_id=f"api-{i:04d}",
+                              executed_at=now - timedelta(days=2), target_env="dev",
+                              status=RunStatus.FAIL, failed_rules=["x >= 0"], executed_by=operator))
+    for who in ("minseong", "jihoon"):
+        runs.append(RunResult(run_id=f"run-shared-{who}", api_id="api-shared",
+                              executed_at=now - timedelta(days=2), target_env="dev",
+                              status=RunStatus.PASS, executed_by=who))
+    # an execution OUTSIDE any 30-day window: in operator_api but not in scope
+    store.load_apis([ApiSpec(api_id="api-old", method="GET", path="/v1/old", name="old",
+                             updated_at=now - timedelta(days=400))])
+    runs.append(RunResult(run_id="run-old", api_id="api-old", executed_at=now - timedelta(days=200),
+                          target_env="dev", status=RunStatus.FAIL, failed_rules=["x >= 0"],
+                          executed_by="minseong"))
+    store.replace_all_runs(runs)
+    return store, now
+
+
+def test_operator_scope_is_a_join_predicate_with_no_id_list_ceiling():
+    """The whole point of fix (A): the scope has no cap, so all 121 of an operator's APIs are in
+    it — an id list would have stopped at ``operator_scope_summary``'s 100."""
+    store, now = _scoped_store()
+    since = now - timedelta(days=30)
+    sample, total = store.operator_scope_summary("minseong", 30, now)
+    assert total == 121 and len(sample) == 100          # the sample really is short
+
+    groups = store.aggregate_rollups(
+        AggregateQuery(since=since, group_by="api", scope_operator="minseong", limit=500),
+        flaky_min=2, apis={}, briefing_tz="Asia/Seoul")
+    # all 121 of minseong's in-window APIs, not the 100 an id list would have carried
+    assert {g.key for g in groups} == {f"api-{i:04d}" for i in range(120)} | {"api-shared"}
+    assert "api-0200" not in {g.key for g in groups}    # jihoon's, correctly excluded
+
+    marks = store.watermarks(scope_operator="minseong", scope_since=since)
+    assert {w.api_id for w in marks} == {f"api-{i:04d}" for i in range(120)} | {"api-shared"}
+    cells = store.current_state(scope_operator="minseong", scope_since=since)
+    assert {c.api_id for c in cells} == {f"api-{i:04d}" for i in range(120)} | {"api-shared"}
+
+
+def test_operator_scope_window_lower_bound_drops_an_old_execution():
+    """``operator_api`` remembers forever; the scope does not. The aggregate's bound is the
+    query's own ``since``, and ``current_state``/``watermarks`` take the caller's scope window."""
+    store, now = _scoped_store()
+    since = now - timedelta(days=30)
+    assert "api-old" in store.operator_scope_ids("minseong", 365, now)      # 200 days back
+    assert "api-old" not in store.operator_scope_ids("minseong", 30, now)
+
+    groups = store.aggregate_rollups(
+        AggregateQuery(since=since, group_by="api", scope_operator="minseong", limit=500),
+        flaky_min=2, apis={}, briefing_tz="Asia/Seoul")
+    assert "api-old" not in {g.key for g in groups}
+    assert "api-old" not in {w.api_id for w in store.watermarks(scope_operator="minseong", scope_since=since)}
+    assert "api-old" in {w.api_id for w in store.watermarks(scope_operator="minseong", scope_since=None)}
+
+
+def test_summarize_insights_flaky_count_has_no_group_limit():
+    """>500 loud cells plus one quiet flaky cell: the count over a ranked group list saturates,
+    the SQL count does not."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    store.init_schema()
+    store.load_apis([ApiSpec(api_id=f"api-{i:04d}", method="GET", path=f"/v1/x/{i}", name=str(i),
+                             updated_at=now - timedelta(days=300)) for i in range(600)]
+                    + [ApiSpec(api_id="api-flaky", method="GET", path="/v1/f", name="f",
+                               updated_at=now - timedelta(days=300))])
+    base = now - timedelta(days=2)
+    runs = [RunResult(run_id=f"run-l-{i:04d}-{k}", api_id=f"api-{i:04d}",
+                      executed_at=base + timedelta(minutes=k), target_env="dev", status=RunStatus.FAIL,
+                      failed_rules=["loud >= 0"])
+            for i in range(600) for k in range(3)]
+    runs += [RunResult(run_id=f"run-f-{k}", api_id="api-flaky", executed_at=base + timedelta(hours=k),
+                       target_env="dev", status=status,
+                       failed_rules=["quiet >= 0"] if status is RunStatus.FAIL else [])
+             for k, status in enumerate((RunStatus.PASS, RunStatus.FAIL, RunStatus.PASS))]
+    store.replace_all_runs(runs)
+    since = now - timedelta(days=30)
+
+    groups = store.aggregate_rollups(AggregateQuery(since=since, group_by="api_env_data", limit=500),
+                                     flaky_min=2, apis={}, briefing_tz="Asia/Seoul")
+    assert len(groups) == 500 and not any(g.flaky for g in groups)   # the old tile really read 0
+    assert store.summarize_insights(since, flaky_min=2, briefing_tz="Asia/Seoul").flaky == 1
+
+
+def test_regression_definition_is_windowed_in_both_the_group_and_the_count():
+    """Fix (D): one definition. An API whose first failure predates the window is not that
+    window's regression suspect — for ``_fill_derived`` and for ``summarize_insights`` alike."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    store.init_schema()
+    broke_recently = now - timedelta(days=5)
+    broke_long_ago = now - timedelta(days=200)
+    store.load_apis([
+        ApiSpec(api_id="api-new", method="GET", path="/v1/n", name="n",
+                updated_at=broke_recently - timedelta(hours=1)),
+        ApiSpec(api_id="api-old", method="GET", path="/v1/o", name="o",
+                updated_at=broke_long_ago - timedelta(hours=1)),
+    ])
+    runs = []
+    for api_id, broke_at in (("api-new", broke_recently), ("api-old", broke_long_ago)):
+        runs.append(RunResult(run_id=f"{api_id}-pass", api_id=api_id,
+                              executed_at=broke_at - timedelta(hours=2), target_env="dev",
+                              status=RunStatus.PASS))
+        runs.append(RunResult(run_id=f"{api_id}-fail", api_id=api_id, executed_at=broke_at,
+                              target_env="dev", status=RunStatus.FAIL, failed_rules=["x >= 0"]))
+    store.replace_all_runs(runs)
+
+    since = now - timedelta(days=30)
+    groups = {g.key: g for g in store.aggregate_rollups(
+        AggregateQuery(since=since, group_by="api", limit=500), flaky_min=2, apis={},
+        briefing_tz="Asia/Seoul")}
+    assert groups["api-new"].regression_suspect and "api-old" not in groups   # no runs in window
+    assert store.summarize_insights(since, flaky_min=2, briefing_tz="Asia/Seoul").regression_suspect == 1
+    # widen the window and both the group flag and the count agree again
+    wide = now - timedelta(days=365)
+    wide_groups = {g.key: g for g in store.aggregate_rollups(
+        AggregateQuery(since=wide, group_by="api", limit=500), flaky_min=2, apis={},
+        briefing_tz="Asia/Seoul")}
+    assert wide_groups["api-new"].regression_suspect and wide_groups["api-old"].regression_suspect
+    assert store.summarize_insights(wide, flaky_min=2, briefing_tz="Asia/Seoul").regression_suspect == 2
+
+
+def test_summarize_insights_respects_the_operator_scope():
+    store, now = _scoped_store()
+    since = now - timedelta(days=30)
+    everyone = store.summarize_insights(since, flaky_min=2, briefing_tz="Asia/Seoul")
+    mine = store.summarize_insights(since, flaky_min=2, scope_operator="minseong", briefing_tz="Asia/Seoul")
+    assert everyone.flaky == 0 and mine.flaky == 0          # nothing flips in this fixture
+    assert everyone.regression_suspect == mine.regression_suspect == 0
+
+
 def test_operator_scope_ids_matches_oracle():
     runs = _load_fixture_runs()
     store = _store_with_fixtures()

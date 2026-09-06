@@ -49,10 +49,20 @@ class AggregateQuery(BaseModel):
     until: datetime | None = None
     group_by: GroupBy
     scope_api_ids: list[str] | None = None
+    # Server-side operator scope (Task 8 fix round 1): "the APIs this operator executed inside
+    # this query's window", resolved by the BACKEND (a join on its operator/API index), never by
+    # the caller shipping an id list. An id list is what capped a 16k-API operator's insight panel
+    # at 100 alphabetically-first APIs; this predicate has no such ceiling. The window's lower
+    # bound is this query's own ``since`` (no ``since`` = the operator's whole history).
+    # Composable with ``scope_api_ids``: both narrow, neither widens.
+    scope_operator: str | None = None
     # Task 8: the aggregate read is served from rollups, and a rollup row carries pass/fail/error
     # as separate counters -- so a status filter narrows which of those counters a group reports
     # (it is NOT a run-level scan). ``non_pass`` is fail+error, the triage population.
     status: RunStatusFilter | None = None
+    # Evidence ids cost one indexed query per returned group (api/env/cell axes) or one bounded
+    # scan (the map axes). A caller that only wants the counters sets this False and pays neither.
+    include_run_ids: bool = True
     limit: int = Field(default=50, ge=1, le=500)
 
 

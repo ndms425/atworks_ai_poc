@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 
 from atworks_agent import (
     AggregateQuery,
-    ApiSpec,
     AtworksAgentConfig,
     AtworksBackend,
     AtworksSessionContext,
@@ -76,54 +75,73 @@ class InsightPanels:
 
     async def _inputs(
         self, backend: AtworksBackend, session: AtworksSessionContext, now: datetime,
-        *, scope: list[str] | None,
+        *, scope_operator: str | None,
     ) -> InsightInputs:
         """The panel's whole read plan (scale spec §9): rollup aggregates + watermarks +
         current_state + the staged-job queue. No run list is ever collected, so the candidates
         cover EVERY API in the window instead of whatever the newest ``max_aggregate_runs`` runs
         happened to touch — that sample was not merely slow, it was wrong at scale.
 
-        Bounds, all documented rather than silent: ``scope`` is ``operator_scope``'s api_ids
-        sample (<=100 by the ABC's own contract) while ``scope_size`` stays the true total; the
-        three aggregate reads take the top ``_GROUP_LIMIT`` groups by (fail+error, count), which
-        is the same order the panel ranks by; regression candidates come from the watermark table
-        filtered to APIs whose FIRST failure falls inside the window — the same population the old
-        window-scoped scan could see, now without scanning."""
+        The operator scope is a **backend predicate**, not an id list (Task 8 fix round 1):
+        ``scope_operator`` rides every read and the backend resolves it against its own
+        operator×API index. Shipping ``ScopeSummary.api_ids`` here was the second coverage hole —
+        that list is capped at 100 by the ABC's contract, so an operator who has run 16,000 APIs
+        got a panel over 100 alphabetically-first ones. ``ScopeSummary`` is still read, for the
+        true ``scope_size``, the displayed id sample, and the project-wide fallback decision.
+
+        Remaining bounds, documented rather than silent: the three aggregate reads take the top
+        ``_GROUP_LIMIT`` groups by (fail+error, count), the same order the panel ranks by;
+        regression candidates come from the watermark table filtered to APIs whose FIRST failure
+        falls inside the window, then ranked NEWEST-BREAK-FIRST before that same cut — an
+        alphabetical cut would have hidden the freshest regression behind ``api-000…``."""
         cfg = self.config
         since = now - timedelta(days=cfg.max_aggregate_window_days)
 
-        def q(group_by: str, api_ids: list[str] | None) -> AggregateQuery:
-            return AggregateQuery(since=since, group_by=group_by, scope_api_ids=api_ids, limit=_GROUP_LIMIT)
+        def q(group_by: str, api_ids: list[str] | None = None) -> AggregateQuery:
+            # An explicit id list makes the operator predicate redundant *when the ids themselves
+            # came from an operator-scoped read* (the suspects below did), and re-deriving it costs
+            # a second index decision on every query -- 146ms of the panel on the mid bench set.
+            return AggregateQuery(since=since, group_by=group_by, scope_api_ids=api_ids,
+                                  scope_operator=None if api_ids is not None else scope_operator,
+                                  limit=_GROUP_LIMIT)
 
         # regression_suspect: exact and unsampled -- one indexed read of api_watermark gives every
         # API that broke inside the window, and spec §3's rule picks the suspects out of it.
-        marks = await backend.watermarks(session, api_ids=scope, first_non_pass_since=since)
+        marks = await backend.watermarks(session, first_non_pass_since=since, scope_operator=scope_operator)
         suspects = [
-            w.api_id for w in marks
+            w for w in marks
             if w.api_updated_at is not None and w.last_pass_at is not None
             and w.first_non_pass_at is not None
             and w.last_pass_at < w.api_updated_at <= w.first_non_pass_at
-        ][:_GROUP_LIMIT]
-        groups_by_api = await backend.aggregate_runs(session, q("api", suspects)) if suspects else []
-        cells = await backend.aggregate_runs(session, q("api_env_data", scope))
-        groups_by_rule = await backend.aggregate_runs(session, q("failed_rule", scope))
+        ]
+        suspects.sort(key=lambda w: (w.first_non_pass_at, w.api_id), reverse=True)
+        suspect_ids = [w.api_id for w in suspects][:_GROUP_LIMIT]
+        groups_by_api = await backend.aggregate_runs(session, q("api", suspect_ids)) if suspect_ids else []
+        cells = await backend.aggregate_runs(session, q("api_env_data"))
+        groups_by_rule = await backend.aggregate_runs(session, q("failed_rule"))
 
-        # env_divergence reads the latest state per cell. Scope it to the operator's APIs, or --
-        # on the project-wide fallback -- to the APIs the window's own groups named, so a
-        # 50k-API project never materializes every cell for one Home tile.
-        cell_scope = scope or sorted({g.key.split("|", 2)[0] for g in cells} | set(suspects))
+        # env_divergence reads the latest state per cell, and it is the one input that cannot be
+        # answered by a count: it needs the actual latest row of EVERY env of an API to compare
+        # them. Reading the operator's whole scope here would materialize one CellState per cell in
+        # a 16k-API scope (19k rows / 220ms on the reduced bench set alone) for a single Home tile.
+        # So this read stays keyed to the APIs the window's own top groups named -- a
+        # relevance-ranked bound (a diverging API has a non-pass latest status, so its cell carries
+        # fail/error and ranks high) rather than the alphabetical one fix (A) removed, and the same
+        # bound the project-wide fallback has always used. The groups it reads from are themselves
+        # operator-scoped, so the scope is still exact; only the per-tile breadth is bounded.
+        cell_scope = sorted({g.key.split("|", 2)[0] for g in cells} | set(suspect_ids))
         current = await backend.current_state(session, scope_api_ids=cell_scope) if cell_scope else []
 
         jobs = (await backend.all_jobs(session, status="staged", limit=_JOB_LIMIT)).items
-        apis: dict[str, ApiSpec] = {}
-        for api_id in suspects:
-            api = await backend.get_api(session, api_id)
-            if api is not None:
-                apis[api_id] = api
         return InsightInputs(
             groups_by_api=groups_by_api, cells=cells, groups_by_rule=groups_by_rule,
-            current_state=current, watermarks=marks, jobs=jobs, apis=apis,
-            scope=set(scope) if scope else None,
+            current_state=current, jobs=jobs,
+            # scope=None: every read above is already scoped by the backend, so re-filtering here
+            # would only re-introduce an id list. The one input the backend cannot scope is the
+            # staged-job queue (a job is not an API), and filtering it against the <=100-id sample
+            # was arbitrary rather than exact -- stale_pending is now the project's approval queue,
+            # which is also what the pm role's top-priority tile should mean.
+            scope=None,
         )
 
     async def build(
@@ -136,8 +154,11 @@ class InsightPanels:
 
         summary = await backend.operator_scope(session, session.operator, cfg.scope_window_days)
         scope_ids = sorted(summary.api_ids)
+        # An operator who has run nothing in the window falls back to project-wide scope; anyone
+        # else gets the backend-side predicate, whatever the size of their scope.
         scope_fallback = summary.total == 0
-        inputs = await self._inputs(backend, session, now, scope=(scope_ids or None))
+        inputs = await self._inputs(backend, session, now,
+                                    scope_operator=None if scope_fallback else session.operator)
         cands = candidate_insights(inputs, role, cfg, now)
 
         date = self._date_for(now)

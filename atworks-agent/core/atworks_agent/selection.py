@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from .backend import AtworksBackend
 from .config import AtworksAgentConfig
@@ -12,6 +12,9 @@ from .types import ApiSpec, AtworksSessionContext, RunResult, RunsQuery
 
 CATALOGUE_SCAN_LIMIT = 1000
 _API_PAGE = 200             # one catalogue page; the scan below pages by cursor, never one big read
+# Sort floor for a watermark row whose api_updated_at is unknown (an API the catalogue dropped):
+# it orders last rather than raising against the aware datetimes beside it.
+_EPOCH = datetime(1, 1, 1, tzinfo=UTC)
 
 
 @dataclass
@@ -75,10 +78,16 @@ async def resolve_select_where(
 ) -> Resolution:
     del now  # reserved for relative windows; kept in the signature so callers pass the execution clock
     scan_cap = CATALOGUE_SCAN_LIMIT if (where.related_to or where.failed_since) else config.max_apis_per_job + 1
-    apis, truncated = await scan_apis(
-        backend, session, cap=scan_cap, query=where.query, group=where.group,
-        updated_after=where.updated_after,
-    )
+    # "Is there any catalogue-side predicate at all?" -- if not, a `failed_since` selection needs
+    # no catalogue page to start from and is driven off the watermark set instead (below).
+    catalogue_filtered = bool(where.query or where.group or where.updated_after or where.related_to)
+    apis: dict[str, ApiSpec] = {}
+    truncated = False
+    if catalogue_filtered or not where.failed_since:
+        apis, truncated = await scan_apis(
+            backend, session, cap=scan_cap, query=where.query, group=where.group,
+            updated_after=where.updated_after,
+        )
     basis: list[str] = []
     if where.related_to:
         anchor = await backend.get_api(session, where.related_to)
@@ -100,18 +109,43 @@ async def resolve_select_where(
             if (anchor.group is not None and a.group == anchor.group) or path_prefix(a.path, config.impact_path_segments) == prefix
         }
         group_text = f"같은 group({anchor.group})" if anchor.group else "같은 group"
-        basis.append(f"{anchor.api_id}과 {group_text} 또는 {prefix}/*")
+        sentence = f"{anchor.api_id}과 {group_text} 또는 {prefix}/*"
+        if truncated:
+            # The impact scan stopped at CATALOGUE_SCAN_LIMIT (either half of the union) — APIs
+            # past it were never considered. Say so here too, not only on the failed_since branch:
+            # a related_to-only selection was the one truncation the basis used to swallow.
+            sentence += " (표본 상한 도달)"
+        basis.append(sentence)
     if where.failed_since:
         # The exact set of APIs with a non-pass run at or after the cutoff, straight off the
         # watermark table (last_non_pass_at) -- no run scan, and no 2000-run sample that could
         # miss an API that failed just outside it.
         marks = await backend.watermarks(session, last_non_pass_since=where.failed_since)
-        failed_ids = {w.api_id for w in marks}
-        apis = {i: a for i, a in apis.items() if i in failed_ids}
+        if catalogue_filtered:
+            # There IS a catalogue predicate to satisfy, so the watermark set is intersected with
+            # the (capped) catalogue page and the cap is reported.
+            failed_ids = {w.api_id for w in marks}
+            apis = {i: a for i, a in apis.items() if i in failed_ids}
+        else:
+            # No catalogue predicate: the watermark result IS the answer, and intersecting it with
+            # a <=CATALOGUE_SCAN_LIMIT catalogue page would cut an exact set down to whatever the
+            # newest-updated 1000 rows happened to be. Drive from the watermarks instead, ordered
+            # by the api_updated_at they already carry, and fetch only the specs that survive the
+            # per-job cap.
+            keep = config.max_apis_per_job + 1
+            ordered_marks = sorted(
+                marks, key=lambda w: (w.api_updated_at or _EPOCH, w.api_id), reverse=True,
+            )[:keep]
+            truncated = len(marks) > keep
+            apis = {}
+            for mark in ordered_marks:
+                api = await backend.get_api(session, mark.api_id)
+                if api is not None:
+                    apis[api.api_id] = api
         sentence = f"{where.failed_since.date().isoformat()} 이후 실패·에러가 있던 API"
         if truncated:
-            # The CATALOGUE scan stopped at its cap — APIs past it were never considered, so the
-            # basis says so rather than silently under-reporting.
+            # The scan stopped at its cap — APIs past it were never considered, so the basis says
+            # so rather than silently under-reporting.
             sentence += " (표본 상한 도달)"
         basis.append(sentence)
     ordered = sorted(apis.values(), key=lambda a: (a.updated_at, a.api_id), reverse=True)

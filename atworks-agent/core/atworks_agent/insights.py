@@ -11,14 +11,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .aggregation import _keys, aggregate
 from .config import AtworksAgentConfig
 from .types import (
     ApiSpec,
-    ApiWatermark,
     CellState,
     InsightCandidate,
     InsightKind,
@@ -54,16 +53,19 @@ class InsightInputs:
     * ``cells`` — ``aggregate_runs(group_by="api_env_data")``: flaky_cell
     * ``groups_by_rule`` — ``aggregate_runs(group_by="failed_rule")``: top_failed_rule
     * ``current_state`` — 셀별 최신 상태: env_divergence (run 목록 없이 계마다 최신 판정 비교)
-    * ``watermarks`` — API별 워터마크(참고용; 회귀 판정 자체는 그룹의 regression_suspect가 낸다)
     * ``jobs`` — staged job: stale_pending
+    * ``scope`` — 후보를 이 api 집합으로 한정(오라클 경로 전용). 호스트 경로는 백엔드가 이미
+      서버 측 스코프 술어로 좁혀 오므로 ``None``을 넘긴다 — 여기서 다시 id 목록으로 거르는 순간
+      그 목록의 상한이 곧 커버리지 구멍이 된다.
+
+    ``watermarks``/``apis``는 Task 8 fix round 1에서 **제거**했다: 어떤 후보도 읽지 않는데
+    호스트가 채우느라 회귀 의심 API마다 ``get_api``를 한 번씩 더 부르고 있었다.
     """
     groups_by_api: Sequence[RunGroup] = ()
     cells: Sequence[RunGroup] = ()
     groups_by_rule: Sequence[RunGroup] = ()
     current_state: Sequence[CellState] = ()
-    watermarks: Sequence[ApiWatermark] = ()
     jobs: Sequence[JobSpec] = ()
-    apis: Mapping[str, ApiSpec] = field(default_factory=dict)
     scope: set[str] | None = None
 
 
@@ -258,7 +260,6 @@ def candidate_insights_from_runs(
         groups_by_rule=by_rule,
         current_state=cells,
         jobs=jobs,
-        apis=apis,
         scope=scope,
     )
     return candidate_insights(inputs, role, config, now)

@@ -41,6 +41,7 @@ from atworks_agent import (
     AuditEntry,
     CellKey,
     CellState,
+    Insights,
     KeyCounts,
     Page,
     RunGroup,
@@ -187,7 +188,14 @@ def _iso(dt: datetime) -> str:
 
 
 def _parse_iso(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    """Inverse of ``_iso``. ``fromisoformat`` is the C fast path and understands both the trailing
+    ``Z`` and the 6-digit fraction ``_iso`` always writes; ``strptime`` on the same string costs
+    ~11us each and was 74ms of one insight-panel build alone (6,708 timestamps). ``strptime`` stays
+    as the fallback so a row written by an older, differently-shaped writer still parses."""
+    try:
+        return datetime.fromisoformat(value).astimezone(UTC)
+    except ValueError:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
 
 
 def _day_for(executed_at: datetime, briefing_tz: str) -> str:
@@ -236,6 +244,36 @@ def _acc_for(acc: dict[str, list], key: str) -> list:
 
 def _max_or_none(a: int | None, b: int | None) -> int | None:
     return b if a is None else (a if b is None else max(a, b))
+
+
+def _operator_scope_clause(
+    operator_id: str | None, since: datetime | None, column: str = "api_id",
+    *, keep_outer_index: bool = False,
+) -> tuple[list[str], list]:
+    """The server-side operator scope, as a SQL predicate rather than an id list (Task 8 fix
+    round 1). ``operator_api`` is keyed ``(operator_id, api_id)`` and carries that pair's
+    ``last_executed_at``, so "the APIs this operator executed at or after ``since``" is a range
+    scan of one operator's rows -- and the caller never has to materialize, cap, or ship those ids.
+    A capped id list was the bug: 100 ids meant a 16k-API operator's panel covered 100 APIs.
+
+    ``keep_outer_index`` writes the term as ``+api_id IN (...)``. The unary ``+`` is SQLite's
+    "do not treat this as an indexable term" marker, and it is what the callers whose outer query
+    already NEEDS an index want: without it the planner drives ``rollup_day`` off
+    ``idx_rollup_day_api_day`` (one seek per scoped API) and ``runs`` off
+    ``idx_runs_api_executed_at``, losing the day range and the newest-first ORDER BY to a temp
+    b-tree. Measured on the 450k-run mid set: the evidence scan goes 190ms -> 66ms and the rollup
+    fold 147ms -> 113ms for a 16k-API scope, at a bounded ~50ms cost for a tiny one (whose plan
+    then matches the unscoped query's, which is inside its own SLO by construction).
+    """
+    if operator_id is None:
+        return [], []
+    prefix = "+" if keep_outer_index else ""
+    sql = f"{prefix}{column} IN (SELECT api_id FROM operator_api WHERE operator_id = ?"
+    params: list = [operator_id]
+    if since is not None:
+        sql += " AND last_executed_at >= ?"
+        params.append(_iso(since))
+    return [sql + ")"], params
 
 
 def _window_partitions(
@@ -704,7 +742,7 @@ class Store:
     def _runs_predicates(
         *, since: datetime | None = None, until: datetime | None = None, status: str | None = None,
         api_id: str | None = None, api_ids: Sequence[str] | None = None, executed_by: str | None = None,
-        job_id: str | None = None,
+        job_id: str | None = None, scope_operator: str | None = None, scope_since: datetime | None = None,
     ) -> tuple[list[str], list]:
         clauses: list[str] = []
         params: list = []
@@ -734,6 +772,10 @@ class Store:
         if job_id is not None:
             clauses.append("job_id = ?")
             params.append(job_id)
+        scope_clauses, scope_params = _operator_scope_clause(
+            scope_operator, scope_since, keep_outer_index=True)
+        clauses.extend(scope_clauses)
+        params.extend(scope_params)
         return clauses, params
 
     def list_runs(self, q: RunsQuery) -> Page[RunResult]:
@@ -865,7 +907,13 @@ class Store:
           ``env`` / ``failed_rule`` / ``http_status`` axes, which have no materialized source.
         * ``run_ids`` -- exact newest-50 for the api/env/cell axes (one indexed query per returned
           group); for the two map-keyed axes they come from one bounded newest-first scan
-          (``_RUN_ID_SCAN_CAP`` rows), so a rare key in a huge window can return fewer than 50.
+          (``_RUN_ID_SCAN_CAP`` rows), so a rare key in a huge window can return fewer than 50 --
+          or, if every run of that key is older than the newest ``_RUN_ID_SCAN_CAP``, NONE at all
+          (``run_ids == []`` with a non-zero ``count``). ``q.include_run_ids=False`` skips the fill
+          entirely (and with it ``api_sample``, which the same scan produces).
+        * ``regression_suspect`` on the api axis is additionally windowed: the watermark's
+          ``first_non_pass_at`` must fall at or after ``q.since``, the same predicate
+          ``summarize_insights`` counts with -- one definition of "regression suspect", not two.
         * the window is exact: whole days come from the rollup, the partial first/last day from an
           indexed GROUP BY over ``runs`` (pure SQL, no RunResult is ever built).
         """
@@ -892,7 +940,8 @@ class Store:
             for key, row, counts in ((k, r, _counts(r, status)) for k, r in top)
             if counts[0] > 0
         ]
-        self._fill_run_ids(groups, q)
+        if q.include_run_ids:
+            self._fill_run_ids(groups, q)
         self._fill_derived(groups, q, apis)
         return groups
 
@@ -911,6 +960,13 @@ class Store:
             placeholders = ",".join("?" for _ in q.scope_api_ids)
             clauses.append(f"api_id IN ({placeholders})" if q.scope_api_ids else "0")
             params.extend(q.scope_api_ids)
+        # The operator scope's window lower bound is the QUERY's own `since` -- "the APIs this
+        # operator executed inside the window we are aggregating", which is the only bound that
+        # makes the scoped aggregate self-consistent.
+        scope_clauses, scope_params = _operator_scope_clause(
+            q.scope_operator, q.since, keep_outer_index=True)
+        clauses.extend(scope_clauses)
+        params.extend(scope_params)
         return clauses, params
 
     def _tuples(self, sql: str, params: Sequence) -> list[tuple]:
@@ -971,7 +1027,10 @@ class Store:
         """The partial day(s) a window starts/ends inside, counted EXACTLY from ``runs`` with an
         indexed range predicate -- one grouped SQL statement, no RunResult built. This is what
         keeps a 09:00→09:00 briefing window from being rounded out to two whole local days."""
-        clauses, params = self._runs_predicates(since=lo, until=hi, api_ids=q.scope_api_ids)
+        clauses, params = self._runs_predicates(
+            since=lo, until=hi, api_ids=q.scope_api_ids,
+            scope_operator=q.scope_operator, scope_since=q.since,
+        )
         where_sql = " AND ".join(clauses)
         counters = "COUNT(*) AS c, SUM(status = 'fail') AS f, SUM(status = 'error') AS e"
         if q.group_by == "failed_rule":
@@ -1009,11 +1068,18 @@ class Store:
     def _fill_run_ids(self, groups: list[RunGroup], q: AggregateQuery) -> None:
         """Newest-first run ids (<= MAX_RUN_IDS) for each returned group. The api/env/cell axes get
         one indexed query per group (at most ``q.limit`` of them); the two map-keyed axes cannot be
-        expressed as an indexed predicate, so they share ONE bounded newest-first scan."""
+        expressed as an indexed predicate, so they share ONE bounded newest-first scan.
+
+        The operator scope is applied only where the group key does NOT already pin ``api_id``:
+        on the ``api`` and ``api_env_data`` axes the key IS an api_id that the rollup fold already
+        filtered through the scope, so repeating the ``operator_api`` subquery in each of the up-to
+        ``q.limit`` per-group queries would only re-derive a decided fact -- at measurable cost."""
         if not groups:
             return
+        key_pins_api = q.group_by in ("api", "api_env_data")
         base_clauses, base_params = self._runs_predicates(
             since=q.since, until=q.until, status=q.status, api_ids=q.scope_api_ids,
+            scope_operator=None if key_pins_api else q.scope_operator, scope_since=q.since,
         )
         if q.group_by in _MAP_COLUMN:
             self._fill_run_ids_by_scan(groups, q, base_clauses, base_params)
@@ -1045,6 +1111,17 @@ class Store:
     def _fill_run_ids_by_scan(
         self, groups: list[RunGroup], q: AggregateQuery, clauses: list[str], params: list,
     ) -> None:
+        """Evidence ids for the two map-keyed axes (``failed_rule`` / ``http_status``), whose key
+        lives inside a JSON column and so has no indexed predicate to query per group. ONE
+        newest-first scan of at most ``_RUN_ID_SCAN_CAP`` runs buckets every returned group at once.
+
+        **The bound is honest, not hidden:** a group whose runs are ALL older than the newest
+        ``_RUN_ID_SCAN_CAP`` in the window gets ``run_ids == []`` (and an empty ``api_sample``)
+        while still reporting its true ``count``/``fail``/``error`` from the rollup -- the counters
+        are exact, the evidence sample is best-effort. A rarer key that appears only near the end of
+        the scan gets fewer than ``MAX_RUN_IDS`` ids for the same reason. Consumers must tolerate an
+        empty list: the ``run_groups`` card renders the row and simply omits its "attach" button,
+        and ``InsightCandidate.ref_ids`` is an optional evidence field."""
         wanted = {g.key: g for g in groups}
         buckets: dict[str, list[str]] = {key: [] for key in wanted}
         api_samples: dict[str, list[str]] = {key: [] for key in wanted}
@@ -1086,7 +1163,12 @@ class Store:
 
     def _fill_derived(self, groups: list[RunGroup], q: AggregateQuery, apis: Mapping[str, ApiSpec]) -> None:
         """Fields no counter can carry: the api axis reads ``api_watermark`` (+ the catalogue's
-        updated_at) for spec §3's regression rule, the cell axis reads ``current_state``."""
+        updated_at) for spec §3's regression rule, the cell axis reads ``current_state``.
+
+        The regression rule carries the QUERY's window: an API whose first failure predates
+        ``q.since`` broke before the window opened and is not this window's regression. That is the
+        same predicate ``summarize_insights`` counts with and the same one the insight panel
+        selects suspects with -- one definition, three call sites."""
         if q.group_by == "api":
             marks = {w.api_id: w for w in self.watermarks([g.key for g in groups])}
             for group in groups:
@@ -1103,6 +1185,7 @@ class Store:
                     updated_at is not None and mark.last_pass_at is not None
                     and mark.first_non_pass_at is not None
                     and mark.last_pass_at < updated_at <= mark.first_non_pass_at
+                    and (q.since is None or mark.first_non_pass_at >= q.since)
                 )
         elif q.group_by == "api_env_data":
             cells = {
@@ -1114,13 +1197,73 @@ class Store:
                 if cell is not None:
                     group.latest_status = cell.status
 
+    def summarize_insights(
+        self, since: datetime, until: datetime | None = None, *, flaky_min: int,
+        scope_operator: str | None = None, briefing_tz: str = "Asia/Seoul",
+    ) -> Insights:
+        """The two Home/briefing tiles as two SQL COUNTs -- **not** a count over a ranked group
+        list (Task 8 fix round 1).
+
+        The old path counted ``g.flaky`` / ``g.regression_suspect`` over
+        ``aggregate_runs(limit=500)``, whose groups are ranked by ``(fail+error, count)``. A cell
+        that flips pass/fail/pass with ONE failure has the lowest possible rank, so at any real
+        size it never entered the top 500 and the flaky tile read 0 while the project was full of
+        flaky cells. Neither count below has a limit at all.
+
+        * flaky -- cells (api × env × test_data) whose ``transitions`` summed over the window's
+          WHOLE local days reach ``flaky_min``. Whole days only, exactly matching
+          ``aggregate_rollups``: ``_fold_edge_runs`` contributes no transitions either, so the tile
+          and a group's own ``flaky`` flag can never disagree. A window containing no whole day
+          (the 09:00→09:00 briefing window) therefore reports 0 flaky, as the groups do.
+        * regression -- spec §3's rule on ``api_watermark`` joined to the catalogue, with the
+          window predicate ``first_non_pass_at >= since`` that ``_fill_derived`` now also applies.
+          ``until`` does not bound it: the rule is anchored at the window's opening, so "broke
+          inside this window and is still broken" stays one predicate in all three call sites.
+        """
+        interior, _edges = _window_partitions(since, until, briefing_tz)
+        flaky = 0
+        if interior is not None:
+            clauses, params = _operator_scope_clause(scope_operator, since)
+            day_from, day_to = interior
+            if day_from is not None:
+                clauses.append("day >= ?")
+                params.append(day_from)
+            if day_to is not None:
+                clauses.append("day <= ?")
+                params.append(day_to)
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            flaky = self._conn.execute(
+                "SELECT COUNT(*) FROM (SELECT api_id, target_env, test_data_label FROM rollup_day "
+                f"{where_sql} GROUP BY api_id, target_env, test_data_label "
+                "HAVING SUM(transitions) >= ?)",
+                [*params, flaky_min],
+            ).fetchone()[0]
+
+        clauses, params = _operator_scope_clause(scope_operator, since, column="w.api_id")
+        clauses.append("w.last_pass_at IS NOT NULL AND w.first_non_pass_at IS NOT NULL")
+        clauses.append("w.last_pass_at < a.updated_at AND a.updated_at <= w.first_non_pass_at")
+        clauses.append("w.first_non_pass_at >= ?")
+        params.append(_iso(since))
+        regression = self._conn.execute(
+            "SELECT COUNT(*) FROM api_watermark w JOIN apis a ON a.api_id = w.api_id "
+            f"WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchone()[0]
+        return Insights(flaky=flaky, regression_suspect=regression)
+
     # -- current_state / watermarks / operator_scope: materialized reads (Task 5) ----------------
 
-    def current_state(self, scope_api_ids: Sequence[str] | None = None) -> list[CellState]:
+    def current_state(
+        self, scope_api_ids: Sequence[str] | None = None, *,
+        scope_operator: str | None = None, scope_since: datetime | None = None,
+    ) -> list[CellState]:
         """One indexed read of the materialized ``current_state`` table (PK
-        ``(api_id, target_env, test_data_label)``) -- no scan over ``runs``, no python pass."""
-        clauses: list[str] = []
-        params: list = []
+        ``(api_id, target_env, test_data_label)``) -- no scan over ``runs``, no python pass.
+
+        ``scope_operator`` is the server-side operator scope (a subquery on ``operator_api``),
+        with ``scope_since`` as its window lower bound -- the caller (``MockAtworks``) derives it
+        from ``scope_window_days`` because this read has no window of its own."""
+        clauses, params = _operator_scope_clause(scope_operator, scope_since)
         if scope_api_ids is not None:
             placeholders = ",".join("?" for _ in scope_api_ids)
             clauses.append(f"api_id IN ({placeholders})" if scope_api_ids else "0")
@@ -1134,7 +1277,8 @@ class Store:
 
     def watermarks(
         self, api_ids: Sequence[str] | None = None, first_non_pass_since: datetime | None = None,
-        last_non_pass_since: datetime | None = None,
+        last_non_pass_since: datetime | None = None, *,
+        scope_operator: str | None = None, scope_since: datetime | None = None,
     ) -> list[ApiWatermark]:
         """One indexed read of ``api_watermark`` (PK ``api_id``). Both ``*_since`` filters are
         plain SQL predicates: a NULL column fails them, which is exactly the recompute oracle's
@@ -1142,9 +1286,11 @@ class Store:
 
         ``first_non_pass_since`` = the API's FIRST-EVER failure is at/after the cutoff (a newly
         broken API). ``last_non_pass_since`` = the API has SOME failure at/after the cutoff --
-        the exact set a ``failed_since`` selection means, and the reason both exist."""
-        clauses: list[str] = []
-        params: list = []
+        the exact set a ``failed_since`` selection means, and the reason both exist.
+
+        ``scope_operator``/``scope_since`` add the server-side operator scope as a subquery on
+        ``operator_api`` -- never an id list on ``api_ids``, which has a cap and therefore a hole."""
+        clauses, params = _operator_scope_clause(scope_operator, scope_since)
         if api_ids is not None:
             placeholders = ",".join("?" for _ in api_ids)
             clauses.append(f"api_id IN ({placeholders})" if api_ids else "0")

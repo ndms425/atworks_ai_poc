@@ -349,6 +349,25 @@ async def test_run_groups_joins_session_groups_and_carries_population():
     assert payload["items"][0]["fail"] == 3 and payload["items"][1]["error"] == 1
 
 
+async def test_run_groups_renders_a_group_whose_evidence_scan_found_nothing():
+    """Fix round 1 (G): ``Store._fill_run_ids_by_scan`` is bounded, so a failed_rule/http_status
+    group whose runs are all older than the newest ``_RUN_ID_SCAN_CAP`` comes back with exact
+    counters and ``run_ids == []``. The card must still show the row (the web omits only its
+    "attach" button) — an empty evidence list is not a refusal."""
+    state = AtworksSessionState()
+    state.remember_groups("failed_rule", [
+        RunGroup(key="amount <= limit", label="amount <= limit", count=7, fail=7, error=0, passed=0, run_ids=[]),
+    ], None)
+    state.last_population = 9
+
+    outcome = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"],
+                                     {"group_keys": ["amount <= limit"]}, _ctx(state), "Shown.")
+
+    payload = outcome.events[0].data["payload"]
+    assert payload["shown"] == 1 and payload["items"][0]["count"] == 7
+    assert payload["items"][0]["run_ids"] == []
+
+
 async def test_run_groups_refuses_without_an_aggregate_call():
     outcome = await run_presentation(PRESENTATION_COMPONENTS["present_run_groups"], {"group_keys": ["x"]},
                                      _ctx(AtworksSessionState()), "Shown.")

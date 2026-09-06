@@ -23,6 +23,7 @@ from atworks_agent import (
     FormatBatchLedger,
     FormatDefinition,
     FormatLibrary,
+    Insights,
     JobDraft,
     JobLedger,
     JobSpec,
@@ -255,12 +256,33 @@ class MockAtworks(AtworksBackend):
             briefing_tz=self._config.briefing_tz,
         )
 
-    async def current_state(self, session, scope_api_ids=None) -> list[CellState]:
-        return self.store.current_state(scope_api_ids)
+    async def summarize_insights(self, session, since, until=None, scope_operator=None) -> Insights:
+        # Two SQL counts, no group list: the flaky/regression tiles cannot saturate at a limit
+        # any more (see Store.summarize_insights for why the old top-500 count read 0).
+        return self.store.summarize_insights(
+            since, until, flaky_min=self._config.flaky_min_transitions,
+            scope_operator=scope_operator, briefing_tz=self._config.briefing_tz,
+        )
+
+    def _scope_since(self, session) -> datetime:
+        """The operator-scope window's lower bound for the two reads that have no window of their
+        own (``current_state`` / ``watermarks``): ``scope_window_days``, the same bound
+        ``operator_scope`` uses -- so "the operator's APIs" means one thing everywhere."""
+        now = session.local_now() if session is not None else None
+        return (now or datetime.now(UTC)) - timedelta(days=self._config.scope_window_days)
+
+    async def current_state(self, session, scope_api_ids=None, scope_operator=None) -> list[CellState]:
+        return self.store.current_state(
+            scope_api_ids, scope_operator=scope_operator,
+            scope_since=self._scope_since(session) if scope_operator else None,
+        )
 
     async def watermarks(self, session, api_ids=None, first_non_pass_since=None,
-                         last_non_pass_since=None) -> list[ApiWatermark]:
-        return self.store.watermarks(api_ids, first_non_pass_since, last_non_pass_since)
+                         last_non_pass_since=None, scope_operator=None) -> list[ApiWatermark]:
+        return self.store.watermarks(
+            api_ids, first_non_pass_since, last_non_pass_since, scope_operator=scope_operator,
+            scope_since=self._scope_since(session) if scope_operator else None,
+        )
 
     async def operator_scope(self, session, operator_id: str, window_days: int) -> ScopeSummary:
         now = session.local_now() or datetime.now(UTC)

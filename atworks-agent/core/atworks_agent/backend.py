@@ -20,6 +20,7 @@ from .types import (
     CellState,
     ComparisonProfile,
     FormatBatch,
+    Insights,
     JobSpec,
     OperatorProfile,
     Page,
@@ -90,29 +91,60 @@ class AtworksBackend(ABC):
         """q.group_by로 실행 이력을 묶는다(원인별/계별/API별). 숫자는 전부 host가 계산하고, 모델은
         어떤 그룹을 보여줄지만 고른다. q.scope_api_ids가 주어지면 그 API로만 스코프를 좁힌다.
         q.status가 주어지면 각 그룹은 그 판정에 해당하는 건수만 보고한다(non_pass = fail+error).
+        q.scope_operator가 주어지면 그 오퍼레이터가 창 안에서 실행한 API로만 좁힌다(아래).
+        q.include_run_ids=False면 run_ids를 채우지 않는다(카운터만 쓰는 호출자용).
 
         REST 구현 의무(scale spec §9): 이 읽기는 **표본이 아니다** — 창 안의 모든 API가 그룹으로
         나와야 하고(롤업 합산), 정렬은 ``(fail+error) DESC, count DESC, key ASC``, 잘림은 오직
         ``q.limit``이다. ``run_ids``는 그룹당 최신 50건 이하의 증거 표본일 뿐 모집단이 아니며,
-        ``api_count``는 한 키가 걸친 API의 **참** 개수(len(run_ids)가 아니다)다."""
+        ``api_count``는 한 키가 걸친 API의 **참** 개수(len(run_ids)가 아니다)다.
+        ``q.scope_operator``는 **서버 측 조인/필터**로 구현한다 — 오퍼레이터의 API id 목록을 받아
+        ``scope_api_ids``에 싣는 방식은 금지다(그 목록엔 상한이 있고, 상한은 곧 커버리지 구멍이다).
+        스코프 = "이 오퍼레이터가 창 안에서 실행한 API"이고, 창의 하한은 이 질의의 ``since``다."""
+
+    @abstractmethod
+    async def summarize_insights(
+        self, session: AtworksSessionContext, since: datetime, until: datetime | None = None,
+        scope_operator: str | None = None,
+    ) -> Insights:
+        """창 안의 flaky/regression 의심 **개수** 둘. Home 타일(``/runs/insights``)과 일일 브리핑이
+        읽는다.
+
+        REST 구현 의무: 그룹 목록을 받아 세는 게 아니라 **집계 질의 2개**로 답한다 — (1) flaky =
+        창 안 셀(api×env×test_data) 중 전이 합계가 ``flaky_min_transitions`` 이상인 셀의 개수,
+        (2) regression = ``last_pass_at < api.updated_at <= first_non_pass_at``이면서
+        ``first_non_pass_at >= since``인 API의 개수. 상위 N개 그룹을 세는 구현은 **틀린다**:
+        실패 건수로 정렬한 상위 N에 "실패 1건짜리 불안정 셀"은 영영 들어오지 못한다.
+        ``scope_operator``는 ``aggregate_runs``와 같은 서버 측 스코프 술어다."""
 
     @abstractmethod
     async def current_state(
-        self, session: AtworksSessionContext, scope_api_ids: list[str] | None = None
+        self, session: AtworksSessionContext, scope_api_ids: list[str] | None = None,
+        scope_operator: str | None = None,
     ) -> list[CellState]:
         """api_id × target_env × test_data_label 셀마다 최신 상태 1행(물질화 뷰). transitions_total은
-        그 셀의 시간순 상태 시퀀스에서 계산한다."""
+        그 셀의 시간순 상태 시퀀스에서 계산한다.
+
+        REST 구현 의무: ``scope_operator``는 "그 오퍼레이터가 최근 ``scope_window_days`` 안에 실행한
+        API"라는 **서버 측** 술어다(오퍼레이터×API 색인 조인). 이 읽기엔 질의 창이 없으므로 하한은
+        서버가 가진 ``scope_window_days``이고, 그래야 ``operator_scope``의 스코프 정의와 한 벌로
+        유지된다. 오퍼레이터의 id 목록을 받아 ``scope_api_ids``로 거르는 구현은 금지다."""
 
     @abstractmethod
     async def watermarks(
         self, session: AtworksSessionContext, api_ids: list[str] | None = None,
         first_non_pass_since: datetime | None = None, last_non_pass_since: datetime | None = None,
+        scope_operator: str | None = None,
     ) -> list[ApiWatermark]:
         """API별 pass/non-pass 워터마크. flaky/regression 판정을 전체 히스토리 재스캔 없이 낸다.
         ``first_non_pass_since``는 "첫 실패가 이 시각 이후"(새로 깨진 API), ``last_non_pass_since``는
         "이 시각 이후 실패가 하나라도 있음"(``select_where.failed_since``가 뜻하는 바로 그 집합)이다.
         ``api_updated_at``은 카탈로그의 ``ApiSpec.updated_at``을 그대로 실어 회귀 규칙
-        (``last_pass_at < api.updated_at <= first_non_pass_at``)이 조인 없이 풀리게 한다."""
+        (``last_pass_at < api.updated_at <= first_non_pass_at``)이 조인 없이 풀리게 한다.
+
+        REST 구현 의무: ``scope_operator``는 ``current_state``와 같은 서버 측 스코프 술어다 — "그
+        오퍼레이터가 최근 ``scope_window_days`` 안에 실행한 API"를 조인/필터로 풀고, 오퍼레이터의
+        api_id 목록을 받아 ``api_ids``에 싣는 식으로는 절대 구현하지 않는다."""
 
     @abstractmethod
     async def operator_scope(

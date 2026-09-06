@@ -16,6 +16,7 @@ from pathlib import Path
 
 from atworks_agent import (
     ActorKind,
+    AggregateQuery,
     ApiSpec,
     AtworksAgentConfig,
     AtworksSessionContext,
@@ -40,9 +41,15 @@ def _api(api_id: str, updated_at: datetime, path: str | None = None) -> ApiSpec:
 
 def _run(run_id: str, api_id: str, at: datetime, *, status: RunStatus, env: str = "dev",
          label: str | None = None, rules: tuple[str, ...] = (), job_id: str | None = None,
-         http: int = 200) -> RunResult:
+         http: int = 200, executed_by: str | None = None) -> RunResult:
     return RunResult(run_id=run_id, api_id=api_id, executed_at=at, target_env=env, test_data_label=label,
-                     status=status, failed_rules=list(rules), http_status=http, duration_ms=100, job_id=job_id)
+                     status=status, failed_rules=list(rules), http_status=http, duration_ms=100, job_id=job_id,
+                     executed_by=executed_by)
+
+
+async def _noop_narrator(candidates, role, *, notes=None):
+    del candidates, role, notes
+    return []
 
 
 # -- get_context: no unbounded run scan, no body read -------------------------------------------
@@ -153,6 +160,222 @@ async def test_panel_top_failed_rule_reports_the_true_api_count(tmp_path):
     # the rollup's COUNT(DISTINCT api_id), not a sample
     assert rule.figures["apis"] == 25
     assert len(rule.api_ids) <= 20
+
+
+# -- fix round 1 (A): exact operator scope, no id list ------------------------------------------
+
+
+def _wide_operator_backend(now: datetime, config: AtworksAgentConfig) -> MockAtworks:
+    """One operator who has executed 150 distinct APIs, whose ONLY regression suspect is
+    ``api-149`` — alphabetically last, so it sits far outside ``ScopeSummary.api_ids``' 100-id
+    sample (``operator_scope_summary`` orders by api_id and takes the first 100)."""
+    backend = MockAtworks(config, FIXTURES)
+    broke_at = now - timedelta(days=10)
+    apis = {f"api-{i:03d}": _api(f"api-{i:03d}", now - timedelta(days=300)) for i in range(150)}
+    # the suspect's spec was updated between its last pass and its first failure
+    apis["api-149"] = _api("api-149", broke_at - timedelta(hours=1))
+    backend.apis = apis
+
+    runs: dict[str, RunResult] = {}
+    for i in range(150):
+        runs[f"run-p-{i:03d}"] = _run(f"run-p-{i:03d}", f"api-{i:03d}", broke_at - timedelta(hours=2),
+                                      status=RunStatus.PASS, executed_by="minseong")
+    for i in range(1, 4):
+        runs[f"run-reg-{i}"] = _run(f"run-reg-{i}", "api-149", broke_at + timedelta(hours=i),
+                                    status=RunStatus.FAIL, rules=("regressed >= 0",), executed_by="minseong")
+    backend.runs = runs
+    return backend
+
+
+async def test_operator_scope_is_a_predicate_not_a_capped_id_list(tmp_path):
+    """The panel must cover EVERY API the operator ran, not the 100 that fit in ScopeSummary.
+
+    Before the fix, ``InsightPanels._inputs`` fed ``ScopeSummary.api_ids`` (<=100, api_id order)
+    into ``watermarks``/``AggregateQuery.scope_api_ids``/``current_state``, so a suspect on
+    ``api-149`` was outside the scope the panel actually queried and never became a candidate."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = _wide_operator_backend(now, config)
+
+    summary = await backend.operator_scope(SESSION, "minseong", config.scope_window_days)
+    assert summary.total == 150 and len(summary.api_ids) == 100     # the sample really is short
+    assert "api-149" not in summary.api_ids                          # ...and really does miss it
+
+    panel = await InsightPanels(tmp_path, config, narrator=_noop_narrator).build(backend, SESSION, now)
+
+    assert panel.scope_size == 150 and panel.scope_fallback is False
+    assert "regression_suspect:api-149" in [i.candidate.candidate_id for i in panel.items]
+
+
+async def test_operator_scope_predicate_excludes_another_operators_apis(tmp_path):
+    """The predicate narrows as hard as the id list did: a regression on an API this operator
+    never ran is not their insight."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = _wide_operator_backend(now, config)
+    broke_at = now - timedelta(days=10)
+    apis = dict(backend.apis)
+    apis["api-other"] = _api("api-other", broke_at - timedelta(hours=1))
+    backend.apis = apis
+    runs = dict(backend.runs)
+    runs["run-o-0"] = _run("run-o-0", "api-other", broke_at - timedelta(hours=2),
+                           status=RunStatus.PASS, executed_by="jiwoo")
+    runs["run-o-1"] = _run("run-o-1", "api-other", broke_at + timedelta(hours=1),
+                           status=RunStatus.FAIL, rules=("regressed >= 0",), executed_by="jiwoo")
+    backend.runs = runs
+
+    panel = await InsightPanels(tmp_path, config, narrator=_noop_narrator).build(backend, SESSION, now)
+    ids = [i.candidate.candidate_id for i in panel.items]
+    assert "regression_suspect:api-149" in ids and "regression_suspect:api-other" not in ids
+
+
+async def test_regression_suspects_are_cut_newest_break_first(tmp_path):
+    """Fix (D): the panel queries at most ``_GROUP_LIMIT`` suspects. Cutting them in api_id order
+    hid the FRESHEST regression behind fifty older ones; the cut is now by first_non_pass_at DESC.
+    Here 60 APIs broke and the newest break is on the alphabetically last one."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    apis, runs = {}, {}
+    for i in range(60):
+        api_id = f"api-{i:03d}"
+        broke_at = now - timedelta(days=25) + timedelta(days=i * 0.3)
+        apis[api_id] = _api(api_id, broke_at - timedelta(hours=1))
+        runs[f"run-{api_id}-p"] = _run(f"run-{api_id}-p", api_id, broke_at - timedelta(hours=2),
+                                       status=RunStatus.PASS)
+        # api-059 (newest break) also fails loudest, so it wins the candidate ranking IF the
+        # suspect cut let it through at all — which api_id order never did.
+        for k in range(5 if i == 59 else 1):
+            runs[f"run-{api_id}-f{k}"] = _run(f"run-{api_id}-f{k}", api_id, broke_at + timedelta(minutes=k),
+                                              status=RunStatus.FAIL, rules=("regressed >= 0",))
+    backend.apis = apis
+    backend.runs = runs
+
+    panel = await InsightPanels(tmp_path, config, narrator=_noop_narrator).build(backend, SESSION, now)
+    ids = [i.candidate.candidate_id for i in panel.items]
+    assert "regression_suspect:api-059" in ids       # the newest break, 60th in api_id order
+    assert "regression_suspect:api-000" not in ids   # the oldest break, cut as it should be
+
+
+# -- fix round 1 (B): honest flaky / regression tiles --------------------------------------------
+
+
+def _saturating_backend(now: datetime, config: AtworksAgentConfig) -> MockAtworks:
+    """>500 cells carrying failures, plus ONE flaky cell whose failure count is the lowest in the
+    project. Every aggregate group is ranked by (fail+error, count), so the flaky cell sorts dead
+    last — beyond any limit the old tile counted over."""
+    backend = MockAtworks(config, FIXTURES)
+    apis = {f"api-{i:04d}": _api(f"api-{i:04d}", now - timedelta(days=300)) for i in range(600)}
+    apis["api-flaky"] = _api("api-flaky", now - timedelta(days=300))
+    backend.apis = apis
+
+    runs: dict[str, RunResult] = {}
+    base = now - timedelta(days=5)
+    for i in range(600):                       # 600 loud cells, 3 failures each
+        for k in range(3):
+            runs[f"run-l-{i:04d}-{k}"] = _run(f"run-l-{i:04d}-{k}", f"api-{i:04d}",
+                                              base + timedelta(minutes=k), status=RunStatus.FAIL,
+                                              rules=("loud >= 0",))
+    # one quiet cell: pass -> fail -> pass = 2 transitions (flaky_min_transitions) on ONE failure
+    for k, status in enumerate((RunStatus.PASS, RunStatus.FAIL, RunStatus.PASS)):
+        runs[f"run-f-{k}"] = _run(f"run-f-{k}", "api-flaky", base + timedelta(hours=k), status=status,
+                                  rules=("quiet >= 0",) if status is RunStatus.FAIL else ())
+    backend.runs = runs
+    return backend
+
+
+async def test_flaky_tile_counts_a_quiet_cell_a_ranked_group_list_never_reaches():
+    """The tile is two SQL counts now. Counting ``g.flaky`` over ``aggregate_runs(limit=500)``
+    could not see this cell: 600 louder cells outrank it, so the old tile reported 0 flaky on a
+    project that has one."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = _saturating_backend(now, config)
+    since = now - timedelta(days=config.max_aggregate_window_days)
+
+    groups = await backend.aggregate_runs(SESSION, AggregateQuery(
+        since=since, group_by="api_env_data", limit=500))
+    assert len(groups) == 500 and not any(g.flaky for g in groups)   # the old count really is 0
+
+    insights = await backend.summarize_insights(SESSION, since=since)
+    assert insights.flaky == 1
+
+
+async def test_summarize_insights_matches_the_aggregate_when_nothing_saturates():
+    """On a project small enough for the group list to hold everything, the SQL counts and the
+    group-derived counts agree exactly — the fix removes a ceiling, it does not move a number."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    since = now - timedelta(days=config.max_aggregate_window_days)
+    base = now - timedelta(days=3)
+    backend.apis = {"api-a": _api("api-a", base - timedelta(hours=3)),
+                    "api-b": _api("api-b", now - timedelta(days=300))}
+    backend.runs = {
+        "r0": _run("r0", "api-a", base - timedelta(hours=4), status=RunStatus.PASS),
+        "r1": _run("r1", "api-a", base, status=RunStatus.FAIL, rules=("x >= 0",)),
+        "r2": _run("r2", "api-b", base, status=RunStatus.PASS),
+        "r3": _run("r3", "api-b", base + timedelta(hours=1), status=RunStatus.FAIL, rules=("x >= 0",)),
+        "r4": _run("r4", "api-b", base + timedelta(hours=2), status=RunStatus.PASS),
+    }
+    cells = await backend.aggregate_runs(SESSION, AggregateQuery(since=since, group_by="api_env_data", limit=500))
+    by_api = await backend.aggregate_runs(SESSION, AggregateQuery(since=since, group_by="api", limit=500))
+
+    insights = await backend.summarize_insights(SESSION, since=since)
+    assert insights.flaky == sum(1 for g in cells if g.flaky) == 1            # api-b's cell
+    assert insights.regression_suspect == sum(1 for g in by_api if g.regression_suspect) == 1
+
+
+async def test_briefing_insights_block_equals_the_sql_counts(tmp_path):
+    now = datetime(2026, 9, 3, 9, 5, tzinfo=KST)
+    config = AtworksAgentConfig(model="m")
+    briefings = Briefings(tmp_path / "b", config)
+    backend = _saturating_backend(now.astimezone(UTC), config)
+
+    path = await briefings.generate(backend, SESSION, now)
+    data = json.loads((path.parent / "data.json").read_text(encoding="utf-8"))
+
+    expected = await backend.summarize_insights(
+        SESSION, since=now - timedelta(days=config.max_aggregate_window_days))
+    assert data["insights"] == expected.model_dump()
+    assert data["insights"]["flaky"] == 1        # and not the 0 a top-500 group count reported
+
+
+# -- fix round 1 (C): include_run_ids ------------------------------------------------------------
+
+
+async def test_include_run_ids_false_drops_the_per_group_evidence_queries():
+    """``run_ids`` costs one indexed query per returned group on the api/env/cell axes. A caller
+    that only wants the counters says so and pays for none of them."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    backend.apis = {f"api-{i:03d}": _api(f"api-{i:03d}", now - timedelta(days=300)) for i in range(20)}
+    backend.runs = {
+        f"run-{i:03d}": _run(f"run-{i:03d}", f"api-{i % 20:03d}", now - timedelta(days=2, minutes=i),
+                             status=RunStatus.FAIL, rules=("x >= 0",))
+        for i in range(200)
+    }
+    since = now - timedelta(days=config.max_aggregate_window_days)
+
+    def count(include: bool) -> tuple[int, list]:
+        statements: list[str] = []
+        backend.store.conn().set_trace_callback(statements.append)
+        try:
+            groups = backend.store.aggregate_rollups(
+                AggregateQuery(since=since, group_by="api", include_run_ids=include, limit=50),
+                flaky_min=config.flaky_min_transitions, apis=backend.apis)
+        finally:
+            backend.store.conn().set_trace_callback(None)
+        return len(statements), groups
+
+    with_ids, groups_with = count(True)
+    without_ids, groups_without = count(False)
+
+    assert len(groups_with) == len(groups_without) == 20
+    assert [(g.key, g.count, g.fail) for g in groups_with] == [(g.key, g.count, g.fail) for g in groups_without]
+    assert all(g.run_ids for g in groups_with) and not any(g.run_ids for g in groups_without)
+    assert without_ids == with_ids - 20      # exactly one saved query per returned group
 
 
 # -- daily briefing: query-driven, equal to the old run-list computation -------------------------

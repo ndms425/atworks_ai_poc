@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 TEMPLATE = Path(__file__).with_name("briefing_template.html")
 SAFE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 STALE_AFTER = timedelta(hours=24)
-# Groups asked of each aggregate read. flaky/regression are COUNTS over the returned groups, so
-# the two insight figures saturate here -- both are ranked by (fail+error, count), so the top 500
-# is where they live. The old path capped the same figures at a 2000-RUN sample, which could not
-# see most APIs at all.
+# Cause groups asked of the one aggregate read the briefing still makes; only the top 3 reach the
+# page. flaky/regression are NOT counted here any more -- they come from `backend.summarize_insights`
+# (two SQL counts, no limit), because counting them over a group list ranked by failure volume
+# meant a flaky cell with a single failure could never be seen at any real project size.
 _GROUP_LIMIT = 500
 
 
@@ -133,14 +133,10 @@ class Briefings:
         }
         groups = await backend.aggregate_runs(session, AggregateQuery(
             since=start, until=end, group_by="failed_rule", limit=_GROUP_LIMIT))
-        # the same two figures summarize_insights computes, over the aggregation window
-        since = now - timedelta(days=cfg.max_aggregate_window_days)
-        cells = await backend.aggregate_runs(session, AggregateQuery(
-            since=since, group_by="api_env_data", limit=_GROUP_LIMIT))
-        by_api = await backend.aggregate_runs(session, AggregateQuery(
-            since=since, group_by="api", limit=_GROUP_LIMIT))
-        insights = Insights(flaky=sum(1 for g in cells if g.flaky),
-                            regression_suspect=sum(1 for g in by_api if g.regression_suspect))
+        # the same two figures the oracle's summarize_insights computes, over the aggregation
+        # window — now two SQL counts with no limit, not a count over the top _GROUP_LIMIT groups
+        insights = await backend.summarize_insights(
+            session, since=now - timedelta(days=cfg.max_aggregate_window_days))
         runs_per_job = await backend.count_runs_by_job(session, since=start, until=end)
         jobs = (await backend.all_jobs(session, limit=1000)).items
         executed = [{"job_id": j.job_id, "summary": j.summary, "runs": runs_per_job[j.job_id]}

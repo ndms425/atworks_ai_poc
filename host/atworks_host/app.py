@@ -13,7 +13,6 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from atworks_agent import (
-    AggregateQuery,
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
@@ -128,12 +127,12 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         s = context(record)
         cfg = agent.config
         since = datetime.now(UTC) - timedelta(days=cfg.max_aggregate_window_days)
-        # Two rollup-fed aggregate reads, no run list: the flaky/regression tiles now count over
-        # every API in the window instead of the newest max_aggregate_runs runs (spec §9).
-        cells = await backend.aggregate_runs(s, AggregateQuery(since=since, group_by="api_env_data", limit=500))
-        by_api = await backend.aggregate_runs(s, AggregateQuery(since=since, group_by="api", limit=500))
-        return {"flaky": sum(1 for g in cells if g.flaky),
-                "regression_suspect": sum(1 for g in by_api if g.regression_suspect),
+        # Two SQL counts over the materialized tables — not a count over a ranked group list.
+        # Counting `g.flaky` across `aggregate_runs(limit=500)` saturated: those groups are ranked
+        # by failure VOLUME, and a cell that flips with one failure ranks last, so the tile read 0
+        # on exactly the projects that needed it. `summarize_insights` has no limit at all.
+        insights = await backend.summarize_insights(s, since=since)
+        return {"flaky": insights.flaky, "regression_suspect": insights.regression_suspect,
                 "window_days": cfg.max_aggregate_window_days}
 
     @router.get("/runs")

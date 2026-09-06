@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from commerce_common.skills import Skill, SkillRegistry
 
-from atworks_agent.aggregation import aggregate
+from atworks_agent.aggregation import aggregate, summarize_insights
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.cursor import decode_cursor, encode_cursor
@@ -101,18 +101,42 @@ class InMemoryBackend(AtworksBackend):
             and (api_id is None or r.api_id == api_id)
         )
 
+    def _scope_since(self):
+        return datetime.now(UTC) - timedelta(days=self._config.scope_window_days)
+
+    def _operator_scope_runs(self, scope_operator, since):
+        """The double's stand-in for the backend-side operator scope: the APIs this operator
+        executed at or after ``since`` (the Mock resolves the same set from ``operator_api``)."""
+        if scope_operator is None:
+            return None
+        return {r.api_id for r in self.runs
+                if r.executed_by == scope_operator and (since is None or r.executed_at >= since)}
+
     async def aggregate_runs(self, session, q):
         # Task 8: the executor now asks the BACKEND to group (the Mock does it over rollups).
         # This double has no rollups, so it groups its own run list with the same pure function
         # the oracle uses -- same output shape, same ordering contract.
+        scope = self._operator_scope_runs(q.scope_operator, q.since)
         rows = [r for r in self.runs
                 if (q.since is None or r.executed_at >= q.since)
                 and (q.until is None or r.executed_at < q.until)
                 and (q.scope_api_ids is None or r.api_id in q.scope_api_ids)
+                and (scope is None or r.api_id in scope)
                 and (q.status is None or (q.status == "non_pass" and r.status.value != "pass")
                      or r.status.value == q.status)]
-        return aggregate(rows, self.apis, q.group_by,
-                         flaky_min_transitions=self._config.flaky_min_transitions)[: q.limit]
+        groups = aggregate(rows, self.apis, q.group_by,
+                           flaky_min_transitions=self._config.flaky_min_transitions)[: q.limit]
+        if not q.include_run_ids:
+            for g in groups:
+                g.run_ids = []
+        return groups
+
+    async def summarize_insights(self, session, since, until=None, scope_operator=None):
+        scope = self._operator_scope_runs(scope_operator, since)
+        rows = [r for r in self.runs
+                if r.executed_at >= since and (until is None or r.executed_at < until)
+                and (scope is None or r.api_id in scope)]
+        return summarize_insights(rows, self.apis, self._config)
 
     async def count_runs_by_job(self, session, since=None, until=None):
         counts: dict[str, int] = {}
@@ -123,15 +147,19 @@ class InMemoryBackend(AtworksBackend):
                 counts[r.job_id] = counts.get(r.job_id, 0) + 1
         return counts
 
-    async def current_state(self, session, scope_api_ids=None):
+    async def current_state(self, session, scope_api_ids=None, scope_operator=None):
         return []
 
-    async def watermarks(self, session, api_ids=None, first_non_pass_since=None, last_non_pass_since=None):
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None, last_non_pass_since=None,
+                         scope_operator=None):
         # Task 8: selection.resolve_select_where(failed_since) and the insight panel read this,
         # so the double computes real watermarks over its run list (the Mock materializes them).
         marks: list[ApiWatermark] = []
+        scope = self._operator_scope_runs(scope_operator, self._scope_since())
         for api_id in sorted({r.api_id for r in self.runs}):
             if api_ids is not None and api_id not in api_ids:
+                continue
+            if scope is not None and api_id not in scope:
                 continue
             rows = sorted((r for r in self.runs if r.api_id == api_id), key=lambda r: (r.executed_at, r.run_id))
             passes = [r.executed_at for r in rows if r.status.value == "pass"]

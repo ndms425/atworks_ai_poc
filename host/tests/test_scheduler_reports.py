@@ -203,10 +203,14 @@ class RecordingBackend(AtworksBackend):
     async def aggregate_runs(self, session, q):
         raise NotImplementedError
 
-    async def current_state(self, session, scope_api_ids=None):
+    async def summarize_insights(self, session, since, until=None, scope_operator=None):
         raise NotImplementedError
 
-    async def watermarks(self, session, api_ids=None, first_non_pass_since=None, last_non_pass_since=None):
+    async def current_state(self, session, scope_api_ids=None, scope_operator=None):
+        raise NotImplementedError
+
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None, last_non_pass_since=None,
+                         scope_operator=None):
         raise NotImplementedError
 
     async def operator_scope(self, session, operator_id, window_days):
