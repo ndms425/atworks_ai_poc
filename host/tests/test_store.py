@@ -1046,13 +1046,21 @@ def test_the_two_map_axes_read_rollup_key_day_unless_the_query_is_api_scoped():
 
     A query scoped to a SET OF APIs cannot use it -- a key row is already summed across every API
     that touched the key, and there is no api column left to filter -- so those keep the exact
-    `json_each` arm. Same numbers either way; that is what the second half asserts."""
+    `json_each` arm.
+
+    "Same numbers either way" is asserted over the same POPULATION: scoping to EVERY fixture api
+    forces the `json_each` arm on exactly the rows the fast arm folds, so every field of every
+    group must match -- `p95_duration_ms` included (round 2: the fast arm used to emit
+    `NULL AS q95` and answer None where the slow arm answered a number, for one logical query.
+    Both are the same max-merge approximation -- the max over the cell rows carrying the key --
+    not an exact percentile over the union; see `rollup_key_day`'s DDL comment)."""
     store = _store_with_fixtures()
     apis = _load_fixture_apis()
 
     def aggregate_with(q):
         return store.aggregate_rollups(q, flaky_min=2, apis=apis)
 
+    every_api = sorted(apis)
     for group_by in ("failed_rule", "http_status"):
         plain = AggregateQuery(group_by=group_by, limit=50)
         sql = " ".join(_statements(store, lambda q=plain: aggregate_with(q)))
@@ -1069,6 +1077,18 @@ def test_the_two_map_axes_read_rollup_key_day_unless_the_query_is_api_scoped():
         assert set(narrow) <= set(fast), group_by
         for key, group in narrow.items():
             assert group.count <= fast[key].count, key
+
+        # ...and over the SAME population the two arms are indistinguishable, p95 included
+        whole = AggregateQuery(group_by=group_by, limit=50, scope_api_ids=every_api)
+        whole_sql = " ".join(_statements(store, lambda q=whole: aggregate_with(q)))
+        assert "json_each" in whole_sql and "rollup_key_day" not in whole_sql, group_by
+        slow = {g.key: g for g in aggregate_with(whole)}
+        assert set(slow) == set(fast), group_by
+        assert any(g.p95_duration_ms is not None for g in fast.values()), group_by
+        for key, group in slow.items():
+            assert group.p95_duration_ms == fast[key].p95_duration_ms, key
+            assert (group.count, group.fail, group.error, group.api_count) == (
+                fast[key].count, fast[key].fail, fast[key].error, fast[key].api_count), key
 
     # the cell axes are untouched by any of this
     cell_sql = " ".join(_statements(
@@ -1111,6 +1131,66 @@ def test_rollup_key_day_is_backfilled_on_a_store_written_before_it_existed(tmp_p
     for row in after:
         row["api_ids"] = json.dumps(sorted(json.loads(row["api_ids"])), ensure_ascii=False)
     assert after == at_ingest
+
+
+# The `rollup_key_day` shape that shipped before round 2 -- no `p95_duration_ms`.
+_OLD_KEY_ROLLUP_DDL = """
+CREATE TABLE rollup_key_day (
+    day TEXT NOT NULL,
+    axis TEXT NOT NULL CHECK (axis IN ('failed_rule', 'http_status')),
+    key TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    fail INTEGER NOT NULL DEFAULT 0,
+    error INTEGER NOT NULL DEFAULT 0,
+    api_ids JSON NOT NULL DEFAULT '[]',
+    PRIMARY KEY (day, axis, key)
+);
+"""
+
+
+def test_p95_is_migrated_onto_a_key_rollup_written_before_the_column_existed(tmp_path):
+    """Round 2. `ALTER TABLE ADD COLUMN` leaves `p95_duration_ms` NULL on every row already in
+    `rollup_key_day`, and no ingest ever repairs them (the fold only touches the days a new batch
+    lands on) -- so the two map axes would keep answering None for every historical key while the
+    `json_each` arm answered a number. The migration therefore re-derives the whole table, which
+    is safe because it is a pure function of `rollup_day`."""
+    path = tmp_path / "old.sqlite"
+    store = Store(path)
+    store.load_fixtures(FIXTURES, briefing_tz="Asia/Seoul")
+    at_ingest = [dict(r) for r in store.conn().execute(
+        'SELECT * FROM rollup_key_day ORDER BY axis, day, "key"').fetchall()]
+    assert any(r["p95_duration_ms"] is not None for r in at_ingest)
+
+    # rewrite the table in its pre-round-2 shape, keeping every counter and api_ids as they were
+    conn = store.conn()
+    conn.execute("DROP TABLE rollup_key_day")
+    conn.executescript(_OLD_KEY_ROLLUP_DDL)
+    conn.executemany(
+        'INSERT INTO rollup_key_day (day, axis, "key", "count", fail, error, api_ids) '
+        "VALUES (?,?,?,?,?,?,?)",
+        [(r["day"], r["axis"], r["key"], r["count"], r["fail"], r["error"], r["api_ids"])
+         for r in at_ingest],
+    )
+    conn.commit()
+    assert "p95_duration_ms" not in {
+        c["name"] for c in conn.execute("PRAGMA table_info(rollup_key_day)").fetchall()}
+    conn.close()
+
+    reopened = Store(path)                                  # init_schema migrates AND re-derives
+    assert "p95_duration_ms" in {c["name"] for c in
+                                 reopened.conn().execute("PRAGMA table_info(rollup_key_day)").fetchall()}
+    def rows(store_: Store) -> list[dict]:
+        out = [dict(r) for r in store_.conn().execute(
+            'SELECT * FROM rollup_key_day ORDER BY axis, day, "key"').fetchall()]
+        for row in out:                                     # json_group_array's own spelling
+            row["api_ids"] = json.dumps(sorted(json.loads(row["api_ids"])), ensure_ascii=False)
+        return out
+
+    after = rows(reopened)
+    assert after == at_ingest
+    # a second open is a no-op: the column is there, so nothing is rebuilt
+    reopened.conn().close()
+    assert rows(Store(path)) == after
 
 
 def test_count_runs_by_api_id_query_plan_uses_an_index():

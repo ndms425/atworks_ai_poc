@@ -70,28 +70,36 @@ def _rollup_rows(store: Store) -> list[dict]:
         "SELECT * FROM rollup_day ORDER BY day, api_id, target_env, test_data_label").fetchall()]
 
 
-def _key_rollup_rows(store: Store) -> dict[tuple[str, str, str], tuple[int, int, int, tuple[str, ...]]]:
+def _key_rollup_rows(store: Store) -> dict[tuple[str, str, str], tuple]:
     return {
         (r["day"], r["axis"], r["key"]): (r["count"], r["fail"], r["error"],
-                                         tuple(sorted(json.loads(r["api_ids"]))))
+                                         tuple(sorted(json.loads(r["api_ids"]))),
+                                         r["p95_duration_ms"])
         for r in store.conn().execute('SELECT * FROM rollup_key_day').fetchall()
     }
 
 
-def _key_rollup_from_cells(store: Store) -> dict[tuple[str, str, str], tuple[int, int, int, tuple[str, ...]]]:
+def _key_rollup_from_cells(store: Store) -> dict[tuple[str, str, str], tuple]:
     """The same figures derived independently from `rollup_day`'s JSON maps -- the derivation
     `aggregate_rollups` USED to do inline with `json_each` on every read. `rollup_key_day` must
-    equal it exactly, or the fast path answers a different number from the slow one."""
+    equal it exactly, or the fast path answers a different number from the slow one.
+
+    `p95_duration_ms` included (round 2): the key rollup carries it as a LEVEL, the max over the
+    cell rows of that day carrying the key -- which is literally what the `json_each` arm's
+    `MAX(p95_duration_ms)` computes. Both are the same documented max-merge approximation."""
     derived: dict[tuple[str, str, str], list] = {}
     for row in _rollup_rows(store):
         for axis, column in (("failed_rule", "failed_rule_counts"), ("http_status", "http_status_counts")):
             for key, counts in json.loads(row[column] or "{}").items():
-                acc = derived.setdefault((row["day"], axis, key), [0, 0, 0, set()])
+                acc = derived.setdefault((row["day"], axis, key), [0, 0, 0, set(), None])
                 acc[0] += counts["count"]
                 acc[1] += counts["fail"]
                 acc[2] += counts["error"]
                 acc[3].add(row["api_id"])
-    return {k: (v[0], v[1], v[2], tuple(sorted(v[3]))) for k, v in derived.items()}
+                p95 = row["p95_duration_ms"]
+                if p95 is not None and (acc[4] is None or p95 > acc[4]):
+                    acc[4] = p95
+    return {k: (v[0], v[1], v[2], tuple(sorted(v[3])), v[4]) for k, v in derived.items()}
 
 
 def _snapshot(store: Store) -> dict:
@@ -145,6 +153,33 @@ def test_a_failure_inside_ingest_rolls_the_whole_batch_back(monkeypatch):
     assert store.run_count() == len(committed) + len(doomed)
     rollup_total = store.conn().execute('SELECT SUM("count") FROM rollup_day').fetchone()[0]
     assert rollup_total == len(committed) + len(doomed)
+
+
+def test_a_failure_inside_replace_all_runs_leaves_the_old_runs_in_place(monkeypatch):
+    """Round 2. ``replace_all_runs`` committed its three DELETEs and only THEN opened ``ingest``'s
+    own transaction, so a failure in the reload rolled back the reload alone and left the store
+    EMPTY -- the same half-move ``replace_all_apis`` was fixed for. ``_transaction`` is re-entrant
+    now, so the DELETEs and the reload are one all-or-nothing transaction."""
+    store = Store(":memory:")
+    store.load_apis(APIS.values())
+    store.ingest(_random_runs(seed=20260906, count=25), "Asia/Seoul")
+    before = _snapshot(store)
+    assert before["runs"] and before["rollup_key_day"]
+
+    def explode(self, fresh):
+        raise RuntimeError("materialize blew up")
+
+    monkeypatch.setattr(Store, "_materialize", explode)
+    with pytest.raises(RuntimeError):
+        store.replace_all_runs(_random_runs(seed=11, count=9), "Asia/Seoul")
+
+    assert not store.conn().in_transaction
+    assert _snapshot(store) == before                    # runs AND every materialized table
+
+    monkeypatch.undo()                                  # ...and a good replacement still replaces
+    replacement = _random_runs(seed=11, count=9)
+    store.replace_all_runs(replacement, "Asia/Seoul")
+    assert store.run_count() == len(replacement)
 
 
 # -- property: incremental ingest == recompute from scratch --------------------------------------
@@ -236,7 +271,7 @@ def test_incremental_ingest_matches_the_recompute_oracles():
     for group_by in ("failed_rule", "http_status"):
         expected = {g.key: g for g in aggregate(runs, APIS, group_by, flaky_min_transitions=3)}
         stored: dict[str, list] = {}
-        for (_day, axis, key), (count, fail, error, api_ids) in _key_rollup_rows(store).items():
+        for (_day, axis, key), (count, fail, error, api_ids, _p95) in _key_rollup_rows(store).items():
             if axis != group_by:
                 continue
             acc = stored.setdefault(key, [0, 0, 0, set()])

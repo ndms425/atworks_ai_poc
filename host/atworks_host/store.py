@@ -41,6 +41,7 @@ from atworks_agent import (
     ApiWatermark,
     AuditEntry,
     CellKey,
+    CellKeyLevel,
     CellState,
     Insights,
     KeyCounts,
@@ -182,6 +183,11 @@ CREATE INDEX IF NOT EXISTS idx_rollup_day_api_day ON rollup_day(api_id, day);
 -- `api_ids` is the set of APIs that contributed to that (day, key): a per-day COUNT cannot be
 -- summed across the window without double-counting, and `RunGroup.api_count` promises the TRUE
 -- distinct total, so the union is taken over the ids themselves for the returned keys only.
+-- `p95_duration_ms` is carried for the same reason `api_ids` is: without it the fast arm answered
+-- NULL while the `json_each` arm answered `MAX(rollup_day.p95_duration_ms)` for the same logical
+-- query. It is a LEVEL, not a counter -- the max over the cell rows of that day carrying the key,
+-- the same documented max-merge approximation `rollup_day.p95_duration_ms` itself uses (spec §4);
+-- see `materialize.CellKeyLevel` for why the merge reads the POST-MERGE cell row.
 -- The CHECK pins the axis vocabulary to `materialize.KEY_AXES`.
 CREATE TABLE IF NOT EXISTS rollup_key_day (
     day TEXT NOT NULL,
@@ -190,6 +196,7 @@ CREATE TABLE IF NOT EXISTS rollup_key_day (
     count INTEGER NOT NULL DEFAULT 0,
     fail INTEGER NOT NULL DEFAULT 0,
     error INTEGER NOT NULL DEFAULT 0,
+    p95_duration_ms INTEGER,
     api_ids JSON NOT NULL DEFAULT '[]',
     PRIMARY KEY (day, axis, key)
 );
@@ -468,10 +475,11 @@ def _group_from_acc(
     )
 
 
-def _merge_key_counts(stored: str | None, delta: Mapping[str, KeyCounts]) -> str:
+def _merge_key_counts(stored: str | None, delta: Mapping[str, KeyCounts]) -> dict[str, dict[str, int]]:
     """Fold a batch's ``{key: KeyCounts}`` map into the JSON already on the rollup row and return
-    the JSON to store back. Values are ``{"count","fail","error"}`` objects, not bare ints --
-    see ``materialize.KeyCounts``."""
+    the merged map. Values are ``{"count","fail","error"}`` objects, not bare ints --
+    see ``materialize.KeyCounts``. The caller dumps it back to JSON *and* reads its key set: the
+    keys of the POST-MERGE map are what ``rollup_key_day``'s p95 level flows to (``CellKeyLevel``)."""
     merged: dict[str, dict[str, int]] = json.loads(stored) if stored else {}
     for key, counts in delta.items():
         row = merged.get(key) or {"count": 0, "fail": 0, "error": 0}
@@ -480,7 +488,7 @@ def _merge_key_counts(stored: str | None, delta: Mapping[str, KeyCounts]) -> str
             "fail": row.get("fail", 0) + counts.fail,
             "error": row.get("error", 0) + counts.error,
         }
-    return json.dumps(merged, ensure_ascii=False)
+    return merged
 
 
 class Store:
@@ -491,6 +499,7 @@ class Store:
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
+        self._txn_depth = 0             # `_transaction` is re-entrant; only depth 0 commits
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL is a no-op on ":memory:" (sqlite silently keeps "memory" journal mode) -- harmless.
@@ -513,13 +522,23 @@ class Store:
         silently persisted the abandoned rows -- runs in ``runs`` with nothing folded into
         ``rollup_day``/``current_state``/``api_watermark``, which no later read can detect and no
         re-ingest can repair (``ingest`` skips run_ids it already sees). Rolling back here is what
-        makes "one ingest = one all-or-nothing transaction" (spec §4) true rather than intended."""
+        makes "one ingest = one all-or-nothing transaction" (spec §4) true rather than intended.
+
+        RE-ENTRANT: nesting only the depth counter, so a writer composed of other writers is ONE
+        transaction. ``replace_all_runs`` is the case -- its three DELETEs used to commit on their
+        own before ``ingest`` opened a second transaction, so a failure inside that ingest rolled
+        back only the reload and left the store EMPTY. Any exception rolls the whole outermost
+        transaction back and resets the depth; the outer ``with`` then rolls back a no-op."""
+        self._txn_depth += 1
         try:
             yield
         except BaseException:
+            self._txn_depth = 0
             self._conn.rollback()
             raise
-        self._conn.commit()
+        self._txn_depth -= 1
+        if self._txn_depth == 0:
+            self._conn.commit()
 
     def init_schema(self) -> None:
         """CREATE TABLE/INDEX IF NOT EXISTS throughout -- safe to call on an already-initialized
@@ -533,11 +552,14 @@ class Store:
         never widens an existing table, so a store written before Task 8 keeps its old
         ``rollup_day`` shape until this ALTER runs; the new column stays NULL (read as an empty
         map) until ``rebuild_materialized`` refills it."""
+        added: set[tuple[str, str]] = set()
         for table, column, decl in (("rollup_day", "http_status_counts", "JSON"),
-                                    ("bodies", "masked_paths", "JSON")):
+                                    ("bodies", "masked_paths", "JSON"),
+                                    ("rollup_key_day", "p95_duration_ms", "INTEGER")):
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                added.add((table, column))
         # `retention_state` was created in Task 4 as a generic (key, value) pair table and never
         # written by anything; Task 9 gives it the spec's own columns. A store written before
         # this keeps the old shape (CREATE TABLE IF NOT EXISTS never reshapes), so drop it --
@@ -548,24 +570,34 @@ class Store:
             self._conn.execute(
                 "CREATE TABLE retention_state (partition_key TEXT PRIMARY KEY, archived_at TEXT NOT NULL)"
             )
-        self._backfill_key_rollup()
+        self._backfill_key_rollup(rebuild=("rollup_key_day", "p95_duration_ms") in added)
 
-    def _backfill_key_rollup(self) -> None:
+    def _backfill_key_rollup(self, *, rebuild: bool = False) -> None:
         """``rollup_key_day`` is a NEW TABLE, and `CREATE TABLE IF NOT EXISTS` leaves it empty on a
         store written before it existed -- which would make the two key axes answer "no groups"
         rather than merely answer slowly. So a store that has cell rollups but no key rollups
         derives them here, once, from the JSON maps those cell rows already carry: the same fold
-        `key_rollup_delta` does at ingest, expressed in SQL, needing no run rows at all."""
-        if self._conn.execute("SELECT EXISTS(SELECT 1 FROM rollup_key_day)").fetchone()[0]:
+        `key_rollup_delta` does at ingest, expressed in SQL, needing no run rows at all.
+
+        ``rebuild`` is for the OTHER shape of the same problem: a file whose ``rollup_key_day``
+        already has rows but predates the ``p95_duration_ms`` column. ``ALTER TABLE ADD COLUMN``
+        leaves it NULL on every existing row and no ingest ever repairs it (the fold only touches
+        the days a new batch lands on), so the migration re-derives the whole table -- it is a
+        pure function of ``rollup_day``, so throwing it away and rebuilding loses nothing."""
+        if not rebuild and self._conn.execute("SELECT EXISTS(SELECT 1 FROM rollup_key_day)").fetchone()[0]:
             return
         if not self._conn.execute("SELECT EXISTS(SELECT 1 FROM rollup_day)").fetchone()[0]:
             return
+        if rebuild:
+            self._conn.execute("DELETE FROM rollup_key_day")
         for axis, column in _MAP_COLUMN.items():
             self._conn.execute(
-                'INSERT OR REPLACE INTO rollup_key_day (day, axis, "key", "count", fail, error, api_ids) '
+                'INSERT OR REPLACE INTO rollup_key_day '
+                '(day, axis, "key", "count", fail, error, p95_duration_ms, api_ids) '
                 f"SELECT day, '{axis}', je.key, "
                 "SUM(json_extract(je.value, '$.count')), SUM(json_extract(je.value, '$.fail')), "
-                "SUM(json_extract(je.value, '$.error')), json_group_array(DISTINCT api_id) "
+                "SUM(json_extract(je.value, '$.error')), MAX(p95_duration_ms), "
+                "json_group_array(DISTINCT api_id) "
                 f"FROM rollup_day, json_each(rollup_day.{column}) je GROUP BY day, je.key"
             )
 
@@ -760,14 +792,16 @@ class Store:
 
     def replace_all_runs(self, runs: Mapping[str, RunResult] | Iterable[RunResult], briefing_tz: str = "Asia/Seoul") -> None:
         """Wholesale replacement -- backs ``backend.runs = {...}`` in tests that build a
-        purpose-built run set from scratch, discarding the fixtures entirely. The four
-        materialized tables are cleared with the runs, then rebuilt by the ``ingest`` below."""
+        purpose-built run set from scratch, discarding the fixtures entirely. The materialized
+        tables are cleared with the runs, then rebuilt by the ``ingest`` below -- all inside ONE
+        transaction (``_transaction`` is re-entrant, so the ``ingest`` nests): committing the
+        DELETEs first meant a failing reload left the store empty rather than untouched."""
         values = list(runs.values()) if isinstance(runs, Mapping) else list(runs)
         with self._transaction():
             self._conn.execute("DELETE FROM runs")
             self._conn.execute("DELETE FROM bodies")
             self._clear_materialized()
-        self.ingest(values, briefing_tz)
+            self.ingest(values, briefing_tz)
 
     # -- ingest-time materialization (spec §4) ---------------------------------------------------
 
@@ -802,6 +836,10 @@ class Store:
               _iso(c.executed_at), c.transitions_total) for c in cells],
         )
 
+        # The POST-MERGE p95 + key set of every cell this batch touched, handed to
+        # `key_rollup_delta` so the key-axis p95 is exactly `MAX(rollup_day.p95_duration_ms)` over
+        # the cells carrying that key -- what the `json_each` arm computes. See `CellKeyLevel`.
+        levels: list[CellKeyLevel] = []
         for row in rollups:
             label = _label_in(row.test_data_label)
             existing = self._conn.execute(
@@ -817,6 +855,9 @@ class Store:
             p95 = row.p95_duration_ms
             if existing is not None and existing["p95_duration_ms"] is not None:
                 p95 = existing["p95_duration_ms"] if p95 is None else max(p95, existing["p95_duration_ms"])
+            levels.append(CellKeyLevel(
+                day=row.day, p95_duration_ms=p95,
+                keys={"failed_rule": tuple(rules), "http_status": tuple(https)}))
             self._conn.execute(
                 'INSERT OR REPLACE INTO rollup_day (day, api_id, target_env, test_data_label, "count", '
                 '"pass", fail, error, transitions, p95_duration_ms, failed_rule_counts, http_status_counts) '
@@ -827,27 +868,33 @@ class Store:
                  (existing["fail"] if existing else 0) + row.fail,
                  (existing["error"] if existing else 0) + row.error,
                  (existing["transitions"] if existing else 0) + row.transitions,
-                 p95, rules, https),
+                 p95, json.dumps(rules, ensure_ascii=False), json.dumps(https, ensure_ascii=False)),
             )
 
         # The same batch, transposed onto the key axis (see rollup_key_day's DDL comment). Counts
-        # add; api_ids UNION -- a per-day distinct count cannot be summed across a window.
-        for key_row in key_rollup_delta(rollups):
+        # add; api_ids UNION -- a per-day distinct count cannot be summed across a window; p95 is
+        # a level and merges with MAX, the same approximation the cell row uses.
+        for key_row in key_rollup_delta(rollups, levels):
             existing = self._conn.execute(
-                'SELECT "count", fail, error, api_ids FROM rollup_key_day '
+                'SELECT "count", fail, error, p95_duration_ms, api_ids FROM rollup_key_day '
                 'WHERE day = ? AND axis = ? AND "key" = ?',
                 (key_row.day, key_row.axis, key_row.key),
             ).fetchone()
             api_ids = set(json.loads(existing["api_ids"]) if existing and existing["api_ids"] else [])
             api_ids.update(key_row.api_ids)
+            key_p95 = key_row.p95_duration_ms
+            if existing is not None and existing["p95_duration_ms"] is not None:
+                key_p95 = (existing["p95_duration_ms"] if key_p95 is None
+                           else max(key_p95, existing["p95_duration_ms"]))
             self._conn.execute(
-                'INSERT OR REPLACE INTO rollup_key_day (day, axis, "key", "count", fail, error, api_ids) '
-                "VALUES (?,?,?,?,?,?,?)",
+                'INSERT OR REPLACE INTO rollup_key_day '
+                '(day, axis, "key", "count", fail, error, p95_duration_ms, api_ids) '
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (key_row.day, key_row.axis, key_row.key,
                  (existing["count"] if existing else 0) + key_row.count,
                  (existing["fail"] if existing else 0) + key_row.fail,
                  (existing["error"] if existing else 0) + key_row.error,
-                 json.dumps(sorted(api_ids), ensure_ascii=False)),
+                 key_p95, json.dumps(sorted(api_ids), ensure_ascii=False)),
             )
 
         for mark in marks:
@@ -1443,7 +1490,7 @@ class Store:
                 params.append(day_to)
             return (
                 'SELECT "key" AS gkey, SUM("count") AS c, SUM("count" - fail - error) AS p, '
-                "SUM(fail) AS f, SUM(error) AS e, 0 AS t, NULL AS q95, 0 AS n "
+                "SUM(fail) AS f, SUM(error) AS e, 0 AS t, MAX(p95_duration_ms) AS q95, 0 AS n "
                 f"FROM rollup_key_day WHERE {' AND '.join(clauses)} GROUP BY gkey"
             ), params
         clauses, params = self._rollup_scope(q, interior)

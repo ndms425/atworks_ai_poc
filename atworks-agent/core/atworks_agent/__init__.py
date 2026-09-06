@@ -28,6 +28,7 @@ from .masking import (
 from .materialize import (
     KEY_AXES,
     CellKey,
+    CellKeyLevel,
     KeyCounts,
     KeyRollupRow,
     OperatorApiDelta,

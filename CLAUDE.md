@@ -53,7 +53,9 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   (`host/atworks_host/store.py`, `ATWORKS_STORE_PATH`, default `:memory:`), not dicts, so every
   read is real SQL over real indexes and the DDL doubles as the Java-side schema blueprint; a REST
   adapter (`host/atworks_host/rest_backend.py`) is the whole Java integration. Behind each method:
-  `search_apis` / `get_api` → the API-spec registry; `list_runs` / `get_run` / `count_runs` /
+  `search_apis` / `get_api` / `get_apis(session, api_ids)` (the BATCH spec read — one call for a
+  whole id list, used by `resolve_select_where`'s `failed_since` branch and by any path that must
+  not fan out into N `get_api` awaits) → the API-spec registry; `list_runs` / `get_run` / `count_runs` /
   `count_runs_by_job` / `runs_by_ids` / `get_body` → the run-history store (its DSL, not the model,
   decides pass/fail); `aggregate_runs` / `summarize_insights` / `current_state` / `watermarks` /
   `operator_scope` → the **materialized** reads (Scale bullet below): rollups, per-cell latest
@@ -115,7 +117,9 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `transitions_total` counter bumped on every pass↔non-pass flip), `rollup_day` (per day × cell
   `count/pass/fail/error/transitions/p95` plus `failed_rule_counts` and `http_status_counts`, each
   a `{key: {count, fail, error}}` map so a grouped read keeps its own split), `rollup_key_day`
-  (those two maps TRANSPOSED onto `(day, axis, key)` with the `api_ids` that fed them, so a
+  (those two maps TRANSPOSED onto `(day, axis, key)` with the `api_ids` that fed them and the
+  `p95_duration_ms` of the cells carrying that key — the same max-merge approximation `rollup_day`
+  uses, so the transposed arm answers what `MAX(p95_duration_ms)` on the cell rows would — so a
   key-axis group reads (days × keys) rows instead of `json_each`-ing every cell row in the
   window; a query scoped to a set of APIs keeps the exact `json_each` arm, since a key row is
   already summed across APIs), `api_watermark`
@@ -176,8 +180,12 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   proved on: `--apis 50000 --days 180 --per-day 11000 --peak-day 120:50000 --operators 500`
   (2,019,000 runs, ~1.3 GB SQLite) — 13 of 14 measured rows inside their limit, the exception
   being `insights.build` (688 ms of 500) for the bench's deliberately WORST operator, whose
-  30-day scope is 33,838 of the 50,000 APIs; a median operator's panel is 199 ms. Documented
-  with the per-read profile in README and the fix-wave report, never by moving the limit. The
+  30-day scope is 33,838 of the 50,000 APIs; a median operator's panel is 199 ms. The named
+  follow-up for that one red row is a **per-API key rollup** (`rollup_key_api_day`, ~650k rows at
+  2M runs) so an operator-scoped `failed_rule`/`http_status` axis can leave the `json_each` arm
+  too — today only the UNSCOPED key axes read `rollup_key_day`, because a key row is already
+  summed across APIs. Documented with the per-read profile in README and the fix-wave report,
+  never by moving the limit. The
   bench defaults to `--no-mutate`: only the retention probe would destroy the dataset it
   measures, so that one runs on a copy, and it ages out ONE day partition rather than the whole
   set. `SLO_ASSERT` in `host/tests/test_scale.py` now asserts EVERY row the bench measures.

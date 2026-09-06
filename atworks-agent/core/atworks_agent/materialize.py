@@ -97,36 +97,83 @@ class KeyRollupRow(BaseModel):
 
     ``api_ids``는 그 (day, key)에 실제로 기여한 API id의 정렬된 집합이다. 개수만으로는 창 단위
     합집합을 낼 수 없어서(하루씩 더하면 중복 계산) 목록을 든다 — ``RunGroup.api_count``는 창
-    전체의 **참** distinct 개수여야 하기 때문이다."""
+    전체의 **참** distinct 개수여야 하기 때문이다.
+
+    ``p95_duration_ms``는 건수와 달리 더하는 값이 아니라 **레벨**이다: 그 (day, key)를 든 셀
+    롤업 행들의 ``p95_duration_ms`` 중 최대값 — ``rollup_day``가 이미 쓰는 것과 같은 max 근사고,
+    ``json_each`` 경로가 ``MAX(p95_duration_ms)``로 내는 값과 정확히 같은 정의다(같은 질문에 두
+    경로가 다른 답을 내면 안 된다). 자세한 것은 ``CellKeyLevel``."""
     day: str
     axis: str
     key: str
     count: int = 0
     fail: int = 0
     error: int = 0
+    p95_duration_ms: int | None = None
     api_ids: list[str] = Field(default_factory=list)
 
 
-def key_rollup_delta(rollups: Sequence[RollupRow]) -> list[KeyRollupRow]:
+class CellKeyLevel(BaseModel):
+    """셀 하나의 **병합 후** p95와, 병합된 두 맵이 그 시점에 들고 있는 키 목록.
+
+    배치 증분만으로 키 축 p95를 접으면 ``json_each`` 경로와 어긋난다: 어떤 배치가 셀의 p95를
+    올리면서 이미 그 셀에 있던 키 K는 하나도 건드리지 않을 수 있고, 그러면 셀 행을 읽는 경로는
+    오른 값을, 키 롤업은 옛 값을 답한다. 저장소는 셀 롤업을 병합한 **직후** 이 레벨을 넘겨주고,
+    여기서는 그 셀이 든 모든 키로 p95를 max 흘려보낸다 — 그래서 저장된 키 축 p95는 언제나
+    "그 키를 든 셀 행들의 ``MAX(p95_duration_ms)``"와 같다. 건수/``api_ids``는 이 값에서 오지
+    않는다(레벨이지 증분이 아니다)."""
+    day: str
+    p95_duration_ms: int | None = None
+    #: axis -> 그 축의 병합된 맵이 든 키들
+    keys: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+
+
+def key_rollup_delta(rollups: Sequence[RollupRow],
+                     levels: Sequence[CellKeyLevel] = ()) -> list[KeyRollupRow]:
     """``rollup_delta``가 낸 셀 롤업 증분을 키 축으로 접는다. 순수 함수이고, 입력이 이미 배치
     하나의 증분이므로 저장소는 이 결과를 그대로 (day, axis, key)에 병합하면 된다 — 건수는 더하고
-    ``api_ids``는 합집합."""
+    ``api_ids``는 합집합, ``p95_duration_ms``는 max.
+
+    ``levels``는 같은 셀들의 **병합 후** 상태이고 오직 ``p95_duration_ms``에만 쓰인다(``CellKeyLevel``
+    참조). 비어 있으면 ``rollups`` 자신을 레벨로 본다 — 처음부터 다시 접는 경우(백필/오라클)에는
+    증분이 곧 전체이기 때문이다. 레벨에만 있고 이번 배치가 건드리지 않은 키는 건수 0짜리 행으로
+    나오며, 저장소에서 기존 행의 p95만 끌어올린다."""
     rows: dict[tuple[str, str, str], KeyRollupRow] = {}
     members: dict[tuple[str, str, str], set[str]] = {}
+
+    def bucket(day: str, axis: str, key: str) -> KeyRollupRow:
+        ident = (day, axis, key)
+        acc = rows.get(ident)
+        if acc is None:
+            acc = KeyRollupRow(day=day, axis=axis, key=key)
+            rows[ident] = acc
+            members[ident] = set()
+        return acc
+
     for row in rollups:
         for axis, counts in (("failed_rule", row.failed_rule_counts),
                              ("http_status", row.http_status_counts)):
             for key, key_counts in counts.items():
-                ident = (row.day, axis, key)
-                acc = rows.get(ident)
-                if acc is None:
-                    acc = KeyRollupRow(day=row.day, axis=axis, key=key)
-                    rows[ident] = acc
-                    members[ident] = set()
+                acc = bucket(row.day, axis, key)
                 acc.count += key_counts.count
                 acc.fail += key_counts.fail
                 acc.error += key_counts.error
-                members[ident].add(row.api_id)
+                members[(row.day, axis, key)].add(row.api_id)
+    if not levels:
+        levels = [
+            CellKeyLevel(day=row.day, p95_duration_ms=row.p95_duration_ms,
+                         keys={"failed_rule": tuple(row.failed_rule_counts),
+                               "http_status": tuple(row.http_status_counts)})
+            for row in rollups
+        ]
+    for level in levels:
+        if level.p95_duration_ms is None:
+            continue
+        for axis, keys in level.keys.items():
+            for key in keys:
+                acc = bucket(level.day, axis, key)
+                if acc.p95_duration_ms is None or level.p95_duration_ms > acc.p95_duration_ms:
+                    acc.p95_duration_ms = level.p95_duration_ms
     for ident, row in rows.items():
         row.api_ids = sorted(members[ident])
     return list(rows.values())
