@@ -115,6 +115,12 @@ class RunResult(BaseModel):
     day: str | None = None           # local YYYY-MM-DD partition key; None = unpartitioned/legacy
     api_method: str | None = None    # denormalized from ApiSpec at execution time
     api_path: str | None = None      # denormalized from ApiSpec at execution time
+    # Whether a response body was captured for this run, WITHOUT carrying it. A record read back
+    # from storage never has `response_body` (no read path joins the bodies table -- only
+    # `get_body` reads it), so this is the field that answers "is there a body to fetch?".
+    # None = unknown/not read from storage; `serialization.run_record` falls back to
+    # `response_body is not None`, which is what a freshly EXECUTED run carries.
+    has_body: bool | None = None
 
 
 class FailedRank(BaseModel):

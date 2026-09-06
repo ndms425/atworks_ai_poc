@@ -56,13 +56,17 @@ async def test_get_body_returns_the_masked_body_with_no_raw_pii_substring():
     assert stored["path"] == backend.apis["api-001"].path
 
 
-async def test_runs_by_ids_also_returns_the_masked_body():
+async def test_runs_by_ids_reports_the_body_exists_without_carrying_it():
+    """Final review I3: the read paths no longer join `bodies` at all. A record says a body
+    EXISTS; `get_body` is the only way to its content (and that content is masked)."""
     backend = _backend()
     run_id = await _run_api_001(backend)
 
     [run] = backend.store.runs_by_ids([run_id])
-    assert run.response_body["contact"] == "***"
-    assert run.response_body["ssn"] == "***"
+    assert run.response_body is None
+    assert run.has_body is True
+    assert run_record(run)["has_body"] is True
+    assert backend.store.get_body(run_id)["contact"] == "***"
 
 
 async def test_masking_enabled_false_stores_the_body_unmasked():

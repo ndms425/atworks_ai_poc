@@ -33,6 +33,7 @@ from atworks_agent import (
     operator_scope,
 )
 from atworks_agent.aggregation import GROUP_BY, aggregate
+from atworks_agent.serialization import run_record
 from atworks_host.store import Store
 
 KST = timezone(timedelta(hours=9))
@@ -47,7 +48,10 @@ def _load_fixture_runs() -> dict[str, RunResult]:
     """The fixture rows plus the display label the read path joins on (Task 10): every Store SELECT
     that returns a renderable run LEFT JOINs the apis mirror for `api_method`/`api_path`, so the
     oracle has to carry the same two fields or every list-for-list comparison below trips on them.
-    A run whose api_id is not in the apis fixture keeps them None, exactly as the LEFT JOIN does."""
+    A run whose api_id is not in the apis fixture keeps them None, exactly as the LEFT JOIN does.
+
+    `has_body=False` for the same reason (final review I3): the read paths no longer join
+    `bodies` at all, they carry an EXISTS probe instead, and no fixture run has a body."""
     apis = _load_fixture_apis()
     runs = {}
     for row in json.loads((FIXTURES / "runs.json").read_text(encoding="utf-8")):
@@ -56,6 +60,7 @@ def _load_fixture_runs() -> dict[str, RunResult]:
             **row,
             api_method=spec.method if spec else None,
             api_path=spec.path if spec else None,
+            has_body=False,
         )
     return runs
 
@@ -301,7 +306,37 @@ def test_get_body_roundtrips_and_is_none_for_fixture_runs():
                      target_env="dev", status=RunStatus.PASS, response_body={"limit": 42})
     store.upsert_run(run)
     assert store.get_body("run-body-1") == {"limit": 42}
-    assert store.get_run("run-body-1").response_body == {"limit": 42}
+
+
+def test_no_read_path_carries_a_body_only_the_flag():
+    """Final review I3. `list_runs`/`get_run`/`runs_by_ids`/`all_runs` used to LEFT JOIN `bodies`
+    and hydrate `response_body` on every record, so a 200-row page pulled 200 response bodies into
+    process memory on the model-facing path and the whole safety line was one `exclude=` in
+    `run_record`. Now `get_body` is the ONLY method that reads the column at all -- the read paths
+    carry `has_body`, a PK EXISTS probe."""
+    store = _store_with_fixtures()
+    run = RunResult(run_id="run-body-2", api_id="api-001", executed_at=datetime.now(UTC),
+                    target_env="dev", status=RunStatus.PASS, response_body={"limit": 42})
+    store.upsert_run(run)
+
+    read = [store.get_run("run-body-2"),
+            store.runs_by_ids(["run-body-2"])[0],
+            store.list_runs(RunsQuery(api_id="api-001", limit=50)).items[0],
+            next(r for r in store.all_runs() if r.run_id == "run-body-2")]
+    for record in read:
+        assert record.response_body is None                # never hydrated
+        assert record.has_body is True                     # ...but the fact survives
+    assert run_record(read[0])["has_body"] is True
+    assert "response_body" not in run_record(read[0])
+    # a run with no body reads False, not None: the probe ran and said no
+    assert store.get_run("run-0001").has_body is False
+    # and the content is still exactly one call away
+    assert store.get_body("run-body-2") == {"limit": 42}
+
+    # the SQL itself never mentions the body column outside `get_body`
+    for sql in [store.list_runs_sql(RunsQuery(limit=10))[1][0],
+                Store._RUN_SELECT, Store._RUN_JOINS]:
+        assert "bodies.body" not in sql, sql
 
 
 # -- golden: aggregate_runs (all 5 group_bys) ---------------------------------------------------
@@ -958,10 +993,13 @@ def test_list_runs_query_plan_uses_an_index():
     _assert_no_unindexed_scan(cursored, "runs")
     assert "USING INDEX" in _runs_access(cursored), _runs_access(cursored)
 
-    # 4. the joins the SELECT list now needs (bodies, and Task 10's api label) are PK lookups.
+    # 4. what the SELECT list still needs is Task 10's api label (a PK lookup) and the `has_body`
+    #    EXISTS probe -- a correlated scalar subquery answered from the bodies PK index, never a
+    #    join that carries the body itself (final review I3).
     details = " | ".join(row["detail"] for row in plan)
-    assert "SEARCH bodies USING INDEX" in details, details
     assert "SEARCH apis USING INDEX" in details, details
+    assert "SCALAR SUBQUERY" in details, details
+    assert re.search(r"SEARCH bodies USING (COVERING )?INDEX", details), details
 
 
 def test_count_runs_by_api_id_query_plan_uses_an_index():

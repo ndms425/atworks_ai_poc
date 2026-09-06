@@ -23,8 +23,12 @@ def api_record(api: ApiSpec) -> dict[str, Any]:
 def run_record(run: RunResult) -> dict[str, Any]:
     # response_body must never reach a model-facing payload (a safety line, not just a size
     # cut) -- has_body tells the model whether one exists without ever carrying its content.
+    # A run read back from the store carries no body at all (no read path joins `bodies`), so the
+    # stored `has_body` flag answers for it; a freshly EXECUTED run still holds its body in
+    # memory and answers from that. The `exclude` stays regardless: it is the last line, not the
+    # only one.
     record = run.model_dump(mode="json", exclude_none=True, exclude={"response_body"})
-    record["has_body"] = run.response_body is not None
+    record["has_body"] = run.response_body is not None or bool(run.has_body)
     return record
 
 

@@ -855,37 +855,46 @@ class Store:
         )
 
     # The run rows the portal and the model read carry a display label joined from the `apis`
-    # mirror (Task 10). Both joins are PK lookups applied to the rows the keyset LIMIT already
-    # chose, and neither table contributes an `executed_at`/`run_id` of its own to the ORDER BY,
-    # so `list_runs` keeps riding idx_runs_executed_at exactly as it did with the body join alone.
-    # The aggregation-only SELECT (`fetch_runs`) stays label-free -- it never renders a row.
+    # mirror (Task 10). It is a PK lookup applied to the rows the keyset LIMIT already chose, and
+    # `apis` contributes no `executed_at`/`run_id` of its own to the ORDER BY, so `list_runs`
+    # keeps riding idx_runs_executed_at. The aggregation-only SELECT (`fetch_runs`) stays
+    # label-free -- it never renders a row.
     # The label join goes through a projecting subquery rather than `LEFT JOIN apis`: `apis` has
     # an `api_id` column of its own, and the run predicates below are written unqualified (they
     # also run against `runs_archive`, which has no `runs` alias), so a bare join would make
     # `api_id = ?` ambiguous. Renaming the joined columns keeps every predicate untouched; SQLite
     # flattens the subquery, so the join is still a PK lookup on apis.
-    _RUN_SELECT = "runs.*, bodies.body AS body, label.api_method AS api_method, label.api_path AS api_path"
-    _RUN_JOINS = ("LEFT JOIN bodies ON bodies.run_id = runs.run_id "
-                  "LEFT JOIN (SELECT api_id AS label_id, method AS api_method, path AS api_path FROM apis) "
+    #
+    # BODIES ARE NOT HERE (final review I3). These SELECTs used to `LEFT JOIN bodies` and carry
+    # `bodies.body` into every RunResult, so a page of 200 runs pulled 200 response bodies into
+    # process memory on the model-facing path and the entire safety line was one `exclude=
+    # {"response_body"}` in `serialization.run_record`. All the model ever needs is WHETHER a body
+    # exists, which is one EXISTS probe on the bodies PK per returned row -- and the content is
+    # reachable only through `get_body`, the single method that reads the column at all.
+    _RUN_SELECT = ("runs.*, EXISTS(SELECT 1 FROM bodies WHERE bodies.run_id = runs.run_id) AS has_body, "
+                   "label.api_method AS api_method, label.api_path AS api_path")
+    _RUN_JOINS = ("LEFT JOIN (SELECT api_id AS label_id, method AS api_method, path AS api_path FROM apis) "
                   "AS label ON label.label_id = runs.api_id")
 
     @staticmethod
     def _row_to_run(row: sqlite3.Row) -> RunResult:
         # sqlite3.Row's `in` operator tests *values*, not column names (unlike a dict) -- so this
-        # must stay row.keys(), not `"body" in row`.
+        # must stay row.keys(), not `"has_body" in row`.
         columns = row.keys()
-        body = row["body"] if "body" in columns else None
         # api_method/api_path are the row's DISPLAY LABEL, joined from the apis mirror by the
         # SELECTs that feed `run_record` (Task 10: RunsView renders "GET /orders" instead of
         # downloading 500 API specs to look the label up client-side). The aggregation-only
         # SELECTs don't join, so both stay None there -- exclude_none drops them from the record.
+        # `response_body` is ALWAYS None off a read: no read path joins `bodies` any more, and
+        # `has_body` carries the one fact about it that a record needs.
         return RunResult(
             run_id=row["run_id"], api_id=row["api_id"], job_id=row["job_id"],
             target_env=row["target_env"], test_data_label=row["test_data_label"],
             status=RunStatus(row["status"]), http_status=row["http_status"], duration_ms=row["duration_ms"],
             executed_at=_parse_iso(row["executed_at"]), executed_by=row["executed_by"],
             failed_rules=json.loads(row["failed_rules"]) if row["failed_rules"] else [],
-            response_body=json.loads(body) if body is not None else None,
+            response_body=None,
+            has_body=bool(row["has_body"]) if "has_body" in columns else None,
             api_method=row["api_method"] if "api_method" in columns else None,
             api_path=row["api_path"] if "api_path" in columns else None,
         )
