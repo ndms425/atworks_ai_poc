@@ -94,21 +94,22 @@ async def test_runs_insights_needs_a_session(client):
 async def test_session_and_reads(client):
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     h = {"X-Session-Id": sid}
-    assert len((await client.get("/api/atworks/apis", headers=h)).json()["apis"]) == 12
+    apis = (await client.get("/api/atworks/apis", headers=h)).json()
+    assert apis["total"] == 12 and len(apis["items"]) == 12
     runs = (await client.get("/api/atworks/runs?status=fail", headers=h)).json()
-    assert runs["population"] >= len(runs["runs"]) > 0
-    assert (await client.get("/api/atworks/jobs", headers=h)).json()["jobs"] == []
+    assert runs["total"] >= len(runs["items"]) > 0
+    assert (await client.get("/api/atworks/jobs", headers=h)).json() == {"items": [], "next_cursor": None, "total": 0}
 
 
-async def test_apis_and_runs_answer_in_both_shapes_and_page(client):
-    # Task 8: /apis and /runs return the paged envelope ({items, next_cursor, total}) AND the
-    # legacy keys the portal still reads (`apis` / `runs`+`population`). Task 10 deletes the
-    # legacy half once the web moves.
+async def test_list_routes_answer_only_in_the_paged_envelope(client):
+    # Task 10 (spec 2026-09-06 §10): every list route answers in ONE shape,
+    # {items, next_cursor, total}. The legacy keys Task 8 kept for the un-migrated portal
+    # (`apis`, `runs`, `population`) are GONE -- the web reads the envelope now.
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     h = {"X-Session-Id": sid}
 
     apis = (await client.get("/api/atworks/apis?limit=5", headers=h)).json()
-    assert apis["items"] == apis["apis"] and len(apis["items"]) == 5
+    assert set(apis) == {"items", "next_cursor", "total"} and len(apis["items"]) == 5
     assert apis["total"] == 12 and apis["next_cursor"]
     page2 = (await client.get(f"/api/atworks/apis?limit=5&cursor={apis['next_cursor']}", headers=h)).json()
     assert page2["total"] == 12
@@ -116,10 +117,52 @@ async def test_apis_and_runs_answer_in_both_shapes_and_page(client):
     assert first.isdisjoint({a["api_id"] for a in page2["items"]})
 
     runs = (await client.get("/api/atworks/runs?limit=4", headers=h)).json()
-    assert runs["items"] == runs["runs"] and len(runs["items"]) == 4
-    assert runs["total"] == runs["population"] > 4 and runs["next_cursor"]
+    assert set(runs) == {"items", "next_cursor", "total"} and len(runs["items"]) == 4
+    assert runs["total"] > 4 and runs["next_cursor"]
     runs2 = (await client.get(f"/api/atworks/runs?limit=4&cursor={runs['next_cursor']}", headers=h)).json()
     assert {r["run_id"] for r in runs2["items"]}.isdisjoint({r["run_id"] for r in runs["items"]})
+
+    # The three ledger routes gained cursor/limit in the same shape.
+    for path in ("/api/atworks/jobs", "/api/atworks/rules", "/api/atworks/profiles"):
+        body = (await client.get(f"{path}?limit=2", headers=h)).json()
+        assert set(body) == {"items", "next_cursor", "total"}, path
+        assert len(body["items"]) <= 2, path
+
+    # The route cap is 200 whatever the caller asks for (RunsQuery.limit's own bound).
+    assert (await client.get("/api/atworks/runs?limit=500", headers=h)).status_code == 422
+    assert (await client.get("/api/atworks/apis?limit=500", headers=h)).status_code == 422
+
+
+async def test_run_records_carry_the_api_label(client):
+    # Task 10: run rows render "GET /v1/..." from the record itself -- RunsView no longer
+    # downloads every API spec to look the label up client-side.
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    runs = (await client.get("/api/atworks/runs?limit=5", headers=h)).json()["items"]
+    assert runs and all(row["api_method"] and row["api_path"].startswith("/") for row in runs)
+
+
+async def test_home_summary_answers_every_tile_in_one_call(client):
+    # Task 10: Home used to fire /runs?status=fail, /runs?status=error, /jobs and /runs/insights
+    # in parallel and count their LISTS. This is four count queries and a briefing header.
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    body = (await client.get("/api/atworks/home/summary", headers=h)).json()
+    assert set(body) == {"counts", "insights", "briefing_header"}
+    assert set(body["counts"]) == {"fail", "error", "pending_jobs"}
+    assert all(isinstance(v, int) for v in body["counts"].values())
+    assert body["insights"]["window_days"] == 30
+    # The tiles agree with the routes they replaced (same window, same predicate).
+    insights = (await client.get("/api/atworks/runs/insights", headers=h)).json()
+    assert body["insights"] == insights
+    fails = (await client.get("/api/atworks/runs?status=fail", headers=h)).json()["total"]
+    assert body["counts"]["fail"] <= fails  # /runs is unwindowed; the tile is scope_window_days
+    # No briefing has been generated in this fixture host, so the header is null (not an error).
+    assert body["briefing_header"] is None
+
+
+async def test_home_summary_needs_a_session(client):
+    assert (await client.get("/api/atworks/home/summary")).status_code in (401, 422)
 
 
 async def test_session_binds_operator_and_role(client):
@@ -355,7 +398,7 @@ async def test_rules_route_lists_staged_rules(client_backend):
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.get("/api/atworks/rules", headers={"X-Session-Id": sid})
     assert r.status_code == 200
-    assert [row["rule_id"] for row in r.json()["rules"]] == [rule.rule_id]
+    assert [row["rule_id"] for row in r.json()["items"]] == [rule.rule_id]
 
 
 async def test_apply_rule_route_marks_then_consumes_approval(client_backend):
@@ -409,7 +452,7 @@ async def test_apply_rule_after_chat_stage_survives_session_reload(client_for_ch
     chat = await client.post("/api/atworks/chat", headers=headers, json={"message": "contractNo 필수값 규칙 추가해줘"})
     assert chat.status_code == 200
 
-    rules = (await client.get("/api/atworks/rules", headers=headers)).json()["rules"]
+    rules = (await client.get("/api/atworks/rules", headers=headers)).json()["items"]
     assert len(rules) == 1
     rule_id = rules[0]["rule_id"]
 
@@ -539,13 +582,13 @@ async def test_profiles_route_lists_staged_profiles_and_filters_by_job(client_ba
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid})
     assert r.status_code == 200
-    assert [row["profile_id"] for row in r.json()["profiles"]] == [profile.profile_id]
+    assert [row["profile_id"] for row in r.json()["items"]] == [profile.profile_id]
 
     matching = await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid}, params={"job_id": "job-0001"})
-    assert [row["profile_id"] for row in matching.json()["profiles"]] == [profile.profile_id]
+    assert [row["profile_id"] for row in matching.json()["items"]] == [profile.profile_id]
 
     other_job = await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid}, params={"job_id": "job-9999"})
-    assert other_job.json()["profiles"] == []
+    assert other_job.json()["items"] == []
 
 
 async def test_apply_profile_route_marks_then_consumes_approval(client_backend):
@@ -560,7 +603,7 @@ async def test_apply_profile_route_marks_then_consumes_approval(client_backend):
     body = r.json()
     assert r.status_code == 200 and body["ok"] is True and body["change"]["status"] == "applied"
 
-    listed = (await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid})).json()["profiles"]
+    listed = (await client.get("/api/atworks/profiles", headers={"X-Session-Id": sid})).json()["items"]
     assert listed[0]["status"] == "applied"
 
     # the mark is spent on the first click — a second click (or a chat turn) finds no mark left.

@@ -802,11 +802,31 @@ class Store:
             api_updated_at=_parse_iso(row["api_updated_at"]) if row["api_updated_at"] else None,
         )
 
+    # The run rows the portal and the model read carry a display label joined from the `apis`
+    # mirror (Task 10). Both joins are PK lookups applied to the rows the keyset LIMIT already
+    # chose, and neither table contributes an `executed_at`/`run_id` of its own to the ORDER BY,
+    # so `list_runs` keeps riding idx_runs_executed_at exactly as it did with the body join alone.
+    # The aggregation-only SELECT (`fetch_runs`) stays label-free -- it never renders a row.
+    # The label join goes through a projecting subquery rather than `LEFT JOIN apis`: `apis` has
+    # an `api_id` column of its own, and the run predicates below are written unqualified (they
+    # also run against `runs_archive`, which has no `runs` alias), so a bare join would make
+    # `api_id = ?` ambiguous. Renaming the joined columns keeps every predicate untouched; SQLite
+    # flattens the subquery, so the join is still a PK lookup on apis.
+    _RUN_SELECT = "runs.*, bodies.body AS body, label.api_method AS api_method, label.api_path AS api_path"
+    _RUN_JOINS = ("LEFT JOIN bodies ON bodies.run_id = runs.run_id "
+                  "LEFT JOIN (SELECT api_id AS label_id, method AS api_method, path AS api_path FROM apis) "
+                  "AS label ON label.label_id = runs.api_id")
+
     @staticmethod
     def _row_to_run(row: sqlite3.Row) -> RunResult:
         # sqlite3.Row's `in` operator tests *values*, not column names (unlike a dict) -- so this
         # must stay row.keys(), not `"body" in row`.
-        body = row["body"] if "body" in row.keys() else None  # noqa: SIM118
+        columns = row.keys()
+        body = row["body"] if "body" in columns else None
+        # api_method/api_path are the row's DISPLAY LABEL, joined from the apis mirror by the
+        # SELECTs that feed `run_record` (Task 10: RunsView renders "GET /orders" instead of
+        # downloading 500 API specs to look the label up client-side). The aggregation-only
+        # SELECTs don't join, so both stay None there -- exclude_none drops them from the record.
         return RunResult(
             run_id=row["run_id"], api_id=row["api_id"], job_id=row["job_id"],
             target_env=row["target_env"], test_data_label=row["test_data_label"],
@@ -814,6 +834,8 @@ class Store:
             executed_at=_parse_iso(row["executed_at"]), executed_by=row["executed_by"],
             failed_rules=json.loads(row["failed_rules"]) if row["failed_rules"] else [],
             response_body=json.loads(body) if body is not None else None,
+            api_method=row["api_method"] if "api_method" in columns else None,
+            api_path=row["api_path"] if "api_path" in columns else None,
         )
 
     @staticmethod
@@ -878,8 +900,8 @@ class Store:
             keyset_params += [_iso(after_dt), _iso(after_dt), after_id]
         keyset_where = f"WHERE {' AND '.join(keyset_clauses)}" if keyset_clauses else ""
         rows = self._conn.execute(
-            f"SELECT runs.*, bodies.body AS body FROM {source} LEFT JOIN bodies ON bodies.run_id = runs.run_id "
-            f"{keyset_where} ORDER BY executed_at DESC, run_id DESC LIMIT ?",
+            f"SELECT {self._RUN_SELECT} FROM {source} {self._RUN_JOINS} "
+            f"{keyset_where} ORDER BY runs.executed_at DESC, runs.run_id DESC LIMIT ?",
             [*keyset_params, q.limit + 1],
         ).fetchall()
         items = [self._row_to_run(r) for r in rows[: q.limit]]
@@ -908,8 +930,7 @@ class Store:
 
     def get_run(self, run_id: str) -> RunResult | None:
         row = self._conn.execute(
-            "SELECT runs.*, bodies.body AS body FROM runs LEFT JOIN bodies ON bodies.run_id = runs.run_id "
-            "WHERE runs.run_id = ?",
+            f"SELECT {self._RUN_SELECT} FROM runs {self._RUN_JOINS} WHERE runs.run_id = ?",
             (run_id,),
         ).fetchone()
         return self._row_to_run(row) if row is not None else None
@@ -919,7 +940,7 @@ class Store:
             return []
         placeholders = ",".join("?" for _ in run_ids)
         rows = self._conn.execute(
-            f"SELECT runs.*, bodies.body AS body FROM runs LEFT JOIN bodies ON bodies.run_id = runs.run_id "
+            f"SELECT {self._RUN_SELECT} FROM runs {self._RUN_JOINS} "
             f"WHERE runs.run_id IN ({placeholders})",
             list(run_ids),
         ).fetchall()
@@ -943,7 +964,7 @@ class Store:
 
     def all_runs(self) -> list[RunResult]:
         rows = self._conn.execute(
-            "SELECT runs.*, bodies.body AS body FROM runs LEFT JOIN bodies ON bodies.run_id = runs.run_id"
+            f"SELECT {self._RUN_SELECT} FROM runs {self._RUN_JOINS}"
         ).fetchall()
         return [self._row_to_run(r) for r in rows]
 

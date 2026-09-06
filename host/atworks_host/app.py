@@ -142,15 +142,17 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             attached_items=request.attached_items, screen_state=request.screen_state,
         )
 
-    # /apis and /runs answer in BOTH shapes while the web still reads the legacy keys: the paged
-    # envelope ({items, next_cursor, total}) plus `apis` / `runs`+`population`. Task 10 swaps the
-    # portal onto the envelope and DELETES the legacy keys (and the 500-row default with them).
+    # Every list route answers in ONE shape: the paged envelope {items, next_cursor, total}
+    # (Task 10 — the legacy `apis` / `runs` + `population` keys are gone, and the 500-row default
+    # with them). `total` is the count AFTER the filter and independent of `limit`, so the portal's
+    # "N개 중 M개" header is honest at any size; `next_cursor` is an opaque server string the web
+    # only ever echoes back. Default 50 / max 200 everywhere, matching RunsQuery.limit's own cap.
     @router.get("/apis")
     async def apis(record: CurrentSession, query: str = "", group: str | None = None,
-                   cursor: str | None = None, limit: int = Query(500, ge=1, le=500)) -> dict:
+                   cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
         page = await backend.search_apis(context(record), query=query, group=group, cursor=cursor, limit=limit)
-        items = [api_record(a) for a in page.items]
-        return {"items": items, "next_cursor": page.next_cursor, "total": page.total, "apis": items}
+        return {"items": [api_record(a) for a in page.items], "next_cursor": page.next_cursor,
+                "total": page.total}
 
     @router.get("/runs/insights")
     async def insights(record: CurrentSession) -> dict:
@@ -174,15 +176,17 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # own bound matches so an over-limit request 422s here instead of a validation error
         # surfacing from inside list_runs.
         page = await backend.list_runs(s, RunsQuery(since=since_dt, status=status, cursor=cursor, limit=limit))
-        items = [run_record(r) for r in page.items]
-        return {"items": items, "next_cursor": page.next_cursor, "total": page.total,
-                "population": await backend.count_runs(s, since=since_dt, status=status), "runs": items}
+        # `page.total` IS the old `population` (the count after this filter, limit-independent) —
+        # the separate count_runs call that used to fill it was a second scan of the same predicate.
+        return {"items": [run_record(r) for r in page.items], "next_cursor": page.next_cursor,
+                "total": page.total}
 
     @router.get("/jobs")
-    async def jobs(record: CurrentSession) -> dict:
-        # limit=1000: the route has always returned the whole pending+applied set (Task 10
-        # exposes real paging to the web); this keeps that shape under the new paged contract.
-        return {"jobs": [job_record(j) for j in (await backend.all_jobs(context(record), limit=1000)).items]}
+    async def jobs(record: CurrentSession, cursor: str | None = None,
+                   limit: int = Query(50, ge=1, le=200)) -> dict:
+        page = await backend.all_jobs(context(record), cursor=cursor, limit=limit)
+        return {"items": [job_record(j) for j in page.items], "next_cursor": page.next_cursor,
+                "total": page.total}
 
     # 이 배포는 메모리가 꺼져 있다(enable_memory=False). web-shared의 useAgentTurn이
     # 로드 시 무조건 이 경로를 찾으므로, 빈 상태를 돌려주는 자리표시 라우트를 둔다.
@@ -245,10 +249,11 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return await job_action(job_id, "discard_job", record)
 
     @router.get("/rules")
-    async def rules(record: CurrentSession) -> dict:
-        # limit=1000: the route has always returned the whole rule set (Task 10 exposes real
-        # paging to the web); this keeps that shape under the new paged contract.
-        return {"rules": [rule_record(r) for r in (await backend.list_rules(context(record), limit=1000)).items]}
+    async def rules(record: CurrentSession, cursor: str | None = None,
+                    limit: int = Query(50, ge=1, le=200)) -> dict:
+        page = await backend.list_rules(context(record), cursor=cursor, limit=limit)
+        return {"items": [rule_record(r) for r in page.items], "next_cursor": page.next_cursor,
+                "total": page.total}
 
     async def rule_action(rule_id: str, action: str, record: Record) -> dict:
         # rule_action은 job_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
@@ -256,6 +261,9 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 게 아니다: 이 세션이 아직 모르는 rule이라도, 호스트가 그 rule을 실제로 소유(ledger)
         # 하고 있으면 클릭 전에 기억시킨다.
         if rule_id not in record.state.seen_rules:
+            # limit=1000 is a bounded *lookup by id*, not a listing (the /rules route pages at 50):
+            # the ABC has no get_rule, so a rule older than the newest 1000 would not be re-learned
+            # here — the click then fails the provenance gate rather than approving the wrong thing.
             known = next(
                 (r for r in (await backend.list_rules(context(record), limit=1000)).items if r.rule_id == rule_id),
                 None,
@@ -304,11 +312,11 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return await rule_action(rule_id, "discard_rule", record)
 
     @router.get("/profiles")
-    async def profiles(record: CurrentSession, job_id: str | None = None) -> dict:
-        # limit=1000: the route has always returned the whole profile set (Task 10 exposes
-        # real paging to the web); this keeps that shape under the new paged contract.
-        page = await backend.list_profiles(context(record), job_id, limit=1000)
-        return {"profiles": [profile_record(p) for p in page.items]}
+    async def profiles(record: CurrentSession, job_id: str | None = None, cursor: str | None = None,
+                       limit: int = Query(50, ge=1, le=200)) -> dict:
+        page = await backend.list_profiles(context(record), job_id, cursor=cursor, limit=limit)
+        return {"items": [profile_record(p) for p in page.items], "next_cursor": page.next_cursor,
+                "total": page.total}
 
     async def profile_action(profile_id: str, action: str, record: Record) -> dict:
         # profile_action은 rule_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
@@ -316,6 +324,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 게 아니다: 이 세션이 아직 모르는 profile이라도, 호스트가 그 profile을 실제로 소유(ledger)
         # 하고 있으면 클릭 전에 기억시킨다.
         if profile_id not in record.state.seen_profiles:
+            # limit=1000: a bounded lookup by id, not a listing — see rule_action above.
             known = next(
                 (p for p in (await backend.list_profiles(context(record), limit=1000)).items if p.profile_id == profile_id),
                 None,
@@ -453,6 +462,34 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         if html is None:
             raise HTTPException(status_code=404, detail="no briefing")
         return html
+
+    @router.get("/home/summary")
+    async def home_summary(record: CurrentSession) -> dict:
+        """Home's four tiles + briefing header in ONE call (Task 10). The portal used to fetch
+        `/runs?status=fail`, `/runs?status=error`, `/jobs` and `/runs/insights` in parallel and read
+        their *lists* for counts — two of them shipped whole run pages just to read `population`,
+        and the pending count was `jobs.filter(status == "staged").length` over every job in the
+        ledger. Here every number is a count query: `count_runs`×2 over `scope_window_days`
+        (the same window `get_context` uses, so the tiles and the model's context block agree),
+        `get_pending_jobs` for the queue depth, `summarize_insights` for the flaky tile, and only
+        the briefing's HEADER — no run list of any kind crosses this route."""
+        s = context(record)
+        cfg = agent.config
+        now = s.local_now() or datetime.now(UTC)
+        counts = {
+            "fail": await backend.count_runs(s, since=now - timedelta(days=cfg.scope_window_days), status="fail"),
+            "error": await backend.count_runs(s, since=now - timedelta(days=cfg.scope_window_days), status="error"),
+            "pending_jobs": len(await backend.get_pending_jobs(s)),
+        }
+        summary = await backend.summarize_insights(s, since=now - timedelta(days=cfg.max_aggregate_window_days))
+        latest = briefings.latest()
+        return {
+            "counts": counts,
+            "insights": {"flaky": summary.flaky, "regression_suspect": summary.regression_suspect,
+                         "window_days": cfg.max_aggregate_window_days},
+            # Header only: the briefing's own page (`GET /briefings/latest`) still serves the body.
+            "briefing_header": None if latest is None else {"date": latest["date"], "generated_at": latest["generated_at"]},
+        }
 
     @router.get("/home/insights")
     async def home_insights(record: CurrentSession) -> dict:

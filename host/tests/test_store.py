@@ -44,7 +44,20 @@ def _load_fixture_apis() -> dict[str, ApiSpec]:
 
 
 def _load_fixture_runs() -> dict[str, RunResult]:
-    return {row["run_id"]: RunResult(**row) for row in json.loads((FIXTURES / "runs.json").read_text(encoding="utf-8"))}
+    """The fixture rows plus the display label the read path joins on (Task 10): every Store SELECT
+    that returns a renderable run LEFT JOINs the apis mirror for `api_method`/`api_path`, so the
+    oracle has to carry the same two fields or every list-for-list comparison below trips on them.
+    A run whose api_id is not in the apis fixture keeps them None, exactly as the LEFT JOIN does."""
+    apis = _load_fixture_apis()
+    runs = {}
+    for row in json.loads((FIXTURES / "runs.json").read_text(encoding="utf-8")):
+        spec = apis.get(row["api_id"])
+        runs[row["run_id"]] = RunResult(
+            **row,
+            api_method=spec.method if spec else None,
+            api_path=spec.path if spec else None,
+        )
+    return runs
 
 
 def _store_with_fixtures() -> Store:
