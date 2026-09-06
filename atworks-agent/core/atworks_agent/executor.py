@@ -15,7 +15,7 @@ from commerce_common.skills import SkillRegistry
 from commerce_common.streaming import AgentEvent, ToolOutcome
 from commerce_common.types import PROVENANCE_CAP
 
-from .aggregation import GROUP_BY, aggregate
+from .aggregation import GROUP_BY
 from .backend import AtworksBackend
 from .config import AtworksAgentConfig
 from .enrichment import PRESENTATION_COMPONENTS
@@ -67,7 +67,7 @@ from .rules import (
     check_rule_guardrails,
 )
 from .scoring import UnknownScorer, rank_runs
-from .selection import collect_runs, resolve_select_where
+from .selection import resolve_select_where
 from .serialization import (
     api_record,
     format_batch_record,
@@ -81,6 +81,7 @@ from .serialization import (
 from .tools.presentation import PREVIEW_TOOL, QUESTION_TOOL, RULE_PREVIEW_TOOL
 from .types import (
     ActorKind,
+    AggregateQuery,
     AtworksSessionContext,
     AtworksSessionState,
     FormatBatch,
@@ -97,6 +98,12 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
 
 
 RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
+# Groups asked of one aggregate_runs call. Comfortably above the card's own max_group_items*2, so
+# the envelope's `more` is exact for any ordinary result, and each returned group costs at most
+# one bounded run_ids lookup in the backend.
+_AGGREGATE_GROUP_LIMIT = 50
+# Candidate evidence ids gathered from those groups before the newest PROVENANCE_CAP are kept.
+_AGGREGATE_RUN_ID_FETCH = 1000
 
 
 def _matches_filter(run: RunResult, filt: str) -> bool:
@@ -429,23 +436,28 @@ class AtworksToolExecutor(BaseToolExecutor):
         floor = datetime.now(UTC) - timedelta(days=self._config.max_aggregate_window_days)
         since = _iso(tool_input.get("since"), "since")
         since = floor if since is None or since < floor else since
-        runs = await collect_runs(
-            self._backend, self._session, since=since, status=status, api_id=api_id,
-            cap=self._config.max_aggregate_runs,
-        )
-        for run in runs:
-            self._state.remember_run(run)
+        # Task 8: the backend groups over its rollups -- the whole window, every API, no run
+        # sample. `limit` bounds how many groups come back (they are ranked fail+error first), so
+        # `more` is exact up to that bound and understates beyond it.
+        groups = await self._backend.aggregate_runs(self._session, AggregateQuery(
+            since=since, group_by=group_by, status=status,
+            scope_api_ids=[str(api_id)] if api_id is not None else None, limit=_AGGREGATE_GROUP_LIMIT,
+        ))
         # The api axis labels groups by method+path: fetch the specs the session has not seen yet
         # so the card can name them (each one is remembered, so it also passes provenance later).
         if group_by == "api":
-            for missing in {r.api_id for r in runs} - set(self._state.seen_apis):
+            for missing in {g.key for g in groups} - set(self._state.seen_apis):
                 api = await self._backend.get_api(self._session, missing)
                 if api is not None:
                     self._state.remember_api(api)
-        groups = aggregate(runs, self._state.seen_apis, group_by, flaky_min_transitions=self._config.flaky_min_transitions)
-        # Always the true population from the backend's own count, never len(runs): the
-        # aggregation window (max_aggregate_runs) can truncate the runs collected for
-        # grouping without truncating what the card is allowed to cite as population.
+        # Provenance: the evidence run ids the groups themselves cite (<=50 newest each), newest
+        # first across the whole result and capped like every other seen-record map. This is a
+        # SAMPLE for grounding, never the population -- which stays the backend's own count.
+        cited = list(dict.fromkeys(i for g in groups for i in g.run_ids))[:_AGGREGATE_RUN_ID_FETCH]
+        runs = await self._backend.runs_by_ids(self._session, cited)
+        runs.sort(key=lambda r: (r.executed_at, r.run_id), reverse=True)
+        for run in runs:
+            self._state.remember_run(run)
         population = await self._backend.count_runs(self._session, since=since, until=None, status=status, api_id=api_id)
         self._state.last_population = population
         self._state.last_listed_run_ids = [r.run_id for r in runs][:PROVENANCE_CAP]
@@ -454,7 +466,10 @@ class AtworksToolExecutor(BaseToolExecutor):
         shown = groups[: self._config.max_group_items * 2]
         return self._fenced({
             "group_by": group_by, "since": since.isoformat(), "population": population,
-            "groups": [g.model_dump(mode="json", exclude_none=True, exclude={"run_ids"}) | {"run_ids": g.run_ids[:3]} for g in shown],
+            "groups": [
+                g.model_dump(mode="json", exclude_none=True, exclude={"run_ids", "api_sample"})
+                | {"run_ids": g.run_ids[:3]} for g in shown
+            ],
             "more": max(0, len(groups) - len(shown)),
             "note": "Figures are host-computed; show them with present_run_groups (group keys above), never in prose.",
         })

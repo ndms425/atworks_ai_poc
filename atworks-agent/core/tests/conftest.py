@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from commerce_common.skills import Skill, SkillRegistry
 
+from atworks_agent.aggregation import aggregate
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.cursor import decode_cursor, encode_cursor
@@ -14,6 +15,7 @@ from atworks_agent.rules import FormatBatchLedger, FormatLibrary, RuleImpact, Ru
 from atworks_agent.types import (
     ActorKind,
     ApiSpec,
+    ApiWatermark,
     AtworksSessionContext,
     AtworksSessionState,
     AuditEntry,
@@ -29,6 +31,7 @@ T0 = datetime(2026, 9, 1, 9, tzinfo=UTC)
 
 class InMemoryBackend(AtworksBackend):
     def __init__(self, config: AtworksAgentConfig):
+        self._config = config
         self.apis = {
             "api-1": ApiSpec(api_id="api-1", method="POST", path="/v1/contracts", name="계약 생성", group="contract", updated_at=T0, has_rules=True, params=["contractNo", "amount"]),
             "api-2": ApiSpec(api_id="api-2", method="GET", path="/v1/contracts/{id}", name="계약 조회", group="contract", updated_at=T0 - timedelta(days=20), has_rules=False),
@@ -46,10 +49,22 @@ class InMemoryBackend(AtworksBackend):
         ]
         self.executed: list[str] = []
 
-    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
+    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
+                          path_prefix=None):
         rows = [a for a in self.apis.values() if (query.lower() in (a.path + a.name).lower()) and (group is None or a.group == group)
-                and (updated_after is None or a.updated_at >= updated_after)]
-        return Page(items=rows[:limit], total=len(rows))
+                and (updated_after is None or a.updated_at >= updated_after)
+                and (path_prefix is None or a.path == path_prefix or a.path.startswith(path_prefix + "/"))]
+        # Real keyset paging (mirrors mock_backend.py's ``_page``): selection.scan_apis pages the
+        # catalogue by cursor, so a double that always returns next_cursor=None would make every
+        # scan look complete.
+        ordered = sorted(rows, key=lambda a: (a.updated_at, a.api_id), reverse=True)
+        remaining = ordered
+        if cursor:
+            after = decode_cursor(cursor)
+            remaining = [a for a in ordered if (a.updated_at, a.api_id) < after]
+        items = remaining[:limit]
+        next_cursor = encode_cursor(items[-1].updated_at, items[-1].api_id) if len(remaining) > limit else None
+        return Page(items=items, next_cursor=next_cursor, total=len(ordered))
 
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
@@ -87,13 +102,53 @@ class InMemoryBackend(AtworksBackend):
         )
 
     async def aggregate_runs(self, session, q):
-        return []
+        # Task 8: the executor now asks the BACKEND to group (the Mock does it over rollups).
+        # This double has no rollups, so it groups its own run list with the same pure function
+        # the oracle uses -- same output shape, same ordering contract.
+        rows = [r for r in self.runs
+                if (q.since is None or r.executed_at >= q.since)
+                and (q.until is None or r.executed_at < q.until)
+                and (q.scope_api_ids is None or r.api_id in q.scope_api_ids)
+                and (q.status is None or (q.status == "non_pass" and r.status.value != "pass")
+                     or r.status.value == q.status)]
+        return aggregate(rows, self.apis, q.group_by,
+                         flaky_min_transitions=self._config.flaky_min_transitions)[: q.limit]
+
+    async def count_runs_by_job(self, session, since=None, until=None):
+        counts: dict[str, int] = {}
+        for r in self.runs:
+            if r.job_id is None:
+                continue
+            if (since is None or r.executed_at >= since) and (until is None or r.executed_at < until):
+                counts[r.job_id] = counts.get(r.job_id, 0) + 1
+        return counts
 
     async def current_state(self, session, scope_api_ids=None):
         return []
 
-    async def watermarks(self, session, api_ids=None, first_non_pass_since=None):
-        return []
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None, last_non_pass_since=None):
+        # Task 8: selection.resolve_select_where(failed_since) and the insight panel read this,
+        # so the double computes real watermarks over its run list (the Mock materializes them).
+        marks: list[ApiWatermark] = []
+        for api_id in sorted({r.api_id for r in self.runs}):
+            if api_ids is not None and api_id not in api_ids:
+                continue
+            rows = sorted((r for r in self.runs if r.api_id == api_id), key=lambda r: (r.executed_at, r.run_id))
+            passes = [r.executed_at for r in rows if r.status.value == "pass"]
+            non_pass = [r.executed_at for r in rows if r.status.value != "pass"]
+            first_np = non_pass[0] if non_pass else None
+            last_np = non_pass[-1] if non_pass else None
+            if first_non_pass_since is not None and (first_np is None or first_np < first_non_pass_since):
+                continue
+            if last_non_pass_since is not None and (last_np is None or last_np < last_non_pass_since):
+                continue
+            api = self.apis.get(api_id)
+            marks.append(ApiWatermark(
+                api_id=api_id, last_pass_at=passes[-1] if passes else None, first_non_pass_at=first_np,
+                last_non_pass_at=last_np, latest_status=rows[-1].status,
+                api_updated_at=api.updated_at if api is not None else None,
+            ))
+        return marks
 
     async def operator_scope(self, session, operator_id, window_days):
         return ScopeSummary()

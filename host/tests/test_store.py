@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta, timezone
@@ -131,7 +132,8 @@ def _oracle_current_state(runs, scope_api_ids=None) -> list[CellState]:
     return result
 
 
-def _oracle_watermarks(runs, api_ids=None, first_non_pass_since=None) -> list[ApiWatermark]:
+def _oracle_watermarks(runs, api_ids=None, first_non_pass_since=None, last_non_pass_since=None,
+                       apis=None) -> list[ApiWatermark]:
     by_api: dict[str, list[RunResult]] = defaultdict(list)
     for r in runs.values():
         if api_ids is not None and r.api_id not in api_ids:
@@ -143,13 +145,21 @@ def _oracle_watermarks(runs, api_ids=None, first_non_pass_since=None) -> list[Ap
         passes = [r.executed_at for r in rows if r.status.value == "pass"]
         non_passes = [r for r in rows if r.status.value != "pass"]
         first_non_pass = non_passes[0].executed_at if non_passes else None
+        last_non_pass = non_passes[-1].executed_at if non_passes else None
         if first_non_pass_since is not None and (first_non_pass is None or first_non_pass < first_non_pass_since):
             continue
+        if last_non_pass_since is not None and (last_non_pass is None or last_non_pass < last_non_pass_since):
+            continue
+        catalogue = apis or _load_fixture_apis()
+        api = catalogue.get(api_id)
         result.append(ApiWatermark(
             api_id=api_id, last_pass_at=passes[-1] if passes else None,
             first_non_pass_at=first_non_pass,
-            last_non_pass_at=non_passes[-1].executed_at if non_passes else None,
+            last_non_pass_at=last_non_pass,
             latest_status=rows[-1].status if rows else None,
+            # Task 8: the catalogue's own updated_at rides on the watermark row so the regression
+            # rule needs no join (spec §3's ``api_watermark ... updated_at(api)``).
+            api_updated_at=api.updated_at if api is not None else None,
         ))
     return result
 
@@ -305,6 +315,185 @@ def test_aggregate_runs_respects_scope_api_ids_and_since():
     actual = store.fetch_runs(since=q.since, until=q.until, api_ids=q.scope_api_ids)
     actual_groups = aggregate(actual, apis, q.group_by, flaky_min_transitions=2)[: q.limit]
     assert actual_groups == expected
+
+
+# -- golden: rollup-fed aggregate_rollups (Task 8) vs the same run-scan oracle -------------------
+
+_SAME = ("count", "fail", "error", "passed", "run_ids", "regression_suspect", "flaky", "transitions")
+
+
+def _rollup_groups(store: Store, apis, q: AggregateQuery) -> list:
+    return store.aggregate_rollups(q, flaky_min=2, apis=apis, briefing_tz="Asia/Seoul")
+
+
+def test_aggregate_rollups_matches_the_run_scan_oracle_for_every_group_by():
+    """The rollup-fed read returns the same groups, in the same order, with the same counts and
+    the same evidence ids as a from-scratch scan of every run in the window.
+
+    Two fields carry documented deltas (Store.aggregate_rollups' docstring lists all of them):
+    ``transitions`` on the axes whose key spans several cells, and the watermark-derived
+    ``regression_suspect``/``last_pass_before`` on the api axis. Each is asserted below against
+    its NEW definition, with the delta named.
+    """
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    for group_by in GROUP_BY:
+        q = AggregateQuery(group_by=group_by, limit=500)
+        expected = _oracle_aggregate_runs(runs, apis, q, flaky_min=2)
+        actual = _rollup_groups(store, apis, q)
+        assert [g.key for g in actual] == [g.key for g in expected], group_by
+        assert [g.label for g in actual] == [g.label for g in expected], group_by
+        for got, want in zip(actual, expected, strict=True):
+            fields = _SAME
+            if group_by in ("env", "http_status"):
+                # DELTA: transitions is the sum of the ingest-time PER-CELL counters, so a key
+                # that spans several cells (every env / http_status bucket) no longer counts
+                # flips of the interleaved multi-cell sequence -- which was never what flaky_v1
+                # means (it is defined on the api_env_data cell, where the two still agree).
+                fields = tuple(f for f in _SAME if f not in ("transitions", "flaky"))
+            if group_by == "api" and want.regression_suspect != got.regression_suspect:
+                # DELTA: spec §3's rule reads the watermark (last_pass_at < api.updated_at <=
+                # first_non_pass_at), so an API that has since RECOVERED -- its last pass now
+                # later than its first failure -- is no longer a standing regression suspect.
+                # The fixture's api-004 is exactly that: fail once, then pass again.
+                assert got.key == "api-004" and want.regression_suspect and not got.regression_suspect
+                fields = tuple(f for f in fields if f != "regression_suspect")
+            for field in fields:
+                assert getattr(got, field) == getattr(want, field), (group_by, got.key, field)
+
+
+def test_aggregate_rollups_derived_fields_come_from_the_materialized_tables():
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    marks = {w.api_id: w for w in store.watermarks()}
+    for group in _rollup_groups(store, apis, AggregateQuery(group_by="api", limit=500)):
+        mark = marks[group.key]
+        assert group.latest_status == mark.latest_status
+        assert group.first_non_pass_at == mark.first_non_pass_at
+        # DELTA: last_pass_before is the watermark's last_pass_at (the API's last pass EVER),
+        # not "the last pass before the first failure inside the window".
+        assert group.last_pass_before == mark.last_pass_at
+        assert group.api_updated_at == apis[group.key].updated_at
+    cells = {f"{c.api_id}|{c.target_env}|{c.test_data_label or '-'}": c for c in store.current_state()}
+    for group in _rollup_groups(store, apis, AggregateQuery(group_by="api_env_data", limit=500)):
+        assert group.latest_status == cells[group.key].status
+    # api_count is the TRUE distinct-API count for the two map-keyed axes, and only for those
+    for group in _rollup_groups(store, apis, AggregateQuery(group_by="failed_rule", limit=500)):
+        rule_runs = {r.api_id for r in _load_fixture_runs().values()
+                     if r.status.value != "pass" and (
+                         group.key in r.failed_rules
+                         or (not r.failed_rules and group.key.startswith("(error) HTTP")))}
+        assert group.api_count == len(rule_runs), group.key
+    for group in _rollup_groups(store, apis, AggregateQuery(group_by="api", limit=500)):
+        assert group.api_count is None
+
+
+def test_aggregate_rollups_window_is_exact_even_when_it_contains_no_whole_day():
+    """The daily briefing's window is 09:00 -> 09:00: it touches two local days and contains none
+    of them whole. Every count still matches the exact run scan (the partial days are answered
+    from `runs` with an indexed range query, not rounded out to whole rollup partitions)."""
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    start = datetime(2026, 9, 2, 9, tzinfo=KST)
+    end = datetime(2026, 9, 3, 9, tzinfo=KST)
+    for group_by in GROUP_BY:
+        q = AggregateQuery(group_by=group_by, since=start, until=end, limit=500)
+        expected = _oracle_aggregate_runs(runs, apis, q, flaky_min=2)
+        actual = _rollup_groups(store, apis, q)
+        assert [g.key for g in actual] == [g.key for g in expected], group_by
+        for got, want in zip(actual, expected, strict=True):
+            for field in ("count", "fail", "error", "passed", "run_ids"):
+                assert getattr(got, field) == getattr(want, field), (group_by, got.key, field)
+
+
+def test_aggregate_rollups_status_filter_reports_only_that_verdict():
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    for status in ("pass", "fail", "error", "non_pass"):
+        for group_by in GROUP_BY:
+            q = AggregateQuery(group_by=group_by, status=status, limit=500)
+            filtered = {
+                run_id: r for run_id, r in runs.items()
+                if (r.status.value != "pass" if status == "non_pass" else r.status.value == status)
+            }
+            expected = _oracle_aggregate_runs(filtered, apis, AggregateQuery(group_by=group_by, limit=500), flaky_min=2)
+            actual = _rollup_groups(store, apis, q)
+            assert [g.key for g in actual] == [g.key for g in expected], (status, group_by)
+            for got, want in zip(actual, expected, strict=True):
+                for field in ("count", "fail", "error", "passed", "run_ids"):
+                    assert getattr(got, field) == getattr(want, field), (status, group_by, got.key, field)
+
+
+def test_aggregate_rollups_respects_scope_api_ids_and_since():
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    q = AggregateQuery(group_by="api", scope_api_ids=["api-003", "api-007"], limit=500)
+    expected = _oracle_aggregate_runs(runs, apis, q, flaky_min=2)
+    actual = _rollup_groups(store, apis, q)
+    assert [g.key for g in actual] == [g.key for g in expected]
+    for got, want in zip(actual, expected, strict=True):
+        for field in ("count", "fail", "error", "passed", "run_ids", "transitions"):
+            assert getattr(got, field) == getattr(want, field), (got.key, field)
+
+
+def test_http_status_counts_is_added_and_refilled_on_a_pre_task_8_store(tmp_path):
+    """A store written before Task 8 has a rollup_day without http_status_counts. CREATE TABLE IF
+    NOT EXISTS never widens it, so init_schema ALTERs the column in and rebuild_materialized
+    refills it from the runs already stored -- no regeneration, no lost rollups."""
+    path = tmp_path / "old.sqlite"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE rollup_day (day TEXT NOT NULL, api_id TEXT NOT NULL, target_env TEXT NOT NULL, "
+        'test_data_label TEXT, count INTEGER NOT NULL DEFAULT 0, "pass" INTEGER NOT NULL DEFAULT 0, '
+        "fail INTEGER NOT NULL DEFAULT 0, error INTEGER NOT NULL DEFAULT 0, "
+        "transitions INTEGER NOT NULL DEFAULT 0, p95_duration_ms INTEGER, failed_rule_counts JSON, "
+        "PRIMARY KEY (day, api_id, target_env, test_data_label));"
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = Store(path)      # init_schema runs the ALTER
+    columns = {r["name"] for r in store.conn().execute("PRAGMA table_info(rollup_day)").fetchall()}
+    assert "http_status_counts" in columns
+    store.load_fixtures(FIXTURES, briefing_tz="Asia/Seoul")
+    store.rebuild_materialized()
+    store.conn().commit()
+
+    apis = _load_fixture_apis()
+    expected = {g.key: g for g in aggregate(list(_load_fixture_runs().values()), apis, "http_status",
+                                            flaky_min_transitions=2)}
+    actual = {g.key: g for g in _rollup_groups(store, apis, AggregateQuery(group_by="http_status", limit=500))}
+    assert set(actual) == set(expected)
+    for key, group in actual.items():
+        assert (group.count, group.fail, group.error) == (
+            expected[key].count, expected[key].fail, expected[key].error)
+
+
+def test_count_runs_by_job_counts_the_window_exactly():
+    runs = _load_fixture_runs()
+    store = _store_with_fixtures()
+    since, until = datetime(2026, 9, 2, tzinfo=KST), datetime(2026, 9, 4, tzinfo=KST)
+    expected: dict[str, int] = {}
+    for r in runs.values():
+        if r.job_id and since <= r.executed_at < until:
+            expected[r.job_id] = expected.get(r.job_id, 0) + 1
+    assert store.count_runs_by_job(since=since, until=until) == expected
+
+
+def test_search_apis_path_prefix_is_anchored_and_does_not_widen_query():
+    store = _store_with_fixtures()
+    apis = _load_fixture_apis()
+    hit = store.search_apis(path_prefix="/v1/payments", limit=500)
+    assert {a.api_id for a in hit.items} == {
+        a.api_id for a in apis.values() if a.path == "/v1/payments" or a.path.startswith("/v1/payments/")
+    }
+    assert hit.items and hit.total == len(hit.items)
+    # anchored: a prefix that only appears mid-path matches nothing (a free-text query would)
+    assert store.search_apis(path_prefix="payments", limit=500).items == []
 
 
 # -- golden: current_state / watermarks / operator_scope -----------------------------------------

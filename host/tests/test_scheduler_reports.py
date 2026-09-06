@@ -179,7 +179,8 @@ class RecordingBackend(AtworksBackend):
         self.run = run
         self.calls: list[str] = []
 
-    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
+    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
+                          path_prefix=None):
         raise NotImplementedError
 
     async def get_api(self, session, api_id):
@@ -196,13 +197,16 @@ class RecordingBackend(AtworksBackend):
     async def count_runs(self, session, since=None, until=None, status=None, api_id=None):
         raise NotImplementedError
 
+    async def count_runs_by_job(self, session, since=None, until=None):
+        raise NotImplementedError
+
     async def aggregate_runs(self, session, q):
         raise NotImplementedError
 
     async def current_state(self, session, scope_api_ids=None):
         raise NotImplementedError
 
-    async def watermarks(self, session, api_ids=None, first_non_pass_since=None):
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None, last_non_pass_since=None):
         raise NotImplementedError
 
     async def operator_scope(self, session, operator_id, window_days):

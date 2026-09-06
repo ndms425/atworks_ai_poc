@@ -26,6 +26,7 @@ ordinary indexed text predicates.
 """
 from __future__ import annotations
 
+import heapq
 import json
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -34,12 +35,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from atworks_agent import (
+    AggregateQuery,
     ApiSpec,
     ApiWatermark,
     AuditEntry,
     CellKey,
     CellState,
+    KeyCounts,
     Page,
+    RunGroup,
     RunResult,
     RunsQuery,
     RunStatus,
@@ -48,6 +52,7 @@ from atworks_agent import (
     merge_watermark,
     rollup_delta,
 )
+from atworks_agent.aggregation import MAX_RUN_IDS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS apis (
@@ -128,7 +133,12 @@ CREATE TABLE IF NOT EXISTS rollup_day (
     error INTEGER NOT NULL DEFAULT 0,
     transitions INTEGER NOT NULL DEFAULT 0,
     p95_duration_ms INTEGER,
+    -- both maps are {group key: {"count": n, "fail": n, "error": n}} (see materialize.KeyCounts):
+    -- a group keyed by a rule or an HTTP status reports its own fail/error/passed split, which a
+    -- flat key->count map cannot produce. http_status_counts (Task 8) is what keeps group_by=
+    -- "http_status" on the rollup instead of falling back to a run scan.
     failed_rule_counts JSON,
+    http_status_counts JSON,
     PRIMARY KEY (day, api_id, target_env, test_data_label)
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_day_day ON rollup_day(day);
@@ -196,6 +206,123 @@ def _label_out(label: str | None) -> str | None:
     return label if label else None
 
 
+_RUN_ID_SCAN_CAP = 5000     # bounded newest-first scan that fills run_ids for the map-keyed axes
+_API_SAMPLE_CAP = 20        # RunGroup.api_sample -- InsightCandidate.api_ids' own schema cap
+
+# The group key, as SQL, per aggregation._keys -- once over rollup_day's cell columns and once over
+# raw runs (the exact edge-day path). The two map-keyed axes live in their own JSON columns.
+_LABEL_SQL = "CASE WHEN test_data_label IS NULL OR test_data_label = '' THEN '-' ELSE test_data_label END"
+_ROLLUP_KEY_SQL = {
+    "api": "api_id",
+    "env": "target_env",
+    "api_env_data": f"api_id || '|' || target_env || '|' || {_LABEL_SQL}",
+}
+_RUNS_KEY_SQL = dict(_ROLLUP_KEY_SQL)
+_MAP_COLUMN = {"failed_rule": "failed_rule_counts", "http_status": "http_status_counts"}
+
+
+# One accumulator row, as a plain list (a dict per group is measurable when a query returns one
+# group per cell in the project): [count, passed, fail, error, transitions, p95, api_count].
+_COUNT, _PASSED, _FAIL, _ERROR, _TRANSITIONS, _P95, _API_COUNT = range(7)
+
+
+def _acc_for(acc: dict[str, list], key: str) -> list:
+    row = acc.get(key)
+    if row is None:
+        row = [0, 0, 0, 0, 0, None, None]
+        acc[key] = row
+    return row
+
+
+def _max_or_none(a: int | None, b: int | None) -> int | None:
+    return b if a is None else (a if b is None else max(a, b))
+
+
+def _window_partitions(
+    since: datetime | None, until: datetime | None, briefing_tz: str,
+) -> tuple[tuple[str | None, str | None] | None, list[tuple[datetime, datetime]]]:
+    """Split ``[since, until)`` into the whole local days the rollup can answer and the (at most
+    two) partial edge windows it cannot. A window that contains no whole day at all -- the daily
+    briefing's 09:00→09:00, say -- comes back as one edge and no rollup range."""
+    tz = ZoneInfo(briefing_tz)
+    edges: list[tuple[datetime, datetime]] = []
+    day_from: str | None = None
+    day_to: str | None = None
+    lower_edge: tuple[datetime, datetime] | None = None
+    upper_edge: tuple[datetime, datetime] | None = None
+    if since is not None:
+        local = since.astimezone(tz)
+        midnight = datetime.combine(local.date(), datetime.min.time(), tzinfo=tz)
+        if local == midnight:
+            day_from = local.date().isoformat()
+        else:
+            next_midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+            day_from = next_midnight.date().isoformat()
+            lower_edge = (since, next_midnight)
+    if until is not None:
+        local = until.astimezone(tz)
+        midnight = datetime.combine(local.date(), datetime.min.time(), tzinfo=tz)
+        day_to = (local.date() - timedelta(days=1)).isoformat()
+        if local != midnight:
+            upper_edge = (midnight, until)
+    if day_from is not None and day_to is not None and day_from > day_to:
+        # no whole day inside the window: one exact query over runs covers all of it
+        return None, [(since, until)]   # type: ignore[list-item]
+    if lower_edge is not None:
+        edges.append(lower_edge)
+    if upper_edge is not None:
+        edges.append(upper_edge)
+    return (day_from, day_to), edges
+
+
+def _counts(row: list, status: str | None) -> tuple[int, int, int, int]:
+    """``(count, passed, fail, error)`` a group reports under ``status``. A rollup row keeps the
+    three verdict counters side by side, so a status filter is a choice of counters, never a scan."""
+    count, passed, fail, error = row[_COUNT], row[_PASSED], row[_FAIL], row[_ERROR]
+    if status == "pass":
+        return passed, passed, 0, 0
+    if status == "fail":
+        return fail, 0, fail, 0
+    if status == "error":
+        return error, 0, 0, error
+    if status == "non_pass":
+        return fail + error, 0, fail, error
+    return count, passed, fail, error
+
+
+def _group_from_acc(
+    key: str, row: list, counts: tuple[int, int, int, int], q: AggregateQuery,
+    apis: Mapping[str, ApiSpec], flaky_min: int,
+) -> RunGroup:
+    count, passed, fail, error = counts
+    # A status filter leaves a single-verdict population, whose pass<->non-pass transition count is
+    # zero by construction -- the same number the pre-rollup scan produced over a filtered run list.
+    transitions = 0 if q.status else row[_TRANSITIONS]
+    api = apis.get(key) if q.group_by == "api" else None
+    return RunGroup(
+        key=key, label=f"{api.method} {api.path}" if api is not None else key,
+        count=count, fail=fail, error=error, passed=passed,
+        transitions=transitions, flaky=transitions >= flaky_min,
+        p95_duration_ms=row[_P95],
+        api_count=row[_API_COUNT] if q.group_by in _MAP_COLUMN else None,
+    )
+
+
+def _merge_key_counts(stored: str | None, delta: Mapping[str, KeyCounts]) -> str:
+    """Fold a batch's ``{key: KeyCounts}`` map into the JSON already on the rollup row and return
+    the JSON to store back. Values are ``{"count","fail","error"}`` objects, not bare ints --
+    see ``materialize.KeyCounts``."""
+    merged: dict[str, dict[str, int]] = json.loads(stored) if stored else {}
+    for key, counts in delta.items():
+        row = merged.get(key) or {"count": 0, "fail": 0, "error": 0}
+        merged[key] = {
+            "count": row.get("count", 0) + counts.count,
+            "fail": row.get("fail", 0) + counts.fail,
+            "error": row.get("error", 0) + counts.error,
+        }
+    return json.dumps(merged, ensure_ascii=False)
+
+
 class Store:
     """Owns the sqlite3 connection and every SQL query MockAtworks needs. Runs/bodies/audit are
     the only state that actually lives here in Task 4 -- job/rule/profile/format ledgers stay
@@ -218,7 +345,18 @@ class Store:
         """CREATE TABLE/INDEX IF NOT EXISTS throughout -- safe to call on an already-initialized
         connection (constructor calls it once; tests call it again to assert idempotency)."""
         self._conn.executescript(_SCHEMA)
+        self._migrate_columns()
         self._conn.commit()
+
+    def _migrate_columns(self) -> None:
+        """Columns added to a table that already exists on disk. ``CREATE TABLE IF NOT EXISTS``
+        never widens an existing table, so a store written before Task 8 keeps its old
+        ``rollup_day`` shape until this ALTER runs; the new column stays NULL (read as an empty
+        map) until ``rebuild_materialized`` refills it."""
+        for table, column, decl in (("rollup_day", "http_status_counts", "JSON"),):
+            existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if existing and column not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # -- fixtures ----------------------------------------------------------------------------
 
@@ -250,6 +388,7 @@ class Store:
             "VALUES (?,?,?,?,?,?,?,?)",
             rows,
         )
+        self._refresh_api_updated_at([a[0] for a in rows])
         self._conn.commit()
 
     @staticmethod
@@ -262,7 +401,7 @@ class Store:
 
     def search_apis(
         self, query: str = "", group: str | None = None, updated_after: datetime | None = None,
-        cursor: str | None = None, limit: int = 20,
+        cursor: str | None = None, limit: int = 20, path_prefix: str | None = None,
     ) -> Page[ApiSpec]:
         clauses: list[str] = []
         params: list = []
@@ -273,6 +412,12 @@ class Store:
         if group is not None:
             clauses.append('"group" = ?')
             params.append(group)
+        if path_prefix is not None:
+            # A separate predicate, never folded into `query`: `query` is a free-text LIKE over
+            # method+path+name, so a prefix pushed through it would also match the middle of a
+            # path or a name. This one is anchored and index-backed (idx_apis_path).
+            clauses.append("(path = ? OR path LIKE ?)")
+            params += [path_prefix, f"{path_prefix}/%"]
         if updated_after is not None:
             clauses.append("updated_at >= ?")
             params.append(_iso(updated_after))
@@ -430,13 +575,13 @@ class Store:
         for row in rollups:
             label = _label_in(row.test_data_label)
             existing = self._conn.execute(
-                'SELECT "count", "pass", fail, error, transitions, p95_duration_ms, failed_rule_counts '
+                'SELECT "count", "pass", fail, error, transitions, p95_duration_ms, failed_rule_counts, '
+                "http_status_counts "
                 "FROM rollup_day WHERE day = ? AND api_id = ? AND target_env = ? AND test_data_label = ?",
                 (row.day, row.api_id, row.target_env, label),
             ).fetchone()
-            counts = dict(json.loads(existing["failed_rule_counts"] or "{}")) if existing else {}
-            for rule, n in row.failed_rule_counts.items():
-                counts[rule] = counts.get(rule, 0) + n
+            rules = _merge_key_counts(existing["failed_rule_counts"] if existing else None, row.failed_rule_counts)
+            https = _merge_key_counts(existing["http_status_counts"] if existing else None, row.http_status_counts)
             # p95 across merged batches is the documented §4 approximation (max of the per-batch
             # p95s), NOT an exact percentile over the union -- rollup_day never keeps raw durations.
             p95 = row.p95_duration_ms
@@ -444,14 +589,15 @@ class Store:
                 p95 = existing["p95_duration_ms"] if p95 is None else max(p95, existing["p95_duration_ms"])
             self._conn.execute(
                 'INSERT OR REPLACE INTO rollup_day (day, api_id, target_env, test_data_label, "count", '
-                '"pass", fail, error, transitions, p95_duration_ms, failed_rule_counts) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                '"pass", fail, error, transitions, p95_duration_ms, failed_rule_counts, http_status_counts) '
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (row.day, row.api_id, row.target_env, label,
                  (existing["count"] if existing else 0) + row.count,
                  (existing["pass"] if existing else 0) + row.passed,
                  (existing["fail"] if existing else 0) + row.fail,
                  (existing["error"] if existing else 0) + row.error,
                  (existing["transitions"] if existing else 0) + row.transitions,
-                 p95, json.dumps(counts)),
+                 p95, rules, https),
             )
 
         for mark in marks:
@@ -468,9 +614,13 @@ class Store:
                  _iso(merged.first_non_pass_at) if merged.first_non_pass_at else None,
                  _iso(merged.last_non_pass_at) if merged.last_non_pass_at else None,
                  merged.latest_status.value if merged.latest_status else None,
-                 # api_updated_at stays whatever it was (NULL until Task 8 fills it from ApiSpec).
                  row["api_updated_at"] if row is not None else None),
             )
+        # spec §3's ``api_watermark ... updated_at(api)``: the catalogue's own updated_at is
+        # denormalized onto the watermark row at ingest (and refreshed by ``load_apis``) so the
+        # regression rule ``last_pass_at < api.updated_at <= first_non_pass_at`` is one indexed
+        # read with no join for a REST adapter to reproduce.
+        self._refresh_api_updated_at([m.api_id for m in marks])
 
         for delta in operators:
             row = self._conn.execute(
@@ -486,6 +636,25 @@ class Store:
                 (delta.operator_id, delta.api_id, last,
                  (row["run_count"] if row is not None else 0) + delta.run_count),
             )
+
+    def _refresh_api_updated_at(self, api_ids: Sequence[str] | None = None) -> None:
+        """Copy ``apis.updated_at`` onto ``api_watermark.api_updated_at`` for the given APIs (all
+        of them when None). Called from ``_materialize`` (new marks) and ``load_apis`` (a spec
+        whose updated_at moved -- tests redate fixture APIs through ``backend.apis[id] = ...``),
+        so the denormalized copy can never drift from the catalogue."""
+        if api_ids is not None and not api_ids:
+            return
+        sql = (
+            "UPDATE api_watermark SET api_updated_at = "
+            "(SELECT updated_at FROM apis WHERE apis.api_id = api_watermark.api_id)"
+        )
+        if api_ids is None:
+            self._conn.execute(sql)
+            return
+        for start in range(0, len(api_ids), 500):
+            chunk = list(api_ids[start:start + 500])
+            placeholders = ",".join("?" for _ in chunk)
+            self._conn.execute(f"{sql} WHERE api_watermark.api_id IN ({placeholders})", chunk)
 
     def _current_state_for(self, api_ids: Sequence[str]) -> dict[CellKey, CellState]:
         if not api_ids:
@@ -514,6 +683,7 @@ class Store:
             first_non_pass_at=_parse_iso(row["first_non_pass_at"]) if row["first_non_pass_at"] else None,
             last_non_pass_at=_parse_iso(row["last_non_pass_at"]) if row["last_non_pass_at"] else None,
             latest_status=RunStatus(row["latest_status"]) if row["latest_status"] else None,
+            api_updated_at=_parse_iso(row["api_updated_at"]) if row["api_updated_at"] else None,
         )
 
     @staticmethod
@@ -600,6 +770,17 @@ class Store:
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self._conn.execute(f"SELECT COUNT(*) FROM runs {where_sql}", params).fetchone()[0]
 
+    def count_runs_by_job(self, since: datetime | None = None, until: datetime | None = None) -> dict[str, int]:
+        """``{job_id: runs in the window}`` in one indexed GROUP BY -- the briefing's "which jobs
+        executed last night, and how many runs each" without ever materializing a run."""
+        clauses, params = self._runs_predicates(since=since, until=until)
+        clauses.append("job_id IS NOT NULL")
+        where_sql = f"WHERE {' AND '.join(clauses)}"
+        rows = self._conn.execute(
+            f"SELECT job_id, COUNT(*) AS n FROM runs {where_sql} GROUP BY job_id", params,
+        ).fetchall()
+        return {r["job_id"]: r["n"] for r in rows}
+
     def get_run(self, run_id: str) -> RunResult | None:
         row = self._conn.execute(
             "SELECT runs.*, bodies.body AS body FROM runs LEFT JOIN bodies ON bodies.run_id = runs.run_id "
@@ -653,6 +834,286 @@ class Store:
             return None
         return json.loads(row["body"])
 
+    # -- rollup-fed aggregation (Task 8, spec §9) -------------------------------------------
+
+    def aggregate_rollups(
+        self, q: AggregateQuery, *, flaky_min: int, apis: Mapping[str, ApiSpec],
+        briefing_tz: str = "Asia/Seoul",
+    ) -> list[RunGroup]:
+        """``aggregate_runs`` without a run scan: the group SET and every count come from
+        ``rollup_day`` (whole local days) plus at most two exact edge queries over ``runs`` for the
+        partial days a window starts/ends inside, so **every** API in the window is represented --
+        no 2000-run sample. The derived fields come from the other materialized tables
+        (``api_watermark`` for the api axis, ``current_state`` for the cell axis).
+
+        Documented semantic deltas vs a from-scratch scan of every run in the window:
+
+        * ``p95_duration_ms`` -- MAX of the per-day rollup p95s over the window's WHOLE days
+          (§4's documented approximation; rollup_day never keeps raw durations), not a percentile
+          over the union, and edge days do not contribute.
+        * ``transitions`` -- the ingest-time per-cell counter summed over the window's whole days:
+          the first run of a window is compared with the run before it (a window edge can add or
+          drop one), and the sum is per CELL, so on the ``api``/``env`` axes it no longer counts
+          flips of the interleaved multi-cell sequence (which was never what flaky_v1 means). The
+          ``failed_rule``/``http_status`` axes have no per-key counter at all and report 0.
+        * ``last_pass_before`` -- the watermark's ``last_pass_at`` (the API's last pass EVER), not
+          "the last pass before the first failure inside the window"; with it, ``regression_suspect``
+          is spec §3's rule ``last_pass_at < api.updated_at <= first_non_pass_at``, which an API
+          that has since recovered no longer satisfies.
+        * ``latest_status`` / ``first_non_pass_at`` -- from ``api_watermark`` (api axis) and
+          ``current_state`` (cell axis), i.e. all-time, not clipped to the window; None on the
+          ``env`` / ``failed_rule`` / ``http_status`` axes, which have no materialized source.
+        * ``run_ids`` -- exact newest-50 for the api/env/cell axes (one indexed query per returned
+          group); for the two map-keyed axes they come from one bounded newest-first scan
+          (``_RUN_ID_SCAN_CAP`` rows), so a rare key in a huge window can return fewer than 50.
+        * the window is exact: whole days come from the rollup, the partial first/last day from an
+          indexed GROUP BY over ``runs`` (pure SQL, no RunResult is ever built).
+        """
+        interior, edges = _window_partitions(q.since, q.until, briefing_tz)
+        acc: dict[str, list] = {}
+        if interior is not None:
+            self._fold_rollup_days(acc, q, interior)
+        for lo, hi in edges:
+            self._fold_edge_runs(acc, q, lo, hi)
+        # Rank on plain lists and keep only the top `limit`, THEN build models: the cell axis can
+        # reach one accumulator per (api, env, data) in the project (73k on the mid-scale set),
+        # and both a full sort and a RunGroup per accumulator cost more than the SQL pass itself.
+        # A zero-count group (possible only under a status filter) always sorts last, so trimming
+        # them after the heap selection cannot drop a real group.
+        status = q.status
+
+        def rank(item: tuple[str, list]) -> tuple[int, int, str]:
+            count, _passed, fail, error = _counts(item[1], status)
+            return (-(fail + error), -count, item[0])
+
+        top = heapq.nsmallest(q.limit, acc.items(), key=rank)
+        groups = [
+            _group_from_acc(key, row, counts, q, apis, flaky_min)
+            for key, row, counts in ((k, r, _counts(r, status)) for k, r in top)
+            if counts[0] > 0
+        ]
+        self._fill_run_ids(groups, q)
+        self._fill_derived(groups, q, apis)
+        return groups
+
+    @staticmethod
+    def _rollup_scope(q: AggregateQuery, interior: tuple[str | None, str | None]) -> tuple[list[str], list]:
+        day_from, day_to = interior
+        clauses: list[str] = []
+        params: list = []
+        if day_from is not None:
+            clauses.append("day >= ?")
+            params.append(day_from)
+        if day_to is not None:
+            clauses.append("day <= ?")
+            params.append(day_to)
+        if q.scope_api_ids is not None:
+            placeholders = ",".join("?" for _ in q.scope_api_ids)
+            clauses.append(f"api_id IN ({placeholders})" if q.scope_api_ids else "0")
+            params.extend(q.scope_api_ids)
+        return clauses, params
+
+    def _tuples(self, sql: str, params: Sequence) -> list[tuple]:
+        """Run a hot aggregate query with the plain-tuple row factory. The connection's default
+        is ``sqlite3.Row``, whose per-row construction is a measurable share of a query that can
+        return one row per cell in the project (73k on the mid-scale set)."""
+        cursor = self._conn.cursor()
+        cursor.row_factory = None
+        return cursor.execute(sql, params).fetchall()
+
+    def _fold_rollup_days(self, acc: dict[str, list], q: AggregateQuery, interior: tuple[str | None, str | None]) -> None:
+        clauses, params = self._rollup_scope(q, interior)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        if q.group_by in _MAP_COLUMN:
+            column = _MAP_COLUMN[q.group_by]
+            rows = self._tuples(
+                "SELECT je.key AS gkey, "
+                "SUM(json_extract(je.value, '$.count')), "
+                "SUM(json_extract(je.value, '$.fail')), "
+                "SUM(json_extract(je.value, '$.error')), "
+                "MAX(p95_duration_ms), COUNT(DISTINCT api_id) "
+                f"FROM rollup_day, json_each(rollup_day.{column}) je {where_sql} GROUP BY gkey",
+                params,
+            )
+            for key, count, fail, error, p95, api_count in rows:
+                count, fail, error = count or 0, fail or 0, error or 0
+                cell = acc.get(key)
+                if cell is None:
+                    # [count, passed, fail, error, transitions, p95, api_count] -- see _COUNT/_P95
+                    acc[key] = [count, count - fail - error, fail, error, 0, p95, api_count or 0]
+                    continue
+                cell[_COUNT] += count
+                cell[_PASSED] += count - fail - error
+                cell[_FAIL] += fail
+                cell[_ERROR] += error
+                cell[_P95] = _max_or_none(cell[_P95], p95)
+                cell[_API_COUNT] = max(cell[_API_COUNT] or 0, api_count or 0)
+            return
+        rows = self._tuples(
+            f"SELECT {_ROLLUP_KEY_SQL[q.group_by]} AS gkey, "
+            'SUM("count"), SUM("pass"), SUM(fail), SUM(error), SUM(transitions), MAX(p95_duration_ms) '
+            f"FROM rollup_day {where_sql} GROUP BY gkey",
+            params,
+        )
+        for key, count, passed, fail, error, transitions, p95 in rows:
+            cell = acc.get(key)
+            if cell is None:
+                acc[key] = [count or 0, passed or 0, fail or 0, error or 0, transitions or 0, p95, None]
+                continue
+            cell[_COUNT] += count or 0
+            cell[_PASSED] += passed or 0
+            cell[_FAIL] += fail or 0
+            cell[_ERROR] += error or 0
+            cell[_TRANSITIONS] += transitions or 0
+            cell[_P95] = _max_or_none(cell[_P95], p95)
+
+    def _fold_edge_runs(self, acc: dict[str, list], q: AggregateQuery, lo: datetime, hi: datetime) -> None:
+        """The partial day(s) a window starts/ends inside, counted EXACTLY from ``runs`` with an
+        indexed range predicate -- one grouped SQL statement, no RunResult built. This is what
+        keeps a 09:00→09:00 briefing window from being rounded out to two whole local days."""
+        clauses, params = self._runs_predicates(since=lo, until=hi, api_ids=q.scope_api_ids)
+        where_sql = " AND ".join(clauses)
+        counters = "COUNT(*) AS c, SUM(status = 'fail') AS f, SUM(status = 'error') AS e"
+        if q.group_by == "failed_rule":
+            rows = self._conn.execute(
+                "SELECT je.value AS gkey, COUNT(DISTINCT runs.run_id) AS c, "
+                "COUNT(DISTINCT CASE WHEN status = 'fail' THEN runs.run_id END) AS f, "
+                "COUNT(DISTINCT CASE WHEN status = 'error' THEN runs.run_id END) AS e "
+                f"FROM runs, json_each(runs.failed_rules) je WHERE {where_sql} AND status != 'pass' GROUP BY gkey",
+                params,
+            ).fetchall()
+            rows = [*rows, *self._conn.execute(
+                "SELECT '(error) HTTP ' || COALESCE(CAST(http_status AS TEXT), '(none)') AS gkey, "
+                f"{counters} FROM runs WHERE {where_sql} AND status != 'pass' "
+                "AND json_array_length(COALESCE(failed_rules, '[]')) = 0 GROUP BY gkey",
+                params,
+            ).fetchall()]
+        elif q.group_by == "http_status":
+            rows = self._conn.execute(
+                "SELECT COALESCE(CAST(http_status AS TEXT), '(none)') AS gkey, "
+                f"{counters} FROM runs WHERE {where_sql} GROUP BY gkey", params,
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT {_RUNS_KEY_SQL[q.group_by]} AS gkey, {counters} "
+                f"FROM runs WHERE {where_sql} GROUP BY gkey", params,
+            ).fetchall()
+        for row in rows:
+            cell = _acc_for(acc, row["gkey"])
+            count, fail, error = row["c"] or 0, row["f"] or 0, row["e"] or 0
+            cell[_COUNT] += count
+            cell[_FAIL] += fail
+            cell[_ERROR] += error
+            cell[_PASSED] += count - fail - error
+
+    def _fill_run_ids(self, groups: list[RunGroup], q: AggregateQuery) -> None:
+        """Newest-first run ids (<= MAX_RUN_IDS) for each returned group. The api/env/cell axes get
+        one indexed query per group (at most ``q.limit`` of them); the two map-keyed axes cannot be
+        expressed as an indexed predicate, so they share ONE bounded newest-first scan."""
+        if not groups:
+            return
+        base_clauses, base_params = self._runs_predicates(
+            since=q.since, until=q.until, status=q.status, api_ids=q.scope_api_ids,
+        )
+        if q.group_by in _MAP_COLUMN:
+            self._fill_run_ids_by_scan(groups, q, base_clauses, base_params)
+            return
+        for group in groups:
+            clauses, params = list(base_clauses), list(base_params)
+            if q.group_by == "api":
+                clauses.append("api_id = ?")
+                params.append(group.key)
+            elif q.group_by == "env":
+                clauses.append("target_env = ?")
+                params.append(group.key)
+            else:
+                api_id, env, label = group.key.split("|", 2)
+                clauses.append("api_id = ? AND target_env = ?")
+                params += [api_id, env]
+                if label == "-":
+                    clauses.append("(test_data_label IS NULL OR test_data_label = '')")
+                else:
+                    clauses.append("test_data_label = ?")
+                    params.append(label)
+            rows = self._conn.execute(
+                f"SELECT run_id FROM runs WHERE {' AND '.join(clauses)} "
+                "ORDER BY executed_at DESC, run_id DESC LIMIT ?",
+                [*params, MAX_RUN_IDS],
+            ).fetchall()
+            group.run_ids = [r["run_id"] for r in rows]
+
+    def _fill_run_ids_by_scan(
+        self, groups: list[RunGroup], q: AggregateQuery, clauses: list[str], params: list,
+    ) -> None:
+        wanted = {g.key: g for g in groups}
+        buckets: dict[str, list[str]] = {key: [] for key in wanted}
+        api_samples: dict[str, list[str]] = {key: [] for key in wanted}
+        scan = list(clauses)
+        if q.group_by == "failed_rule":
+            scan.append("status != 'pass'")     # a pass run yields no failed_rule key (aggregation._keys)
+        where_sql = f"WHERE {' AND '.join(scan)}" if scan else ""
+        rows = self._conn.execute(
+            f"SELECT run_id, api_id, status, http_status, failed_rules FROM runs {where_sql} "
+            "ORDER BY executed_at DESC, run_id DESC LIMIT ?",
+            [*params, _RUN_ID_SCAN_CAP],
+        ).fetchall()
+        filled = 0
+        for row in rows:
+            if q.group_by == "http_status":
+                keys = [str(row["http_status"]) if row["http_status"] is not None else "(none)"]
+            else:
+                rules = json.loads(row["failed_rules"]) if row["failed_rules"] else []
+                keys = list(dict.fromkeys(rules)) if rules else [
+                    f"(error) HTTP {row['http_status'] if row['http_status'] is not None else '(none)'}"
+                ]
+            for key in keys:
+                bucket = buckets.get(key)
+                if bucket is None:
+                    continue
+                sample = api_samples[key]
+                if len(sample) < _API_SAMPLE_CAP and row["api_id"] not in sample:
+                    sample.append(row["api_id"])
+                if len(bucket) >= MAX_RUN_IDS:
+                    continue
+                bucket.append(row["run_id"])
+                if len(bucket) == MAX_RUN_IDS:
+                    filled += 1
+            if filled == len(buckets):
+                break
+        for key, ids in buckets.items():
+            wanted[key].run_ids = ids
+            wanted[key].api_sample = api_samples[key]
+
+    def _fill_derived(self, groups: list[RunGroup], q: AggregateQuery, apis: Mapping[str, ApiSpec]) -> None:
+        """Fields no counter can carry: the api axis reads ``api_watermark`` (+ the catalogue's
+        updated_at) for spec §3's regression rule, the cell axis reads ``current_state``."""
+        if q.group_by == "api":
+            marks = {w.api_id: w for w in self.watermarks([g.key for g in groups])}
+            for group in groups:
+                mark = marks.get(group.key)
+                if mark is None:
+                    continue
+                api = apis.get(group.key)
+                updated_at = api.updated_at if api is not None else mark.api_updated_at
+                group.latest_status = mark.latest_status
+                group.first_non_pass_at = mark.first_non_pass_at
+                group.last_pass_before = mark.last_pass_at
+                group.api_updated_at = updated_at
+                group.regression_suspect = bool(
+                    updated_at is not None and mark.last_pass_at is not None
+                    and mark.first_non_pass_at is not None
+                    and mark.last_pass_at < updated_at <= mark.first_non_pass_at
+                )
+        elif q.group_by == "api_env_data":
+            cells = {
+                f"{c.api_id}|{c.target_env}|{c.test_data_label or '-'}": c
+                for c in self.current_state([g.key.split("|", 2)[0] for g in groups])
+            }
+            for group in groups:
+                cell = cells.get(group.key)
+                if cell is not None:
+                    group.latest_status = cell.status
+
     # -- current_state / watermarks / operator_scope: materialized reads (Task 5) ----------------
 
     def current_state(self, scope_api_ids: Sequence[str] | None = None) -> list[CellState]:
@@ -673,10 +1134,15 @@ class Store:
 
     def watermarks(
         self, api_ids: Sequence[str] | None = None, first_non_pass_since: datetime | None = None,
+        last_non_pass_since: datetime | None = None,
     ) -> list[ApiWatermark]:
-        """One indexed read of ``api_watermark`` (PK ``api_id``). ``first_non_pass_since`` is a
-        plain SQL predicate: a NULL ``first_non_pass_at`` fails it, which is exactly the
-        recompute oracle's "no non-pass run at all -> not a candidate"."""
+        """One indexed read of ``api_watermark`` (PK ``api_id``). Both ``*_since`` filters are
+        plain SQL predicates: a NULL column fails them, which is exactly the recompute oracle's
+        "no non-pass run at all -> not a candidate".
+
+        ``first_non_pass_since`` = the API's FIRST-EVER failure is at/after the cutoff (a newly
+        broken API). ``last_non_pass_since`` = the API has SOME failure at/after the cutoff --
+        the exact set a ``failed_since`` selection means, and the reason both exist."""
         clauses: list[str] = []
         params: list = []
         if api_ids is not None:
@@ -686,6 +1152,9 @@ class Store:
         if first_non_pass_since is not None:
             clauses.append("first_non_pass_at >= ?")
             params.append(_iso(first_non_pass_since))
+        if last_non_pass_since is not None:
+            clauses.append("last_non_pass_at >= ?")
+            params.append(_iso(last_non_pass_since))
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._conn.execute(
             f"SELECT * FROM api_watermark {where_sql} ORDER BY api_id", params,
@@ -694,13 +1163,33 @@ class Store:
 
     def operator_scope_ids(self, operator_id: str, window_days: int, now: datetime) -> set[str]:
         """One indexed read of ``operator_api`` (PK ``(operator_id, api_id)`` -- the leading
-        column makes this a range scan of one operator's rows, never a scan of ``runs``)."""
+        column makes this a range scan of one operator's rows, never a scan of ``runs``). Every
+        id: use ``operator_scope_summary`` on a request path, where a heavy operator's scope can
+        be tens of thousands of APIs and only a bounded sample is ever displayed."""
         cutoff = _iso(now - timedelta(days=window_days))
         rows = self._conn.execute(
             "SELECT api_id FROM operator_api WHERE operator_id = ? AND last_executed_at >= ?",
             (operator_id, cutoff),
         ).fetchall()
         return {r["api_id"] for r in rows}
+
+    def operator_scope_summary(
+        self, operator_id: str, window_days: int, now: datetime, limit: int = 100,
+    ) -> tuple[list[str], int]:
+        """``(sample, total)``: the first ``limit`` api_ids in api_id order plus the true count,
+        as two indexed reads. The full id set is never materialized -- an operator who ran 16,000
+        APIs would otherwise cost a 16,000-row fetch and a sort on every ``get_context``."""
+        cutoff = _iso(now - timedelta(days=window_days))
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM operator_api WHERE operator_id = ? AND last_executed_at >= ?",
+            (operator_id, cutoff),
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            "SELECT api_id FROM operator_api WHERE operator_id = ? AND last_executed_at >= ? "
+            "ORDER BY api_id LIMIT ?",
+            (operator_id, cutoff, limit),
+        ).fetchall()
+        return [r["api_id"] for r in rows], total
 
     # -- recompute oracles: the Task 4 on-demand implementations, kept ONLY so tests can assert
     #    the materialized tables above agree with a from-scratch scan of ``runs``. Nothing in the
@@ -745,11 +1234,16 @@ class Store:
 
     def recompute_watermarks(
         self, api_ids: Sequence[str] | None = None, first_non_pass_since: datetime | None = None,
+        last_non_pass_since: datetime | None = None,
     ) -> list[ApiWatermark]:
         """Oracle (tests only): watermarks recomputed by scanning ``runs``."""
         clauses, params = self._runs_predicates(api_ids=api_ids)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         present = self._conn.execute(f"SELECT DISTINCT api_id FROM runs {where_sql}", params).fetchall()
+        catalogue = {
+            r["api_id"]: _parse_iso(r["updated_at"])
+            for r in self._conn.execute("SELECT api_id, updated_at FROM apis").fetchall()
+        }
         result: list[ApiWatermark] = []
         for row in present:
             api_id = row["api_id"]
@@ -760,14 +1254,18 @@ class Store:
             passes = [r["executed_at"] for r in rows if r["status"] == "pass"]
             non_passes = [r for r in rows if r["status"] != "pass"]
             first_non_pass = _parse_iso(non_passes[0]["executed_at"]) if non_passes else None
+            last_non_pass = _parse_iso(non_passes[-1]["executed_at"]) if non_passes else None
             if first_non_pass_since is not None and (first_non_pass is None or first_non_pass < first_non_pass_since):
+                continue
+            if last_non_pass_since is not None and (last_non_pass is None or last_non_pass < last_non_pass_since):
                 continue
             result.append(ApiWatermark(
                 api_id=api_id,
                 last_pass_at=_parse_iso(passes[-1]) if passes else None,
                 first_non_pass_at=first_non_pass,
-                last_non_pass_at=_parse_iso(non_passes[-1]["executed_at"]) if non_passes else None,
+                last_non_pass_at=last_non_pass,
                 latest_status=RunStatus(rows[-1]["status"]) if rows else None,
+                api_updated_at=catalogue.get(api_id),
             ))
         return result
 

@@ -139,7 +139,9 @@ async def enrich_run_groups(payload: PresentRunGroupsPayload, context: Enrichmen
         if group is None:
             dropped.append(key)
             continue
-        items.append(_record(group))
+        # api_sample is the host's internal id sample behind RunGroup.api_count -- the card
+        # shows the COUNT, never the raw ids (Task 8).
+        items.append(group.model_dump(mode="json", exclude_none=True, exclude={"api_sample"}))
     if not items:
         raise PresentationRefused(
             "None of those group keys came from aggregate_runs this session; use the keys it returned.",

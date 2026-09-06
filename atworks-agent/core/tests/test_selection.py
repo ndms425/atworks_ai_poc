@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from atworks_agent import selection
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.jobs import SelectWhere
 from atworks_agent.selection import resolve_select_where
@@ -50,16 +51,26 @@ async def test_plain_query_group_updated_after_still_work_with_no_basis(wide, co
     assert set(res.api_ids) == {"api-3", "api-4"} and res.basis is None
 
 
-async def test_failed_since_basis_flags_when_the_scan_hits_the_sample_cap():
-    # The non_pass scan is truncated at max_aggregate_runs; when it comes back at the cap the
-    # selection may be missing older failures, so the basis sentence must say so rather than
-    # silently under-reporting.
-    capped_config = AtworksAgentConfig(model="m", max_aggregate_runs=1)
-    b = InMemoryBackend(capped_config)  # run-1 (fail) and run-2 (error) both qualify, above the cap
+async def test_failed_since_basis_flags_when_the_scan_hits_the_sample_cap(config, monkeypatch):
+    # Task 8: the failed set itself is now EXACT (watermarks, no run sample) -- what can still
+    # truncate is the CATALOGUE scan, capped at CATALOGUE_SCAN_LIMIT. When it comes back at the
+    # cap, APIs past it were never considered, so the basis sentence must say so.
+    monkeypatch.setattr(selection, "CATALOGUE_SCAN_LIMIT", 1)
+    b = InMemoryBackend(config)  # api-1 and api-2 both have a non-pass run, above the 1-row cap
 
-    res = await resolve_select_where(b, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), capped_config, now=T0)
+    res = await resolve_select_where(b, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), config, now=T0)
 
     assert res.basis is not None and "표본 상한" in res.basis
+
+
+async def test_failed_since_is_exact_and_not_a_run_sample(config):
+    # The old path paged max_aggregate_runs non-pass runs and intersected; an API whose only
+    # failure fell outside that sample vanished from the selection. The watermark read has no
+    # sample at all, so a tiny cap changes nothing.
+    tiny = config.model_copy(update={"max_aggregate_runs": 1})
+    b = InMemoryBackend(tiny)
+    res = await resolve_select_where(b, SESSION, SelectWhere(failed_since=T0 - timedelta(hours=1)), tiny, now=T0)
+    assert set(res.api_ids) == {"api-1", "api-2"}
 
 
 async def test_ordering_breaks_updated_at_ties_by_api_id_for_determinism(config):

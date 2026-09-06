@@ -50,7 +50,6 @@ from atworks_agent import (
     policy_from_config,
     resolve_select_where,
 )
-from atworks_agent.aggregation import aggregate
 from atworks_agent.types import Binding
 
 from .reports import Reports
@@ -225,8 +224,10 @@ class MockAtworks(AtworksBackend):
     async def list_operators(self, session) -> list[OperatorProfile]:
         return list(self.operators.values())
 
-    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
-        return self.store.search_apis(query=query, group=group, updated_after=updated_after, cursor=cursor, limit=limit)
+    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
+                          path_prefix=None):
+        return self.store.search_apis(query=query, group=group, updated_after=updated_after, cursor=cursor,
+                                      limit=limit, path_prefix=path_prefix)
 
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
@@ -240,25 +241,31 @@ class MockAtworks(AtworksBackend):
     async def count_runs(self, session, since=None, until=None, status=None, api_id=None):
         return self.store.count_runs(since=since, until=until, status=status, api_id=api_id)
 
+    async def count_runs_by_job(self, session, since=None, until=None) -> dict[str, int]:
+        return self.store.count_runs_by_job(since=since, until=until)
+
     async def aggregate_runs(self, session, q: AggregateQuery):
-        # Windowed/scoped SQL fetch (indexed on executed_at/api_id) narrows the row set; the
-        # grouping/derived-field logic (run_ids, transitions, p95, regression_suspect, ...) is
-        # reused byte-for-byte from aggregation.aggregate so the output is identical by
-        # construction to the pre-SQL dict implementation.
-        rows = self.store.fetch_runs(since=q.since, until=q.until, api_ids=q.scope_api_ids)
-        groups = aggregate(rows, self.apis, q.group_by, flaky_min_transitions=self._config.flaky_min_transitions)
-        return groups[: q.limit]
+        # Task 8: rollup-fed. The group set and every count come from `rollup_day` (+ an exact
+        # edge query over `runs` for a partial first/last day), the derived fields from
+        # `api_watermark` / `current_state` -- so every API in the window is represented and the
+        # cost follows the window's DAYS, not its runs. `Store.aggregate_rollups`' docstring
+        # carries the documented semantic deltas vs the old whole-window run scan.
+        return self.store.aggregate_rollups(
+            q, flaky_min=self._config.flaky_min_transitions, apis=self.apis,
+            briefing_tz=self._config.briefing_tz,
+        )
 
     async def current_state(self, session, scope_api_ids=None) -> list[CellState]:
         return self.store.current_state(scope_api_ids)
 
-    async def watermarks(self, session, api_ids=None, first_non_pass_since=None) -> list[ApiWatermark]:
-        return self.store.watermarks(api_ids, first_non_pass_since)
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None,
+                         last_non_pass_since=None) -> list[ApiWatermark]:
+        return self.store.watermarks(api_ids, first_non_pass_since, last_non_pass_since)
 
     async def operator_scope(self, session, operator_id: str, window_days: int) -> ScopeSummary:
         now = session.local_now() or datetime.now(UTC)
-        scope = self.store.operator_scope_ids(operator_id, window_days, now)
-        return ScopeSummary(api_ids=sorted(scope)[:100], total=len(scope))
+        sample, total = self.store.operator_scope_summary(operator_id, window_days, now, limit=100)
+        return ScopeSummary(api_ids=sample, total=total)
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind) -> JobSpec:
         return self.ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
@@ -534,11 +541,17 @@ class MockAtworks(AtworksBackend):
         return produced
 
     async def get_context(self, session):
-        fails = self.store.count_runs(status="fail")
-        errors = self.store.count_runs(status="error")
+        # Windowed counts (spec §9: count_runs ×2 over 30 days + operator_scope). Without the
+        # window these two were an index scan of every fail and every error ever recorded -- the
+        # same count bounded to the window is O(window), which is what keeps this read inside its
+        # 50ms budget at 2M runs. The window is the same one the operator scope uses.
         now = session.local_now() or datetime.now(UTC)
-        scope = self.store.operator_scope_ids(session.operator, self._config.scope_window_days, now)
+        since = now - timedelta(days=self._config.scope_window_days)
+        fails = self.store.count_runs(since=since, status="fail")
+        errors = self.store.count_runs(since=since, status="error")
+        scope, scope_total = self.store.operator_scope_summary(
+            session.operator, self._config.scope_window_days, now, limit=20)
         return {"project": session.project_id, "allowed_targets": list(self._config.allowed_target_envs),
                 "recent_counts": {"fail": fails, "error": errors, "pending_jobs": len(self.ledger.pending())},
                 "operator": session.operator, "operator_role": session.role,
-                "scope_api_ids": sorted(scope)[:20], "scope_api_count": len(scope)}
+                "scope_api_ids": scope, "scope_api_count": scope_total}

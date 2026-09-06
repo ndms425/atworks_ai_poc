@@ -59,20 +59,27 @@ SIZES = (
 # Tasks 8/9 flip these to True one at a time as each path is rewired and turns green. Every
 # measured bench row must appear here (test_bench_rows_are_all_declared enforces that), so a new
 # or renamed path can never slip past the switch unnoticed.
+#
+# Task 8 turned the aggregate/context/insight/briefing reads on: they read rollup_day,
+# api_watermark, current_state and operator_api instead of scanning (or sampling) runs, and every
+# one of them is green on the reduced set AND on the 450k-run mid set. The rows still False are
+# other tasks' -- the list/count/simulate reads were already inside their budget before Task 8
+# (nothing was rewired, so there is nothing here to guard), retention does not exist until T9, and
+# the SSE row is T9's chunked ingest.
 SLO_ASSERT: dict[str, bool] = {
-    "get_context": False,
+    "get_context": True,
     "list_runs page 1 (limit 50)": False,
     "list_runs page 2 (cursor)": False,
     "count_runs (fail, 30d)": False,
-    "aggregate_runs group_by=api": False,
-    "aggregate_runs group_by=env": False,
-    "aggregate_runs group_by=http_status": False,
-    "aggregate_runs group_by=failed_rule": False,
-    "aggregate_runs group_by=api_env_data": False,
-    "aggregate_runs (max of 5)": False,
+    "aggregate_runs group_by=api": True,
+    "aggregate_runs group_by=env": True,
+    "aggregate_runs group_by=http_status": True,
+    "aggregate_runs group_by=failed_rule": True,
+    "aggregate_runs group_by=api_env_data": True,
+    "aggregate_runs (max of 5)": True,
     "simulate_rule (30d, amount)": False,
-    "insights.build (deterministic)": False,
-    "briefing.generate": False,
+    "insights.build (deterministic)": True,
+    "briefing.generate": True,
     "retention day job": False,
     "chat SSE latency during 400-cell execute": False,
 }

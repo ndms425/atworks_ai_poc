@@ -13,14 +13,13 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from atworks_agent import (
+    AggregateQuery,
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
     RunsQuery,
     ScreenState,
-    collect_runs,
 )
-from atworks_agent.aggregation import summarize_insights
 from atworks_agent.serialization import (
     api_record,
     format_batch_record,
@@ -114,30 +113,41 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             attached_items=request.attached_items, screen_state=request.screen_state,
         )
 
+    # /apis and /runs answer in BOTH shapes while the web still reads the legacy keys: the paged
+    # envelope ({items, next_cursor, total}) plus `apis` / `runs`+`population`. Task 10 swaps the
+    # portal onto the envelope and DELETES the legacy keys (and the 500-row default with them).
     @router.get("/apis")
-    async def apis(record: CurrentSession, query: str = "", group: str | None = None) -> dict:
-        page = await backend.search_apis(context(record), query=query, group=group, limit=500)
-        return {"apis": [api_record(a) for a in page.items]}
+    async def apis(record: CurrentSession, query: str = "", group: str | None = None,
+                   cursor: str | None = None, limit: int = Query(500, ge=1, le=500)) -> dict:
+        page = await backend.search_apis(context(record), query=query, group=group, cursor=cursor, limit=limit)
+        items = [api_record(a) for a in page.items]
+        return {"items": items, "next_cursor": page.next_cursor, "total": page.total, "apis": items}
 
     @router.get("/runs/insights")
     async def insights(record: CurrentSession) -> dict:
         s = context(record)
         cfg = agent.config
         since = datetime.now(UTC) - timedelta(days=cfg.max_aggregate_window_days)
-        rows = await collect_runs(backend, s, since=since, cap=cfg.max_aggregate_runs)
-        apis = {a.api_id: a for a in (await backend.search_apis(s, query="", limit=1000)).items}
-        found = summarize_insights(rows, apis, cfg)
-        return {"flaky": found.flaky, "regression_suspect": found.regression_suspect, "window_days": cfg.max_aggregate_window_days}
+        # Two rollup-fed aggregate reads, no run list: the flaky/regression tiles now count over
+        # every API in the window instead of the newest max_aggregate_runs runs (spec §9).
+        cells = await backend.aggregate_runs(s, AggregateQuery(since=since, group_by="api_env_data", limit=500))
+        by_api = await backend.aggregate_runs(s, AggregateQuery(since=since, group_by="api", limit=500))
+        return {"flaky": sum(1 for g in cells if g.flaky),
+                "regression_suspect": sum(1 for g in by_api if g.regression_suspect),
+                "window_days": cfg.max_aggregate_window_days}
 
     @router.get("/runs")
-    async def runs(record: CurrentSession, status: str | None = None, since: str | None = None, limit: int = Query(50, le=200)) -> dict:
+    async def runs(record: CurrentSession, status: str | None = None, since: str | None = None,
+                   cursor: str | None = None, limit: int = Query(50, le=200)) -> dict:
         s = context(record)
         since_dt = _aware(since)
         # RunsQuery.limit caps at 200 (the paged read contract, spec 2026-09-06); the route's
         # own bound matches so an over-limit request 422s here instead of a validation error
         # surfacing from inside list_runs.
-        page = await backend.list_runs(s, RunsQuery(since=since_dt, status=status, limit=limit))
-        return {"population": await backend.count_runs(s, since=since_dt, status=status), "runs": [run_record(r) for r in page.items]}
+        page = await backend.list_runs(s, RunsQuery(since=since_dt, status=status, cursor=cursor, limit=limit))
+        items = [run_record(r) for r in page.items]
+        return {"items": items, "next_cursor": page.next_cursor, "total": page.total,
+                "population": await backend.count_runs(s, since=since_dt, status=status), "runs": items}
 
     @router.get("/jobs")
     async def jobs(record: CurrentSession) -> dict:

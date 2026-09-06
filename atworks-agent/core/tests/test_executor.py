@@ -455,17 +455,18 @@ async def test_aggregate_runs_keeps_the_listed_window_coherent(backend, config, 
     assert state.last_population == 3
 
 
-async def test_aggregate_runs_population_counts_the_true_total_even_when_the_window_truncates(backend, skills, session, state):
+async def test_aggregate_runs_population_counts_the_true_total_and_no_longer_samples_runs(backend, skills, session, state):
     small_config = AtworksAgentConfig(model="m", max_aggregate_runs=2)
     ex = AtworksToolExecutor(backend=backend, config=small_config, skills=skills, session=session, state=state)
     out = await ex.execute("aggregate_runs", {"group_by": "api"})
     assert not out.is_error
-    # population is the backend's true count_runs, not len(runs) -- the aggregation window
-    # (max_aggregate_runs=2) truncates the runs collected for grouping, but not the population
-    # a card is allowed to cite; "truncated" is gone from the envelope entirely (Task 3).
+    # population is the backend's true count_runs; "truncated" is gone from the envelope (Task 3).
     assert state.last_population == 3
     assert "truncated" not in out.result_text
-    assert len(state.last_listed_run_ids) == 2
+    # Task 8: the grouping is done by the backend over its rollups, so max_aggregate_runs no
+    # longer truncates ANYTHING here -- the provenance window is the evidence ids the groups
+    # themselves cite (<=MAX_RUN_IDS each), newest first, not a run sample the executor paged.
+    assert state.last_listed_run_ids == ["run-3", "run-2", "run-1"]
 
 
 async def test_aggregate_runs_population_for_api_id_uses_count_runs_not_the_truncated_window(
@@ -480,15 +481,20 @@ async def test_aggregate_runs_population_for_api_id_uses_count_runs_not_the_trun
     out = await ex.execute("aggregate_runs", {"group_by": "api", "api_id": "api-1"})
     assert not out.is_error
     assert state.last_population == 2       # run-1 and run-3 both belong to api-1
-    assert len(state.last_listed_run_ids) == 1   # the collection window was still capped at 1
+    # api_id scopes the backend's aggregate query, so the cited evidence is that API's runs only
+    assert state.last_listed_run_ids == ["run-3", "run-1"]
 
 
 async def test_aggregate_runs_caps_last_listed_run_ids_at_the_provenance_cap(backend, skills, session, state):
-    # A window well past PROVENANCE_CAP (200): the aggregation cap (max_aggregate_runs) lets
-    # collect_runs gather more than 200 runs, but last_listed_run_ids must still be trimmed to
-    # PROVENANCE_CAP the way every other seen-record map already is (remember()).
+    # 10 groups x MAX_RUN_IDS(50) cited ids = 500 candidates, well past PROVENANCE_CAP (200):
+    # last_listed_run_ids must still be trimmed to PROVENANCE_CAP the way every other
+    # seen-record map already is (remember()), and keep the newest ids.
+    backend.apis = {
+        f"api-{a}": ApiSpec(api_id=f"api-{a}", method="GET", path=f"/v1/x{a}", name=f"x{a}", updated_at=T0)
+        for a in range(10)
+    }
     backend.runs = [
-        RunResult(run_id=f"run-{i:04d}", api_id="api-1", executed_at=T0 + timedelta(minutes=i),
+        RunResult(run_id=f"run-{i:04d}", api_id=f"api-{i % 10}", executed_at=T0 + timedelta(minutes=i),
                   target_env="dev", status=RunStatus.PASS, http_status=200)
         for i in range(300)
     ]
@@ -498,6 +504,7 @@ async def test_aggregate_runs_caps_last_listed_run_ids_at_the_provenance_cap(bac
     assert not out.is_error
     assert state.last_population == 300
     assert len(state.last_listed_run_ids) == PROVENANCE_CAP
+    assert state.last_listed_run_ids[0] == "run-0299"
 
 
 async def test_stage_rule_holds_unknown_api_then_stages(backend, config, skills, session, state):

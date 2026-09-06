@@ -49,6 +49,10 @@ class AggregateQuery(BaseModel):
     until: datetime | None = None
     group_by: GroupBy
     scope_api_ids: list[str] | None = None
+    # Task 8: the aggregate read is served from rollups, and a rollup row carries pass/fail/error
+    # as separate counters -- so a status filter narrows which of those counters a group reports
+    # (it is NOT a run-level scan). ``non_pass`` is fail+error, the triage population.
+    status: RunStatusFilter | None = None
     limit: int = Field(default=50, ge=1, le=500)
 
 
@@ -117,6 +121,13 @@ class RunGroup(BaseModel):
     p95_duration_ms: int | None = None
     regression_suspect: bool = False
     api_updated_at: datetime | None = None
+    # Distinct APIs behind this group, counted over the whole window by the host -- filled only
+    # where a single key spans several APIs (``failed_rule`` / ``http_status``). It is the TRUE
+    # count (COUNT(DISTINCT api_id) over the rollup), never len(run_ids), which is capped at 50.
+    api_count: int | None = None
+    # A bounded SAMPLE of those api ids (<=20), for the insight panel's api_ids. Host-internal:
+    # the model payload excludes it (executor._aggregate_runs), the count above is the figure.
+    api_sample: list[str] | None = None
 
 
 class Insights(BaseModel):
@@ -457,6 +468,11 @@ class ApiWatermark(BaseModel):
     first_non_pass_at: datetime | None
     last_non_pass_at: datetime | None
     latest_status: RunStatus | None
+    # The ApiSpec's own updated_at, denormalized onto the watermark row (spec §3's
+    # ``api_watermark ... updated_at(api)``) so the regression rule
+    # ``last_pass_at < api.updated_at <= first_non_pass_at`` is answerable from one indexed read
+    # with no catalogue join on the caller's side. None when the API is unknown to the catalogue.
+    api_updated_at: datetime | None = None
 
 
 class ScopeSummary(BaseModel):

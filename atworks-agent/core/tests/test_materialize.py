@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from atworks_agent import CellState, RunStatus
 from atworks_agent.aggregation import aggregate
 from atworks_agent.materialize import (
+    KeyCounts,
     OperatorApiDelta,
     RollupRow,
     cell_key,
@@ -80,8 +81,10 @@ def fold(runs: list[RunResult], seed: int):
             existing.fail += row.fail
             existing.error += row.error
             existing.transitions += row.transitions
-            for rule, n in row.failed_rule_counts.items():
-                existing.failed_rule_counts[rule] = existing.failed_rule_counts.get(rule, 0) + n
+            for key_map, delta_map in ((existing.failed_rule_counts, row.failed_rule_counts),
+                                       (existing.http_status_counts, row.http_status_counts)):
+                for key, counts in delta_map.items():
+                    key_map[key] = key_map.get(key, KeyCounts()).add(counts)
             # §4's documented p95 approximation, same rule the Store applies when merging
             existing.p95_duration_ms = max(
                 [v for v in (existing.p95_duration_ms, row.p95_duration_ms) if v is not None] or [None])
@@ -127,6 +130,19 @@ def test_incremental_rollups_equal_the_recomputed_aggregate():
         cell = state[(api_id, env, label)]
         assert cell.transitions_total == group.transitions
         assert cell.status == group.latest_status
+
+    # the two key maps (Task 8) fold to exactly the failed_rule / http_status groupings
+    for group_by, attribute in (("failed_rule", "failed_rule_counts"), ("http_status", "http_status_counts")):
+        folded: dict[str, KeyCounts] = {}
+        for row in rollups.values():
+            for key, counts in getattr(row, attribute).items():
+                folded[key] = folded.get(key, KeyCounts()).add(counts)
+        expected = {g.key: g for g in aggregate(runs, APIS, group_by, flaky_min_transitions=3)}
+        assert set(folded) == set(expected), group_by
+        for key, counts in folded.items():
+            group = expected[key]
+            assert (counts.count, counts.fail, counts.error) == (group.count, group.fail, group.error), key
+            assert counts.count - counts.fail - counts.error == group.passed, key
 
     # totals, not just per cell
     assert sum(b["count"] for b in per_cell.values()) == len(runs)
@@ -209,8 +225,17 @@ def test_failed_rule_counts_mirror_the_failed_rule_grouping():
     assert len(rows) == 1
     # a rule named twice in one run counts once (the same dedup aggregate() does), a pass run
     # contributes nothing, and a rule-less non-pass falls back to the synthetic HTTP bucket
-    assert rows[0].failed_rule_counts == {"amount >= 0": 2, "(error) HTTP 503": 1}
+    assert rows[0].failed_rule_counts == {
+        "amount >= 0": KeyCounts(count=2, fail=2, error=0),
+        "(error) HTTP 503": KeyCounts(count=1, fail=0, error=1),
+    }
     assert (rows[0].count, rows[0].passed, rows[0].fail, rows[0].error) == (4, 1, 2, 1)
+    # the second map (Task 8) buckets by HTTP status over EVERY run, pass included, and carries
+    # the same fail/error split -- group_by="http_status" is answered from it without a run scan
+    assert rows[0].http_status_counts == {
+        "(none)": KeyCounts(count=3, fail=2, error=0),
+        "503": KeyCounts(count=1, fail=0, error=1),
+    }
 
 
 def test_p95_and_operator_deltas_come_from_the_batch_only():

@@ -41,10 +41,28 @@ from .types import ApiWatermark, CellState, RunResult, RunStatus
 CellKey = tuple[str, str, str | None]
 
 
+class KeyCounts(BaseModel):
+    """``failed_rule_counts`` / ``http_status_counts`` 한 키의 값. 스펙 §3 은 이 둘을 "키→건수
+    맵"으로 적었지만 **건수만으로는 부족하다**: 그 키로 묶인 그룹(RunGroup)이 자기 안의
+    fail/error/passed 를 따로 보고해야 하고(예: http 200 그룹에는 pass 와 fail 이 섞인다), 그
+    분해는 하루치 셀 롤업의 pass/fail/error 열에서 나오지 않는다. 그래서 값이 3-필드 객체다:
+    ``passed`` 는 ``count - fail - error`` 로 유도한다(failed_rule 키는 항상 0)."""
+    count: int = 0
+    fail: int = 0
+    error: int = 0
+
+    def add(self, other: KeyCounts) -> KeyCounts:
+        return KeyCounts(count=self.count + other.count, fail=self.fail + other.fail,
+                         error=self.error + other.error)
+
+
 class RollupRow(BaseModel):
     """``rollup_day`` 한 행의 **증분**. ``passed`` 필드는 SQL 의 ``pass`` 열에 대응한다 —
     ``pass`` 는 파이썬 키워드라 속성명으로 쓸 수 없어서 이름만 다르고, 매핑은 Store 의 upsert
-    한 곳에서만 일어난다(별칭을 쓰지 않는다: 모델을 dict 로 덤프하는 경로가 없다)."""
+    한 곳에서만 일어난다(별칭을 쓰지 않는다: 모델을 dict 로 덤프하는 경로가 없다).
+
+    ``http_status_counts`` 는 ``failed_rule_counts`` 와 같은 자리의 두 번째 맵이다(Task 8):
+    ``group_by="http_status"`` 도 롤업에서 나와야 어떤 축도 run 스캔으로 떨어지지 않는다."""
     day: str
     api_id: str
     target_env: str
@@ -55,7 +73,8 @@ class RollupRow(BaseModel):
     error: int = 0
     transitions: int = 0
     p95_duration_ms: int | None = None
-    failed_rule_counts: dict[str, int] = Field(default_factory=dict)
+    failed_rule_counts: dict[str, KeyCounts] = Field(default_factory=dict)
+    http_status_counts: dict[str, KeyCounts] = Field(default_factory=dict)
 
     @property
     def cell(self) -> CellKey:
@@ -117,8 +136,15 @@ def rollup_delta(
             row.fail += 1
         else:
             row.error += 1
+        # 두 맵 모두 aggregation._keys 가 만드는 그룹 키를 그대로 쓴다(버킷팅 규칙을 복사하지
+        # 않는다). fail/error 분해를 함께 접어 넣어야 그 키로 묶인 그룹이 자기 fail/error 를
+        # 보고할 수 있다 -- KeyCounts 독스트링 참조.
+        one = KeyCounts(count=1, fail=1 if run.status is RunStatus.FAIL else 0,
+                        error=1 if run.status is RunStatus.ERROR else 0)
         for rule in _group_keys(run, "failed_rule"):
-            row.failed_rule_counts[rule] = row.failed_rule_counts.get(rule, 0) + 1
+            row.failed_rule_counts[rule] = row.failed_rule_counts.get(rule, KeyCounts()).add(one)
+        for code in _group_keys(run, "http_status"):
+            row.http_status_counts[code] = row.http_status_counts.get(code, KeyCounts()).add(one)
         if run.duration_ms is not None:
             durations.setdefault((day, key), []).append(run.duration_ms)
 

@@ -37,8 +37,13 @@ class AtworksBackend(ABC):
     async def search_apis(
         self, session: AtworksSessionContext, query: str = "", group: str | None = None,
         updated_after: datetime | None = None, cursor: str | None = None, limit: int = 20,
+        path_prefix: str | None = None,
     ) -> Page[ApiSpec]:
         """텍스트·갱신일·그룹으로 API 스펙 검색. updated_after는 '지난 1주일 업데이트' 류의 리졸버.
+
+        ``path_prefix``는 경로 prefix 전용 술어다(``related_to`` 영향도 스캔): ``query``와 달리
+        **앞에 고정**되어 ``<prefix>`` 자신과 ``<prefix>/...``만 맞는다 — 자유 텍스트 검색을
+        넓히지 않는다(REST 구현은 경로 인덱스로 처리한다).
 
         REST 구현 의무: ``cursor``는 서버가 만든 불투명 문자열이다(다른 프로세스가 만든 값을 절대
         직접 해석하지 않는다) — ``updated_at`` DESC, ``api_id`` DESC 순서에서 이 커서 이후의 다음
@@ -71,9 +76,25 @@ class AtworksBackend(ABC):
         전체 건수이며 정렬은 하지 않는다(population 집계에는 순서가 필요 없다)."""
 
     @abstractmethod
+    async def count_runs_by_job(
+        self, session: AtworksSessionContext, since: datetime | None = None, until: datetime | None = None,
+    ) -> dict[str, int]:
+        """창 안에서 실행된 job별 run 건수(``{job_id: n}``). 일일 브리핑의 "어제 어떤 job이 몇 건
+        돌았나"를 run 목록을 만들지 않고 답하기 위한 읽기다.
+
+        REST 구현 의무: ``executed_at`` 범위로 필터한 뒤 ``job_id``로 GROUP BY 한 정확한 건수이며,
+        job_id가 없는 run은 빠진다. 표본이 아니다 — 절단하지 않는다."""
+
+    @abstractmethod
     async def aggregate_runs(self, session: AtworksSessionContext, q: AggregateQuery) -> list[RunGroup]:
         """q.group_by로 실행 이력을 묶는다(원인별/계별/API별). 숫자는 전부 host가 계산하고, 모델은
-        어떤 그룹을 보여줄지만 고른다. q.scope_api_ids가 주어지면 그 API로만 스코프를 좁힌다."""
+        어떤 그룹을 보여줄지만 고른다. q.scope_api_ids가 주어지면 그 API로만 스코프를 좁힌다.
+        q.status가 주어지면 각 그룹은 그 판정에 해당하는 건수만 보고한다(non_pass = fail+error).
+
+        REST 구현 의무(scale spec §9): 이 읽기는 **표본이 아니다** — 창 안의 모든 API가 그룹으로
+        나와야 하고(롤업 합산), 정렬은 ``(fail+error) DESC, count DESC, key ASC``, 잘림은 오직
+        ``q.limit``이다. ``run_ids``는 그룹당 최신 50건 이하의 증거 표본일 뿐 모집단이 아니며,
+        ``api_count``는 한 키가 걸친 API의 **참** 개수(len(run_ids)가 아니다)다."""
 
     @abstractmethod
     async def current_state(
@@ -85,9 +106,13 @@ class AtworksBackend(ABC):
     @abstractmethod
     async def watermarks(
         self, session: AtworksSessionContext, api_ids: list[str] | None = None,
-        first_non_pass_since: datetime | None = None,
+        first_non_pass_since: datetime | None = None, last_non_pass_since: datetime | None = None,
     ) -> list[ApiWatermark]:
-        """API별 pass/non-pass 워터마크. flaky/regression 판정을 전체 히스토리 재스캔 없이 낸다."""
+        """API별 pass/non-pass 워터마크. flaky/regression 판정을 전체 히스토리 재스캔 없이 낸다.
+        ``first_non_pass_since``는 "첫 실패가 이 시각 이후"(새로 깨진 API), ``last_non_pass_since``는
+        "이 시각 이후 실패가 하나라도 있음"(``select_where.failed_since``가 뜻하는 바로 그 집합)이다.
+        ``api_updated_at``은 카탈로그의 ``ApiSpec.updated_at``을 그대로 실어 회귀 규칙
+        (``last_pass_at < api.updated_at <= first_non_pass_at``)이 조인 없이 풀리게 한다."""
 
     @abstractmethod
     async def operator_scope(

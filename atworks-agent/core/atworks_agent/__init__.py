@@ -26,6 +26,7 @@ from .masking import (
 )
 from .materialize import (
     CellKey,
+    KeyCounts,
     OperatorApiDelta,
     RollupRow,
     cell_key,

@@ -1,22 +1,33 @@
 """per-operator 인사이트 패널의 결정론적 심장부. 여기서 나온 숫자가 패널이 보여줄 전부이고, 이후
-어떤 서술(narration)도 이 값을 바꾸지 않는다. LLM은 없다: scope는 실행 이력에서, candidate는
-aggregation.py의 기존 집계 함수(중복 구현 금지)와 job ledger에서 순수 함수로 뽑는다."""
+어떤 서술(narration)도 이 값을 바꾸지 않는다. LLM은 없다.
+
+Task 8(scale spec §9)부터 이 모듈은 **질의 구동**이다: 입력이 run 목록이 아니라 이미 집계된
+``InsightInputs``(rollup 기반 ``aggregate_runs`` 결과 + ``current_state`` + ``watermarks`` +
+job)다 — 2000건 표본을 페이징해 만든 그룹이 아니라 창 안 **모든 API**가 들어 있는 그룹이라,
+"가장 최근 2000건 밖의 회귀"가 더는 보이지 않는 일이 없다. 옛 시그니처는
+``candidate_insights_from_runs``로 남아 있고(테스트·더블), 그 안에서 같은 ``InsightInputs``를
+만들어 같은 함수를 부른다 — 판정 로직은 한 벌뿐이다."""
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .aggregation import _keys, aggregate
 from .config import AtworksAgentConfig
 from .types import (
     ApiSpec,
+    ApiWatermark,
+    CellState,
     InsightCandidate,
     InsightKind,
     JobSpec,
     JobStatus,
     OperatorRole,
+    RunGroup,
     RunResult,
+    RunStatus,
 )
 
 ROLE_PRIORITY: dict[OperatorRole, list[InsightKind]] = {
@@ -34,9 +45,32 @@ KIND_LABEL: dict[InsightKind, str] = {
 }
 
 
+@dataclass
+class InsightInputs:
+    """후보 5종이 필요로 하는 **이미 집계된** 입력. 호스트(``InsightPanels.build``)가 백엔드
+    질의로 채우고, 테스트/더블은 ``candidate_insights_from_runs``가 run 목록에서 채운다.
+
+    * ``groups_by_api`` — ``aggregate_runs(group_by="api")``: regression_suspect
+    * ``cells`` — ``aggregate_runs(group_by="api_env_data")``: flaky_cell
+    * ``groups_by_rule`` — ``aggregate_runs(group_by="failed_rule")``: top_failed_rule
+    * ``current_state`` — 셀별 최신 상태: env_divergence (run 목록 없이 계마다 최신 판정 비교)
+    * ``watermarks`` — API별 워터마크(참고용; 회귀 판정 자체는 그룹의 regression_suspect가 낸다)
+    * ``jobs`` — staged job: stale_pending
+    """
+    groups_by_api: Sequence[RunGroup] = ()
+    cells: Sequence[RunGroup] = ()
+    groups_by_rule: Sequence[RunGroup] = ()
+    current_state: Sequence[CellState] = ()
+    watermarks: Sequence[ApiWatermark] = ()
+    jobs: Sequence[JobSpec] = ()
+    apis: Mapping[str, ApiSpec] = field(default_factory=dict)
+    scope: set[str] | None = None
+
+
 def operator_scope(runs: Sequence[RunResult], operator_id: str, window_days: int, now: datetime) -> set[str]:
     """이 오퍼레이터가 최근 window_days일 안에 직접 실행한(executed_by 일치) run들의 api_id 집합.
-    빈 결과는 빈 set — 프로젝트 전체로 폴백할지는 호출자가 결정한다."""
+    빈 결과는 빈 set — 프로젝트 전체로 폴백할지는 호출자가 결정한다. (호스트 경로는 이 함수 대신
+    백엔드의 물질화된 ``operator_scope``를 쓴다; 여기 남은 건 순수 오라클/테스트용이다.)"""
     cutoff = now - timedelta(days=window_days)
     return {r.api_id for r in runs if r.executed_by == operator_id and r.executed_at >= cutoff}
 
@@ -61,28 +95,22 @@ def _capped(ids: list[str]) -> list[str]:
     return ids[:_MAX_IDS]
 
 
-def candidate_insights(
-    runs: Sequence[RunResult],
-    apis: Mapping[str, ApiSpec],
-    jobs: Sequence[JobSpec],
-    scope: set[str] | None,
-    role: OperatorRole,
-    config: AtworksAgentConfig,
-    now: datetime,
-) -> list[InsightCandidate]:
-    """scope(None이면 프로젝트 전체)로 걸러진 입력에서 5종 후보를 만들어 role의 우선순위표대로
-    정렬하고 max_insight_candidates로 자른다. 숫자는 전부 aggregation.aggregate와 job ledger에서
-    나온다 — 여기서 새로 만드는 값은 env_divergence 문자열과 stale_pending 나이뿐이다."""
-    if scope is not None:
-        runs = [r for r in runs if r.api_id in scope]
-        apis = {api_id: api for api_id, api in apis.items() if api_id in scope}
-        jobs = [j for j in jobs if any(a in scope for a in j.api_ids)]
+def _in_scope(api_id: str, scope: set[str] | None) -> bool:
+    return scope is None or api_id in scope
 
+
+def candidate_insights(
+    inputs: InsightInputs, role: OperatorRole, config: AtworksAgentConfig, now: datetime,
+) -> list[InsightCandidate]:
+    """집계된 입력에서 5종 후보를 만들어 role의 우선순위표대로 정렬하고 max_insight_candidates로
+    자른다. 숫자는 전부 호스트가 이미 센 값이다 — 여기서 새로 만드는 값은 env_divergence 문자열과
+    stale_pending 나이뿐이다. candidate_id 형식은 서술 캐시의 조인 키라 절대 바뀌지 않는다."""
+    scope = inputs.scope
     candidates: list[InsightCandidate] = []
 
     # -- regression_suspect ------------------------------------------------------------
-    for g in aggregate(runs, apis, "api", flaky_min_transitions=config.flaky_min_transitions):
-        if not g.regression_suspect:
+    for g in inputs.groups_by_api:
+        if not g.regression_suspect or not _in_scope(g.key, scope):
             continue
         if g.first_non_pass_at is None or g.api_updated_at is None:
             continue  # regression_suspect implies both are set; skip defensively if not
@@ -100,10 +128,10 @@ def candidate_insights(
         ))
 
     # -- flaky_cell ----------------------------------------------------------------------
-    for g in aggregate(runs, apis, "api_env_data", flaky_min_transitions=config.flaky_min_transitions):
-        if not g.flaky:
-            continue
+    for g in inputs.cells:
         cell_api, cell_env, cell_data = g.key.split("|", 2)
+        if not g.flaky or not _in_scope(cell_api, scope):
+            continue
         # The raw key's trailing segment is "-" when the run carried no test_data_label — drop
         # it from the LABEL only (candidate_id keeps the raw key: it's the narrative cache join).
         label_parts = [cell_api, cell_env] + ([cell_data] if cell_data and cell_data != "-" else [])
@@ -117,40 +145,34 @@ def candidate_insights(
         ))
 
     # -- top_failed_rule -------------------------------------------------------------
-    by_rule = aggregate(runs, apis, "failed_rule", flaky_min_transitions=config.flaky_min_transitions)
-    for g in sorted(by_rule, key=lambda g: (-g.fail, g.key))[:3]:
-        # aggregate() buckets a run under g.key when g.key is one of _keys(run, "failed_rule");
-        # run_ids on the group is capped at aggregation.MAX_RUN_IDS, so it undercounts distinct
-        # APIs for any rule/bucket hit by more than 50 runs. Recount over the SOURCE runs using
-        # the same bucketing predicate aggregate() used, rather than re-deriving a new one.
-        rule_api_id_set = {r.api_id for r in runs if g.key in _keys(r, "failed_rule")}
+    for g in sorted(inputs.groups_by_rule, key=lambda g: (-g.fail, g.key))[:3]:
+        # figures reports the TRUE distinct-API count -- RunGroup.api_count, counted by the host
+        # over the whole window (COUNT(DISTINCT api_id) on the rollup), never len(run_ids), which
+        # is capped at aggregation.MAX_RUN_IDS. api_ids is a bounded (<=20) sample of it.
+        sample = {i for i in (g.api_sample or ()) if _in_scope(i, scope)}
         candidates.append(InsightCandidate(
             candidate_id=f"top_failed_rule:{g.key}",
             kind="top_failed_rule",
             label=f"{KIND_LABEL['top_failed_rule']} · {g.key}",
-            # figures reports the TRUE api count; api_ids is a bounded (<=20) sample of it.
-            figures={"fail": g.fail, "error": g.error, "apis": len(rule_api_id_set)},
-            api_ids=_capped_set(rule_api_id_set),
+            figures={"fail": g.fail, "error": g.error, "apis": g.api_count if g.api_count is not None else len(sample)},
+            api_ids=_capped_set(sample),
             ref_ids=_capped(g.run_ids[:5]),
         ))
 
     # -- env_divergence ------------------------------------------------------------------
-    # No aggregation helper covers this axis: per api, the LATEST run per target_env, then
-    # compare those latest statuses across envs.
-    runs_by_api: dict[str, list[RunResult]] = defaultdict(list)
-    for r in runs:
-        runs_by_api[r.api_id].append(r)
-    for api_id in sorted(runs_by_api):
-        runs_by_env: dict[str, list[RunResult]] = defaultdict(list)
-        for r in runs_by_api[api_id]:
-            runs_by_env[r.target_env].append(r)
-        if len(runs_by_env) < 2:
-            continue
-        latest_per_env = {
-            env: max(env_runs, key=lambda r: (r.executed_at, r.run_id))
-            for env, env_runs in runs_by_env.items()
-        }
-        if len({r.status for r in latest_per_env.values()}) < 2:
+    # Per api, the LATEST cell per target_env (current_state IS the latest run per cell), then
+    # compare those latest statuses across envs. No run list is read.
+    cells_by_api: dict[str, list[CellState]] = defaultdict(list)
+    for cell in inputs.current_state:
+        if _in_scope(cell.api_id, scope):
+            cells_by_api[cell.api_id].append(cell)
+    for api_id in sorted(cells_by_api):
+        latest_per_env: dict[str, CellState] = {}
+        for cell in cells_by_api[api_id]:
+            current = latest_per_env.get(cell.target_env)
+            if current is None or (cell.executed_at, cell.run_id) > (current.executed_at, current.run_id):
+                latest_per_env[cell.target_env] = cell
+        if len(latest_per_env) < 2 or len({c.status for c in latest_per_env.values()}) < 2:
             continue
         envs_str = ",".join(f"{env}={latest_per_env[env].status.value}" for env in sorted(latest_per_env))
         candidates.append(InsightCandidate(
@@ -159,12 +181,14 @@ def candidate_insights(
             label=f"{KIND_LABEL['env_divergence']} · {api_id}",
             figures={"envs": envs_str},
             api_ids=_capped([api_id]),
-            ref_ids=_capped_set(r.run_id for r in latest_per_env.values()),
+            ref_ids=_capped_set(c.run_id for c in latest_per_env.values()),
         ))
 
     # -- stale_pending ---------------------------------------------------------------
-    for job in jobs:
+    for job in inputs.jobs:
         if job.status is not JobStatus.STAGED:
+            continue
+        if scope is not None and not any(a in scope for a in job.api_ids):
             continue
         age = now - job.created_at
         if age < timedelta(hours=config.stale_pending_hours):
@@ -185,3 +209,56 @@ def candidate_insights(
         c.priority = priority_order.index(c.kind)
     candidates.sort(key=lambda c: (c.priority, -_severity(c.figures), c.candidate_id))
     return candidates[: config.max_insight_candidates]
+
+
+def candidate_insights_from_runs(
+    runs: Sequence[RunResult],
+    apis: Mapping[str, ApiSpec],
+    jobs: Sequence[JobSpec],
+    scope: set[str] | None,
+    role: OperatorRole,
+    config: AtworksAgentConfig,
+    now: datetime,
+) -> list[InsightCandidate]:
+    """옛 시그니처 그대로의 얇은 래퍼: run 목록에서 ``InsightInputs``를 만들어 위 함수에 넘긴다.
+    호스트 경로는 이제 백엔드 질의로 같은 입력을 만들고(표본 없음), 이 래퍼는 테스트와 run 목록만
+    가진 호출자를 위해 남는다 — 판정 로직은 한 벌뿐이다."""
+    if scope is not None:
+        runs = [r for r in runs if r.api_id in scope]
+        apis = {api_id: api for api_id, api in apis.items() if api_id in scope}
+        jobs = [j for j in jobs if any(a in scope for a in j.api_ids)]
+    flaky_min = config.flaky_min_transitions
+    by_rule = aggregate(runs, apis, "failed_rule", flaky_min_transitions=flaky_min)
+    for group in by_rule:
+        # aggregate() buckets a run under g.key when g.key is one of _keys(run, "failed_rule");
+        # recount over the SOURCE runs with that same predicate so api_count is the true distinct
+        # count (g.run_ids is capped at MAX_RUN_IDS and would undercount).
+        sample = {r.api_id for r in runs if group.key in _keys(r, "failed_rule")}
+        group.api_count = len(sample)
+        group.api_sample = sorted(sample)[:_MAX_IDS]
+    cells: list[CellState] = []
+    latest: dict[tuple[str, str, str | None], RunResult] = {}
+    transitions: dict[tuple[str, str, str | None], int] = {}
+    previous: dict[tuple[str, str, str | None], bool] = {}
+    for run in sorted(runs, key=lambda r: (r.executed_at, r.run_id)):
+        key = (run.api_id, run.target_env, run.test_data_label)
+        is_pass = run.status is RunStatus.PASS
+        if key in previous and previous[key] != is_pass:
+            transitions[key] = transitions.get(key, 0) + 1
+        previous[key] = is_pass
+        latest[key] = run
+    for key, run in latest.items():
+        cells.append(CellState(
+            api_id=key[0], target_env=key[1], test_data_label=key[2], run_id=run.run_id,
+            status=run.status, executed_at=run.executed_at, transitions_total=transitions.get(key, 0),
+        ))
+    inputs = InsightInputs(
+        groups_by_api=aggregate(runs, apis, "api", flaky_min_transitions=flaky_min),
+        cells=aggregate(runs, apis, "api_env_data", flaky_min_transitions=flaky_min),
+        groups_by_rule=by_rule,
+        current_state=cells,
+        jobs=jobs,
+        apis=apis,
+        scope=scope,
+    )
+    return candidate_insights(inputs, role, config, now)

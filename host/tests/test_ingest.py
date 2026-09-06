@@ -140,9 +140,25 @@ def test_incremental_ingest_matches_the_recompute_oracles():
         api_counts[row["api_id"]] = api_counts.get(row["api_id"], 0) + row["count"]
     assert api_counts == {k: g.count for k, g in by_api.items()}
 
-    # failed_rule_counts survived the merge as a rule -> count map
-    total_failed = sum(sum(json.loads(row["failed_rule_counts"] or "{}").values())
-                       for row in _rollup_rows(store))
+    # both key maps survived the merge as {key: {count, fail, error}} and fold back to exactly
+    # the failed_rule / http_status groupings (Task 8: group_by="http_status" reads the second
+    # map, so no axis falls back to a run scan)
+    for column, group_by in (("failed_rule_counts", "failed_rule"), ("http_status_counts", "http_status")):
+        folded: dict[str, dict[str, int]] = {}
+        for row in _rollup_rows(store):
+            for key, counts in json.loads(row[column] or "{}").items():
+                bucket = folded.setdefault(key, {"count": 0, "fail": 0, "error": 0})
+                for field in bucket:
+                    bucket[field] += counts[field]
+        expected = {g.key: g for g in aggregate(runs, APIS, group_by, flaky_min_transitions=3)}
+        assert set(folded) == set(expected), group_by
+        for key, bucket in folded.items():
+            group = expected[key]
+            assert (bucket["count"], bucket["fail"], bucket["error"]) == (group.count, group.fail, group.error), key
+    total_failed = sum(
+        sum(v["count"] for v in json.loads(row["failed_rule_counts"] or "{}").values())
+        for row in _rollup_rows(store)
+    )
     assert total_failed == sum(1 for r in runs if r.status is not RunStatus.PASS)
 
     # -- idempotency: every batch again, in a different order, changes nothing -------------------

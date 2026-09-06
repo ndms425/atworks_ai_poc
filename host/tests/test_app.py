@@ -80,7 +80,11 @@ async def test_runs_insights_counts_flaky_and_regression_from_fixtures(client):
     r = await client.get("/api/atworks/runs/insights", headers={"X-Session-Id": sid})
     assert r.status_code == 200
     body = r.json()
-    assert body["flaky"] == 1 and body["regression_suspect"] == 1 and body["window_days"] == 30
+    # regression_suspect is now spec §3's watermark rule (last_pass_at < api.updated_at <=
+    # first_non_pass_at), which the fixture's api-004 no longer satisfies: it failed once and
+    # then PASSED again, so its last pass is after its first failure -- an API that recovered is
+    # not a standing regression. flaky (a cell-level count) is unchanged.
+    assert body["flaky"] == 1 and body["regression_suspect"] == 0 and body["window_days"] == 30
 
 
 async def test_runs_insights_needs_a_session(client):
@@ -94,6 +98,28 @@ async def test_session_and_reads(client):
     runs = (await client.get("/api/atworks/runs?status=fail", headers=h)).json()
     assert runs["population"] >= len(runs["runs"]) > 0
     assert (await client.get("/api/atworks/jobs", headers=h)).json()["jobs"] == []
+
+
+async def test_apis_and_runs_answer_in_both_shapes_and_page(client):
+    # Task 8: /apis and /runs return the paged envelope ({items, next_cursor, total}) AND the
+    # legacy keys the portal still reads (`apis` / `runs`+`population`). Task 10 deletes the
+    # legacy half once the web moves.
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+
+    apis = (await client.get("/api/atworks/apis?limit=5", headers=h)).json()
+    assert apis["items"] == apis["apis"] and len(apis["items"]) == 5
+    assert apis["total"] == 12 and apis["next_cursor"]
+    page2 = (await client.get(f"/api/atworks/apis?limit=5&cursor={apis['next_cursor']}", headers=h)).json()
+    assert page2["total"] == 12
+    first = {a["api_id"] for a in apis["items"]}
+    assert first.isdisjoint({a["api_id"] for a in page2["items"]})
+
+    runs = (await client.get("/api/atworks/runs?limit=4", headers=h)).json()
+    assert runs["items"] == runs["runs"] and len(runs["items"]) == 4
+    assert runs["total"] == runs["population"] > 4 and runs["next_cursor"]
+    runs2 = (await client.get(f"/api/atworks/runs?limit=4&cursor={runs['next_cursor']}", headers=h)).json()
+    assert {r["run_id"] for r in runs2["items"]}.isdisjoint({r["run_id"] for r in runs["items"]})
 
 
 async def test_session_binds_operator_and_role(client):
