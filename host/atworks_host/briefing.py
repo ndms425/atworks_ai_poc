@@ -17,6 +17,7 @@ from atworks_agent import (
     JobSpec,
     JobStatus,
     RunResult,
+    collect_runs,
 )
 from atworks_agent.aggregation import aggregate, summarize_insights
 
@@ -98,9 +99,9 @@ class Briefings:
         end = self.window_end(now)
         start = end - timedelta(days=1)
         since = now - timedelta(days=self.config.max_aggregate_window_days)
-        runs = await backend.list_runs(session, since=since, status=None, api_id=None, limit=self.config.max_aggregate_runs)
-        apis = {a.api_id: a for a in await backend.search_apis(session, query="", limit=1000)}
-        jobs = await backend.all_jobs(session)
+        runs = await collect_runs(backend, session, since=since, cap=self.config.max_aggregate_runs)
+        apis = {a.api_id: a for a in (await backend.search_apis(session, query="", limit=1000)).items}
+        jobs = (await backend.all_jobs(session, limit=1000)).items
         data = build_briefing(now, runs, apis, jobs, self.config, window=(start, end), portal_origin=self.portal_origin)
         folder = self._folder(data["date"])
         folder.mkdir(parents=True, exist_ok=True)

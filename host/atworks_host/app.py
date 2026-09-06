@@ -16,7 +16,9 @@ from atworks_agent import (
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
+    RunsQuery,
     ScreenState,
+    collect_runs,
 )
 from atworks_agent.aggregation import summarize_insights
 from atworks_agent.serialization import (
@@ -114,29 +116,34 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/apis")
     async def apis(record: CurrentSession, query: str = "", group: str | None = None) -> dict:
-        rows = await backend.search_apis(context(record), query=query, group=group, limit=500)
-        return {"apis": [api_record(a) for a in rows]}
+        page = await backend.search_apis(context(record), query=query, group=group, limit=500)
+        return {"apis": [api_record(a) for a in page.items]}
 
     @router.get("/runs/insights")
     async def insights(record: CurrentSession) -> dict:
         s = context(record)
         cfg = agent.config
         since = datetime.now(UTC) - timedelta(days=cfg.max_aggregate_window_days)
-        rows = await backend.list_runs(s, since=since, status=None, limit=cfg.max_aggregate_runs)
-        apis = {a.api_id: a for a in await backend.search_apis(s, query="", limit=1000)}
+        rows = await collect_runs(backend, s, since=since, cap=cfg.max_aggregate_runs)
+        apis = {a.api_id: a for a in (await backend.search_apis(s, query="", limit=1000)).items}
         found = summarize_insights(rows, apis, cfg)
         return {"flaky": found.flaky, "regression_suspect": found.regression_suspect, "window_days": cfg.max_aggregate_window_days}
 
     @router.get("/runs")
-    async def runs(record: CurrentSession, status: str | None = None, since: str | None = None, limit: int = Query(50, le=500)) -> dict:
+    async def runs(record: CurrentSession, status: str | None = None, since: str | None = None, limit: int = Query(50, le=200)) -> dict:
         s = context(record)
         since_dt = _aware(since)
-        rows = await backend.list_runs(s, since=since_dt, status=status, limit=limit)
-        return {"population": await backend.count_runs(s, since_dt, status), "runs": [run_record(r) for r in rows]}
+        # RunsQuery.limit caps at 200 (the paged read contract, spec 2026-09-06); the route's
+        # own bound matches so an over-limit request 422s here instead of a validation error
+        # surfacing from inside list_runs.
+        page = await backend.list_runs(s, RunsQuery(since=since_dt, status=status, limit=limit))
+        return {"population": await backend.count_runs(s, since=since_dt, status=status), "runs": [run_record(r) for r in page.items]}
 
     @router.get("/jobs")
     async def jobs(record: CurrentSession) -> dict:
-        return {"jobs": [job_record(j) for j in await backend.all_jobs(context(record))]}
+        # limit=1000: the route has always returned the whole pending+applied set (Task 10
+        # exposes real paging to the web); this keeps that shape under the new paged contract.
+        return {"jobs": [job_record(j) for j in (await backend.all_jobs(context(record), limit=1000)).items]}
 
     # 이 배포는 메모리가 꺼져 있다(enable_memory=False). web-shared의 useAgentTurn이
     # 로드 시 무조건 이 경로를 찾으므로, 빈 상태를 돌려주는 자리표시 라우트를 둔다.
@@ -186,7 +193,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/rules")
     async def rules(record: CurrentSession) -> dict:
-        return {"rules": [rule_record(r) for r in await backend.list_rules(context(record))]}
+        return {"rules": [rule_record(r) for r in (await backend.list_rules(context(record), limit=1000)).items]}
 
     async def rule_action(rule_id: str, action: str, record: Record) -> dict:
         # rule_action은 job_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
@@ -194,7 +201,10 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 게 아니다: 이 세션이 아직 모르는 rule이라도, 호스트가 그 rule을 실제로 소유(ledger)
         # 하고 있으면 클릭 전에 기억시킨다.
         if rule_id not in record.state.seen_rules:
-            known = next((r for r in await backend.list_rules(context(record)) if r.rule_id == rule_id), None)
+            known = next(
+                (r for r in (await backend.list_rules(context(record), limit=1000)).items if r.rule_id == rule_id),
+                None,
+            )
             if known is not None:
                 record.state.remember_rule(known)
         if action == "apply_rule":
@@ -226,7 +236,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/profiles")
     async def profiles(record: CurrentSession, job_id: str | None = None) -> dict:
-        return {"profiles": [profile_record(p) for p in await backend.list_profiles(context(record), job_id)]}
+        page = await backend.list_profiles(context(record), job_id, limit=1000)
+        return {"profiles": [profile_record(p) for p in page.items]}
 
     async def profile_action(profile_id: str, action: str, record: Record) -> dict:
         # profile_action은 rule_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
@@ -234,7 +245,10 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 게 아니다: 이 세션이 아직 모르는 profile이라도, 호스트가 그 profile을 실제로 소유(ledger)
         # 하고 있으면 클릭 전에 기억시킨다.
         if profile_id not in record.state.seen_profiles:
-            known = next((p for p in await backend.list_profiles(context(record)) if p.profile_id == profile_id), None)
+            known = next(
+                (p for p in (await backend.list_profiles(context(record), limit=1000)).items if p.profile_id == profile_id),
+                None,
+            )
             if known is not None:
                 record.state.remember_profile(known)
         if action == "apply_profile":

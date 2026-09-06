@@ -15,9 +15,12 @@ from atworks_agent.types import (
     ApiSpec,
     AtworksSessionContext,
     AtworksSessionState,
+    AuditEntry,
+    Page,
     RuleRecommendation,
     RunResult,
     RunStatus,
+    ScopeSummary,
 )
 
 T0 = datetime(2026, 9, 1, 9, tzinfo=UTC)
@@ -42,25 +45,57 @@ class InMemoryBackend(AtworksBackend):
         ]
         self.executed: list[str] = []
 
-    async def search_apis(self, session, query="", updated_after=None, group=None, limit=20):
+    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
         rows = [a for a in self.apis.values() if (query.lower() in (a.path + a.name).lower()) and (group is None or a.group == group)
                 and (updated_after is None or a.updated_at >= updated_after)]
-        return rows[:limit]
+        return Page(items=rows[:limit], total=len(rows))
 
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
 
-    async def list_runs(self, session, since=None, status=None, api_id=None, limit=50):
-        rows = [r for r in self.runs if (since is None or r.executed_at >= since)
-                and (status is None or (status == "non_pass" and r.status.value != "pass") or r.status.value == status)
-                and (api_id is None or r.api_id == api_id)]
-        return sorted(rows, key=lambda r: r.executed_at, reverse=True)[:limit]
+    async def list_runs(self, session, q):
+        rows = [r for r in self.runs if (q.since is None or r.executed_at >= q.since)
+                and (q.until is None or r.executed_at < q.until)
+                and (q.status is None or (q.status == "non_pass" and r.status.value != "pass") or r.status.value == q.status)
+                and (q.api_id is None or r.api_id == q.api_id)
+                and (q.executed_by is None or r.executed_by == q.executed_by)
+                and (q.job_id is None or r.job_id == q.job_id)]
+        ordered = sorted(rows, key=lambda r: r.executed_at, reverse=True)
+        return Page(items=ordered[: q.limit], total=len(ordered))
 
     async def get_run(self, session, run_id):
         return next((r for r in self.runs if r.run_id == run_id), None)
 
-    async def count_runs(self, session, since, status):
-        return len(await self.list_runs(session, since=since, status=status, limit=10_000))
+    async def count_runs(self, session, since=None, until=None, status=None, api_id=None):
+        return sum(
+            1 for r in self.runs
+            if (since is None or r.executed_at >= since)
+            and (until is None or r.executed_at < until)
+            and (status is None or (status == "non_pass" and r.status.value != "pass") or r.status.value == status)
+            and (api_id is None or r.api_id == api_id)
+        )
+
+    async def aggregate_runs(self, session, q):
+        return []
+
+    async def current_state(self, session, scope_api_ids=None):
+        return []
+
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None):
+        return []
+
+    async def operator_scope(self, session, operator_id, window_days):
+        return ScopeSummary()
+
+    async def get_body(self, session, run_id):
+        run = next((r for r in self.runs if r.run_id == run_id), None)
+        return run.response_body if run is not None else None
+
+    async def audit(self, session, cursor=None, limit=50):
+        return Page[AuditEntry]()
+
+    async def append_audit(self, session, action, target_kind, target_id):
+        return None
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind):
         return self.ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
@@ -80,8 +115,14 @@ class InMemoryBackend(AtworksBackend):
     async def applied_jobs(self, session):
         return self.ledger.applied()
 
-    async def all_jobs(self, session):
-        return [*self.ledger.pending(), *self.ledger.applied()]
+    async def all_jobs(self, session, status=None, cursor=None, limit=50):
+        rows = [*self.ledger.pending(), *self.ledger.applied()]
+        if status is not None:
+            rows = [j for j in rows if j.status.value == status]
+        return Page(items=rows[:limit], total=len(rows))
+
+    async def active_jobs(self, session):
+        return [j for j in self.ledger.applied() if j.remaining_executions > 0]
 
     async def runs_by_ids(self, session, run_ids):
         return [r for r in self.runs if r.run_id in run_ids]
@@ -104,10 +145,13 @@ class InMemoryBackend(AtworksBackend):
     async def discard_rule(self, session, rule_id, actor_kind):
         return self.rule_ledger.discard(rule_id, actor=session.operator, actor_kind=actor_kind)
 
-    async def list_rules(self, session, api_id=None):
-        return self.rule_ledger.list(api_id=api_id)
+    async def list_rules(self, session, api_id=None, status=None, cursor=None, limit=50):
+        rows = self.rule_ledger.list(api_id=api_id)
+        if status is not None:
+            rows = [r for r in rows if r.status.value == status]
+        return Page(items=rows[:limit], total=len(rows))
 
-    async def simulate_rule(self, session, draft):
+    async def simulate_rule(self, session, draft, window_days):
         return RuleImpact()
 
     async def stage_profile(self, session, draft, actor_kind):
@@ -122,17 +166,21 @@ class InMemoryBackend(AtworksBackend):
     async def discard_profile(self, session, profile_id, actor_kind):
         return self.profile_ledger.discard(profile_id, actor=session.operator, actor_kind=actor_kind)
 
-    async def list_profiles(self, session, job_id=None):
-        return self.profile_ledger.list(job_id=job_id)
+    async def list_profiles(self, session, job_id=None, status=None, cursor=None, limit=50):
+        rows = self.profile_ledger.list(job_id=job_id)
+        if status is not None:
+            rows = [p for p in rows if p.status.value == status]
+        return Page(items=rows[:limit], total=len(rows))
 
     async def get_parity_report(self, session, job_id):
         return self.parity_reports.get(job_id)
 
-    async def find_apis_with_param(self, session, param):
+    async def find_apis_with_param(self, session, param, cursor=None, limit=20):
         applied_format_apis = {r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param}
-        return [a for a in self.apis.values() if param in a.params and a.api_id not in applied_format_apis]
+        rows = [a for a in self.apis.values() if param in a.params and a.api_id not in applied_format_apis]
+        return Page(items=rows[:limit], total=len(rows))
 
-    async def recommend_rules_for_api(self, session, api_id):
+    async def recommend_rules_for_api(self, session, api_id, limit=20):
         api = self.apis.get(api_id)
         if api is None:
             return []
@@ -145,7 +193,7 @@ class InMemoryBackend(AtworksBackend):
             for peer_rule in applied:
                 if peer_rule.api_id != api_id and peer_rule.param == param:
                     recommendations.append(RuleRecommendation(param=param, from_api_id=peer_rule.api_id, rule=peer_rule))
-        return recommendations
+        return recommendations[:limit]
 
     async def get_format(self, session, name):
         return self.format_library.get(name)

@@ -10,6 +10,7 @@ from atworks_agent import (
     JobDraft,
     JobKind,
     RuleDraft,
+    RunsQuery,
     RunStatus,
     TestDataSet,
 )
@@ -26,13 +27,13 @@ def _backend():
 
 async def test_fixtures_load_and_search_by_updated_after():
     b = _backend()
-    recent = await b.search_apis(SESSION, updated_after=datetime(2026, 8, 27, tzinfo=KST), limit=100)
+    recent = (await b.search_apis(SESSION, updated_after=datetime(2026, 8, 27, tzinfo=KST), limit=100)).items
     assert 0 < len(recent) < 12 and all(a.updated_at >= datetime(2026, 8, 27, tzinfo=KST) for a in recent)
 
 
 async def test_count_runs_is_population_not_limit():
     b = _backend()
-    shown = await b.list_runs(SESSION, status="fail", limit=2)
+    shown = (await b.list_runs(SESSION, RunsQuery(status="fail", limit=2))).items
     total = await b.count_runs(SESSION, since=None, status="fail")
     assert len(shown) == 2 and total > 2
 
@@ -254,19 +255,19 @@ async def test_execute_job_once_enforces_the_matrix_cap_at_execution_time():
 
 async def test_find_apis_with_param_excludes_apis_with_an_applied_format_rule():
     b = _backend()
-    found = await b.find_apis_with_param(SESSION, "amount")
+    found = (await b.find_apis_with_param(SESSION, "amount")).items
     assert {a.api_id for a in found} == {"api-001", "api-004", "api-006"}
     rule = b.rule_ledger.stage(
         RuleDraft(api_id="api-001", param="amount", kind="format", format="number"),
         actor=SESSION.operator, actor_kind=ActorKind.AGENT)
     b.rule_ledger.apply(rule.rule_id, actor=SESSION.operator)
-    found = await b.find_apis_with_param(SESSION, "amount")
+    found = (await b.find_apis_with_param(SESSION, "amount")).items
     assert {a.api_id for a in found} == {"api-004", "api-006"}
 
 
 async def test_find_apis_with_param_unknown_param_finds_nothing():
     b = _backend()
-    found = await b.find_apis_with_param(SESSION, "nonexistentParam")
+    found = (await b.find_apis_with_param(SESSION, "nonexistentParam")).items
     assert found == []
 
 
@@ -321,3 +322,64 @@ async def test_execute_job_once_stamps_executed_by_from_the_approver():
 def test_fixture_runs_carry_operators():
     rows = json.loads((FIXTURES / "runs.json").read_text(encoding="utf-8"))
     assert {r.get("executed_by") for r in rows} >= {"minseong", "jihoon", "sora"}
+
+
+# -- Task 2: paged ABC contract (scale, spec 2026-09-06) -----------------------------
+
+
+async def test_list_runs_pages_to_exhaustion_with_no_duplicates_or_gaps():
+    b = _backend()
+    total_runs = len(b.runs)
+    assert total_runs >= 21   # the fixture set is large enough for >=3 pages at limit=10
+
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        page = await b.list_runs(SESSION, RunsQuery(limit=10, cursor=cursor))
+        assert page.total == total_runs
+        seen.extend(r.run_id for r in page.items)
+        pages += 1
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+        assert pages <= 10   # guard against an infinite loop if next_cursor never clears
+
+    assert pages >= 3
+    assert len(seen) == total_runs
+    assert len(set(seen)) == total_runs   # no duplicates
+    assert set(seen) == set(b.runs.keys())   # no gaps
+
+
+async def test_count_runs_by_api_id_matches_filtered_length_with_no_sort():
+    b = _backend()
+    filtered = [r for r in b.runs.values() if r.api_id == "api-001"]
+    total = await b.count_runs(SESSION, api_id="api-001")
+    assert total == len(filtered)
+
+
+async def test_all_jobs_filters_by_status():
+    b = _backend()
+    staged = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="staged only", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    applied_job = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="to be applied", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    await b.apply_job(SESSION, applied_job.job_id)
+
+    staged_page = await b.all_jobs(SESSION, status="staged")
+    assert {j.job_id for j in staged_page.items} == {staged.job_id}
+
+    applied_page = await b.all_jobs(SESSION, status="applied")
+    assert {j.job_id for j in applied_page.items} == {applied_job.job_id}
+
+
+async def test_active_jobs_excludes_an_exhausted_applied_job():
+    b = _backend()
+    job = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="run once", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    await b.apply_job(SESSION, job.job_id)
+
+    before = await b.active_jobs(SESSION)
+    assert job.job_id in {j.job_id for j in before}
+
+    await b.execute_job_once(SESSION, job.job_id)   # run_now: one execution exhausts it
+
+    after = await b.active_jobs(SESSION)
+    assert job.job_id not in {j.job_id for j in after}

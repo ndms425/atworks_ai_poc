@@ -9,6 +9,7 @@ from atworks_agent import (
     FormatDefinition,
     RuleDraft,
     RuleStatus,
+    RunsQuery,
 )
 from atworks_host.mock_backend import MockAtworks
 
@@ -112,13 +113,13 @@ async def test_format_batch_apply_leaves_run_history_and_verdicts_untouched():
     # Immutability guarantee: a library format add is inert until an approved RULE references
     # it, so bulk-seeding the library must change no run's status/failed_rules.
     b = _backend()
-    before = [r.model_dump(mode="json") for r in await b.list_runs(SESSION, limit=1000)]
+    before = [r.model_dump(mode="json") for r in (await b.list_runs(SESSION, RunsQuery(limit=200))).items]
     staged = await b.stage_format_batch(SESSION, FormatBatchDraft(formats=[
         {"name": "phone-digits", "pattern": r"^\d{3}-\d{4}$",
          "pass_examples": ["123-4567"], "fail_examples": ["abc"]},
     ]), ActorKind.AGENT)
     await b.apply_format_batch(SESSION, staged.batch_id)
-    after = [r.model_dump(mode="json") for r in await b.list_runs(SESSION, limit=1000)]
+    after = [r.model_dump(mode="json") for r in (await b.list_runs(SESSION, RunsQuery(limit=200))).items]
     assert before == after
 
 

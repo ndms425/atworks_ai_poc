@@ -81,7 +81,9 @@ async def test_simulate_rule_is_read_only_and_counts_would_fail():
     runs_before = len(b.runs)
 
     draft = RuleDraft(api_id="api-001", param="customerId", kind="required")
-    impact = await b.simulate_rule(SESSION, draft)
+    # A generous window (the fixtures + this test's own runs all sit within a handful of days
+    # of "now"): behaves like the old unbounded scan, but exercises the window_days param.
+    impact = await b.simulate_rule(SESSION, draft, window_days=3650)
 
     assert isinstance(impact, RuleImpact)
     # 3 pre-existing api-001 fixture runs (no job_id / test_data_label) + 2 new runs from
@@ -97,13 +99,38 @@ async def test_simulate_rule_is_read_only_and_counts_would_fail():
     assert len(b.runs) == runs_before
 
 
+async def test_simulate_rule_window_days_ignores_an_older_run():
+    b = _backend()
+    job = await b.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="matrix", api_ids=["api-001"], target_envs=["dev"],
+        test_data=[TestDataSet(label="S1", values={"customerId": ""})]), ActorKind.AGENT)
+    await b.apply_job(SESSION, job.job_id)
+    produced = await b.execute_job_once(SESSION, job.job_id)
+    run = produced[0]
+    # Push this run's executed_at outside a 1-day window relative to the session's own clock
+    # (well past the pre-existing api-001 fixture runs too, so only run-0012 -- the one fixture
+    # run within a day of SESSION.now -- remains in the window).
+    b.runs[run.run_id] = run.model_copy(update={"executed_at": SESSION.now - timedelta(days=10)})
+
+    draft = RuleDraft(api_id="api-001", param="customerId", kind="required")
+    impact = await b.simulate_rule(SESSION, draft, window_days=1)
+
+    # Only run-0012 (fixture, within the 1-day window) is counted; the pushed-back run --
+    # which DOES have a reconstructable customerId binding and WOULD fail "required" -- is
+    # excluded entirely by the window, so it contributes to neither known_inputs nor would_fail.
+    assert impact.window_runs == 1
+    assert impact.known_inputs == 0
+    assert impact.excluded_unknown == 1
+    assert impact.would_fail == 0
+
+
 async def test_list_rules_filters_by_api():
     b = _backend()
     r1 = await b.stage_rule(SESSION, RuleDraft(api_id="api-001", param="customerId", kind="required"), ActorKind.AGENT)
     r2 = await b.stage_rule(SESSION, RuleDraft(api_id="api-003", param="paymentId", kind="required"), ActorKind.AGENT)
 
-    assert [r.rule_id for r in await b.list_rules(SESSION, api_id="api-001")] == [r1.rule_id]
-    assert {r.rule_id for r in await b.list_rules(SESSION)} == {r1.rule_id, r2.rule_id}
+    assert [r.rule_id for r in (await b.list_rules(SESSION, api_id="api-001")).items] == [r1.rule_id]
+    assert {r.rule_id for r in (await b.list_rules(SESSION)).items} == {r1.rule_id, r2.rule_id}
 
 
 async def test_get_pending_rules_and_discard_rule():

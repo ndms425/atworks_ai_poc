@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from atworks_agent import (
     ActorKind,
+    AggregateQuery,
     ApiSpec,
+    ApiWatermark,
     AtworksAgentConfig,
     AtworksBackend,
+    AuditEntry,
+    CellState,
     ComparisonProfile,
     FormatBatch,
     FormatBatchDraft,
@@ -22,6 +27,7 @@ from atworks_agent import (
     JobLedger,
     JobSpec,
     OperatorProfile,
+    Page,
     ProfileDraft,
     ProfileLedger,
     RuleDraft,
@@ -29,18 +35,37 @@ from atworks_agent import (
     RuleLedger,
     RuleRecommendation,
     RunResult,
+    RunsQuery,
     RunStatus,
+    ScopeSummary,
     SelectWhere,
     TestDataSet,
     ValidationRule,
+    decode_cursor,
+    encode_cursor,
     enforce_execution_matrix,
     evaluate,
     operator_scope,
     resolve_select_where,
 )
+from atworks_agent.aggregation import aggregate
 from atworks_agent.types import Binding
 
 from .reports import Reports
+
+
+def _page(rows: list, cursor: str | None, limit: int, *, key) -> Page:
+    """Generic keyset page over an already status/filter-narrowed list: sorts newest-first by
+    ``key`` (must return a ``(datetime, str)`` tuple matching the cursor shape), slices after the
+    decoded cursor position, and reports ``total`` as the filtered count before that slice."""
+    ordered = sorted(rows, key=key, reverse=True)
+    total = len(ordered)
+    if cursor:
+        after = decode_cursor(cursor)
+        ordered = [row for row in ordered if key(row) < after]
+    items = ordered[:limit]
+    next_cursor = encode_cursor(*key(items[-1])) if len(ordered) > limit else None
+    return Page(items=items, next_cursor=next_cursor, total=total)
 
 
 def stub_verdict(api: ApiSpec, env: str, data: TestDataSet | None) -> tuple[RunStatus, list[str], int]:
@@ -103,6 +128,9 @@ class MockAtworks(AtworksBackend):
             row["operator_id"]: OperatorProfile(**row)
             for row in json.loads((fixtures_dir / "operators.json").read_text(encoding="utf-8"))
         }
+        # scale (spec 2026-09-06): an in-memory audit log -- Task 4 moves this to SQL.
+        self._audit: list[AuditEntry] = []
+        self._audit_seq = 0
 
     def operator_profile(self, operator_id: str) -> OperatorProfile | None:
         return self.operators.get(operator_id)
@@ -110,34 +138,100 @@ class MockAtworks(AtworksBackend):
     async def list_operators(self, session) -> list[OperatorProfile]:
         return list(self.operators.values())
 
-    async def search_apis(self, session, query="", updated_after=None, group=None, limit=20):
+    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
         q = (query or "").lower()
         rows = [a for a in self.apis.values()
                 if (not q or q in f"{a.method} {a.path} {a.name}".lower())
                 and (group is None or a.group == group)
                 and (updated_after is None or a.updated_at >= updated_after)]
-        rows.sort(key=lambda a: a.updated_at, reverse=True)
-        return rows[:limit]
+        return _page(rows, cursor, limit, key=lambda a: (a.updated_at, a.api_id))
 
     async def get_api(self, session, api_id):
         return self.apis.get(api_id)
 
-    async def list_runs(self, session, since=None, status=None, api_id=None, limit=50):
-        rows = self._filter_runs(since, status, api_id)
-        return rows[:limit]
+    async def list_runs(self, session, q: RunsQuery) -> Page[RunResult]:
+        rows = self._filter_runs(
+            q.since, q.status, q.api_id, until=q.until, executed_by=q.executed_by, job_id=q.job_id
+        )
+        return _page(rows, q.cursor, q.limit, key=lambda r: (r.executed_at, r.run_id))
 
     async def get_run(self, session, run_id):
         return self.runs.get(run_id)
 
-    async def count_runs(self, session, since, status):
-        return len(self._filter_runs(since, status, None))
+    async def count_runs(self, session, since=None, until=None, status=None, api_id=None):
+        # No sort: a population count never needs an order, only the size of the matching set.
+        return sum(
+            1 for r in self.runs.values()
+            if (since is None or r.executed_at >= since)
+            and (until is None or r.executed_at < until)
+            and (status is None or (r.status.value != "pass" if status == "non_pass" else r.status.value == status))
+            and (api_id is None or r.api_id == api_id)
+        )
 
-    def _filter_runs(self, since, status, api_id) -> list[RunResult]:
+    def _filter_runs(self, since, status, api_id, *, until=None, executed_by=None, job_id=None) -> list[RunResult]:
         rows = [r for r in self.runs.values()
                 if (since is None or r.executed_at >= since)
+                and (until is None or r.executed_at < until)
                 and (status is None or (r.status.value != "pass" if status == "non_pass" else r.status.value == status))
-                and (api_id is None or r.api_id == api_id)]
+                and (api_id is None or r.api_id == api_id)
+                and (executed_by is None or r.executed_by == executed_by)
+                and (job_id is None or r.job_id == job_id)]
         return sorted(rows, key=lambda r: r.executed_at, reverse=True)
+
+    async def aggregate_runs(self, session, q: AggregateQuery):
+        rows = [r for r in self.runs.values()
+                if (q.since is None or r.executed_at >= q.since)
+                and (q.until is None or r.executed_at < q.until)
+                and (q.scope_api_ids is None or r.api_id in q.scope_api_ids)]
+        groups = aggregate(rows, self.apis, q.group_by, flaky_min_transitions=self._config.flaky_min_transitions)
+        return groups[: q.limit]
+
+    async def current_state(self, session, scope_api_ids=None) -> list[CellState]:
+        cells: dict[tuple[str, str, str | None], list[RunResult]] = defaultdict(list)
+        for r in self.runs.values():
+            if scope_api_ids is not None and r.api_id not in scope_api_ids:
+                continue
+            cells[(r.api_id, r.target_env, r.test_data_label)].append(r)
+        result: list[CellState] = []
+        for (api_id, env, data_label), rows in cells.items():
+            rows.sort(key=lambda r: r.executed_at)
+            transitions = sum(
+                1 for prev, cur in zip(rows, rows[1:], strict=False)
+                if (prev.status.value != "pass") != (cur.status.value != "pass")
+            )
+            latest = rows[-1]
+            result.append(CellState(
+                api_id=api_id, target_env=env, test_data_label=data_label, run_id=latest.run_id,
+                status=latest.status, executed_at=latest.executed_at, transitions_total=transitions,
+            ))
+        return result
+
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None) -> list[ApiWatermark]:
+        by_api: dict[str, list[RunResult]] = defaultdict(list)
+        for r in self.runs.values():
+            if api_ids is not None and r.api_id not in api_ids:
+                continue
+            by_api[r.api_id].append(r)
+        result: list[ApiWatermark] = []
+        for api_id, rows in by_api.items():
+            rows.sort(key=lambda r: r.executed_at)
+            passes = [r.executed_at for r in rows if r.status.value == "pass"]
+            non_passes = [r for r in rows if r.status.value != "pass"]
+            first_non_pass = non_passes[0].executed_at if non_passes else None
+            if first_non_pass_since is not None and (first_non_pass is None or first_non_pass < first_non_pass_since):
+                continue
+            result.append(ApiWatermark(
+                api_id=api_id, last_pass_at=passes[-1] if passes else None,
+                first_non_pass_at=first_non_pass,
+                last_non_pass_at=non_passes[-1].executed_at if non_passes else None,
+                latest_status=rows[-1].status if rows else None,
+            ))
+        return result
+
+    async def operator_scope(self, session, operator_id: str, window_days: int) -> ScopeSummary:
+        now = session.local_now() or datetime.now(UTC)
+        scope = operator_scope(list(self.runs.values()), operator_id, window_days, now)
+        return ScopeSummary(api_ids=sorted(scope)[:100], total=len(scope))
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind) -> JobSpec:
         return self.ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)
@@ -157,8 +251,14 @@ class MockAtworks(AtworksBackend):
     async def applied_jobs(self, session):
         return self.ledger.applied()
 
-    async def all_jobs(self, session):
-        return [*self.ledger.pending(), *self.ledger.applied()]
+    async def all_jobs(self, session, status=None, cursor=None, limit=50) -> Page[JobSpec]:
+        rows = [*self.ledger.pending(), *self.ledger.applied()]
+        if status is not None:
+            rows = [j for j in rows if j.status.value == status]
+        return _page(rows, cursor, limit, key=lambda j: (j.created_at, j.job_id))
+
+    async def active_jobs(self, session) -> list[JobSpec]:
+        return [j for j in self.ledger.applied() if j.remaining_executions > 0]
 
     async def runs_by_ids(self, session, run_ids):
         return [self.runs[i] for i in run_ids if i in self.runs]
@@ -196,24 +296,29 @@ class MockAtworks(AtworksBackend):
     async def discard_rule(self, session, rule_id, actor_kind):
         return self.rule_ledger.discard(rule_id, actor=session.operator, actor_kind=actor_kind)
 
-    async def list_rules(self, session, api_id=None):
-        return self.rule_ledger.list(api_id=api_id)
+    async def list_rules(self, session, api_id=None, status=None, cursor=None, limit=50) -> Page[ValidationRule]:
+        rows = self.rule_ledger.list(api_id=api_id)
+        if status is not None:
+            rows = [r for r in rows if r.status.value == status]
+        return _page(rows, cursor, limit, key=lambda r: (r.created_at, r.rule_id))
 
-    async def simulate_rule(self, session, draft: RuleDraft) -> RuleImpact:
-        """읽기 전용: draft를 아직 저장하지 않은 채 evaluate로만 돌려본다. 각 과거 run의 입력값은
-        그 run을 낳은 job의 test_data 세트(test_data_label로 찾는다)에서 draft.param 바인딩을
-        복원한다 — job_id나 test_data_label이 없거나, 그 세트에 param이 없으면 복원 불가로
-        excluded_unknown에 들어간다. ledger에도 runs에도 아무것도 쓰지 않는다."""
+    async def simulate_rule(self, session, draft: RuleDraft, window_days: int) -> RuleImpact:
+        """읽기 전용: draft를 아직 저장하지 않은 채 evaluate로만 돌려본다. window_days 안의 실행만
+        본다. 각 과거 run의 입력값은 그 run을 낳은 job의 test_data 세트(test_data_label로 찾는다)에서
+        draft.param 바인딩을 복원한다 — job_id나 test_data_label이 없거나, 그 세트에 param이 없으면
+        복원 불가로 excluded_unknown에 들어간다. ledger에도 runs에도 아무것도 쓰지 않는다."""
         candidate = ValidationRule(
             rule_id="__simulated__", api_id=draft.api_id, param=draft.param, kind=draft.kind, op=draft.op,
             value=draft.value, values=list(draft.values), format=draft.format, pattern=draft.pattern,
             message=draft.message(), created_at=datetime.now(UTC), created_by=session.operator,
             created_by_kind=draft.created_by_kind)
+        now = session.local_now() or datetime.now(UTC)
+        floor = now - timedelta(days=window_days)
         window_runs = 0
         known_inputs = 0
         would_fail = 0
         for run in self.runs.values():
-            if run.api_id != draft.api_id:
+            if run.api_id != draft.api_id or run.executed_at < floor:
                 continue
             window_runs += 1
             if run.job_id is None or run.test_data_label is None:
@@ -250,19 +355,23 @@ class MockAtworks(AtworksBackend):
     async def discard_profile(self, session, profile_id, actor_kind):
         return self.profile_ledger.discard(profile_id, actor=session.operator, actor_kind=actor_kind)
 
-    async def list_profiles(self, session, job_id=None):
-        return self.profile_ledger.list(job_id=job_id)
+    async def list_profiles(self, session, job_id=None, status=None, cursor=None, limit=50) -> Page[ComparisonProfile]:
+        rows = self.profile_ledger.list(job_id=job_id)
+        if status is not None:
+            rows = [p for p in rows if p.status.value == status]
+        return _page(rows, cursor, limit, key=lambda p: (p.created_at, p.profile_id))
 
     async def get_parity_report(self, session, job_id: str) -> dict | None:
         return self.reports.parity(job_id) if self.reports is not None else None
 
-    async def find_apis_with_param(self, session, param: str) -> list[ApiSpec]:
+    async def find_apis_with_param(self, session, param: str, cursor=None, limit=20) -> Page[ApiSpec]:
         applied_format_apis = {
             r.api_id for r in self.rule_ledger.applied() if r.kind == "format" and r.param == param
         }
-        return [a for a in self.apis.values() if param in a.params and a.api_id not in applied_format_apis]
+        rows = [a for a in self.apis.values() if param in a.params and a.api_id not in applied_format_apis]
+        return _page(rows, cursor, limit, key=lambda a: (a.updated_at, a.api_id))
 
-    async def recommend_rules_for_api(self, session, api_id: str) -> list[RuleRecommendation]:
+    async def recommend_rules_for_api(self, session, api_id: str, limit=20) -> list[RuleRecommendation]:
         api = self.apis.get(api_id)
         if api is None:
             return []
@@ -277,7 +386,22 @@ class MockAtworks(AtworksBackend):
                     recommendations.append(
                         RuleRecommendation(param=param, from_api_id=peer_rule.api_id, rule=peer_rule)
                     )
-        return recommendations
+        return recommendations[:limit]
+
+    async def get_body(self, session, run_id: str) -> dict | None:
+        run = self.runs.get(run_id)
+        return run.response_body if run is not None else None
+
+    async def audit(self, session, cursor=None, limit=50) -> Page[AuditEntry]:
+        return _page(self._audit, cursor, limit, key=lambda e: (e.at, str(e.seq)))
+
+    async def append_audit(self, session, action: str, target_kind: str, target_id: str) -> None:
+        self._audit_seq += 1
+        now = session.local_now() or datetime.now(UTC)
+        self._audit.append(AuditEntry(
+            seq=self._audit_seq, at=now, operator=session.operator, action=action,
+            target_kind=target_kind, target_id=target_id, session_id=session.session_id,
+        ))
 
     async def get_format(self, session, name: str) -> FormatDefinition | None:
         return self.format_library.get(name)

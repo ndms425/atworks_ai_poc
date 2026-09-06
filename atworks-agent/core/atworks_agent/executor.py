@@ -66,7 +66,7 @@ from .rules import (
     check_rule_guardrails,
 )
 from .scoring import UnknownScorer, rank_runs
-from .selection import resolve_select_where
+from .selection import collect_runs, resolve_select_where
 from .serialization import (
     api_record,
     format_batch_record,
@@ -85,6 +85,7 @@ from .types import (
     FormatBatch,
     JobSpec,
     RunResult,
+    RunsQuery,
     RunStatus,
 )
 
@@ -331,11 +332,11 @@ class AtworksToolExecutor(BaseToolExecutor):
     # -- 읽기 -------------------------------------------------------------------------
 
     async def _search_apis(self, tool_input: dict[str, Any]) -> ToolOutcome:
-        apis = await self._backend.search_apis(
+        apis = (await self._backend.search_apis(
             self._session, query=self._sanitize(tool_input.get("query"), 120),
             updated_after=_iso(tool_input.get("updated_after"), "updated_after"), group=tool_input.get("group") or None,
             limit=_limit(tool_input.get("limit"), 20, 200),
-        )
+        )).items
         for api in apis:
             self._state.remember_api(api)
         return self._fenced({"count": len(apis), "apis": [api_record(a) for a in apis]} if apis else {"note": "No APIs matched."})
@@ -353,11 +354,11 @@ class AtworksToolExecutor(BaseToolExecutor):
         status = filters.get("status") or None
         if status is not None and status not in RUN_STATUS_FILTERS:
             raise InvalidToolArgument("filters.status", kind="status")
-        runs = await self._backend.list_runs(
-            self._session, since=since, status=status, api_id=filters.get("api_id") or None,
+        runs = (await self._backend.list_runs(self._session, RunsQuery(
+            since=since, status=status, api_id=filters.get("api_id") or None,
             limit=_limit(tool_input.get("limit"), 50, 200),
-        )
-        population = await self._backend.count_runs(self._session, since, status)
+        ))).items
+        population = await self._backend.count_runs(self._session, since=since, status=status)
         self._state.last_population = population
         for run in runs:
             self._state.remember_run(run)
@@ -419,8 +420,9 @@ class AtworksToolExecutor(BaseToolExecutor):
         floor = datetime.now(UTC) - timedelta(days=self._config.max_aggregate_window_days)
         since = _iso(tool_input.get("since"), "since")
         since = floor if since is None or since < floor else since
-        runs = await self._backend.list_runs(
-            self._session, since=since, status=status, api_id=api_id, limit=self._config.max_aggregate_runs,
+        runs = await collect_runs(
+            self._backend, self._session, since=since, status=status, api_id=api_id,
+            cap=self._config.max_aggregate_runs,
         )
         for run in runs:
             self._state.remember_run(run)
@@ -432,7 +434,7 @@ class AtworksToolExecutor(BaseToolExecutor):
                 if api is not None:
                     self._state.remember_api(api)
         groups = aggregate(runs, self._state.seen_apis, group_by, flaky_min_transitions=self._config.flaky_min_transitions)
-        population = len(runs) if api_id is not None else await self._backend.count_runs(self._session, since, status)
+        population = len(runs) if api_id is not None else await self._backend.count_runs(self._session, since=since, status=status)
         self._state.last_population = population
         self._state.last_listed_run_ids = [r.run_id for r in runs]
         self._state.last_listed_filter = status or "all"
@@ -646,7 +648,9 @@ class AtworksToolExecutor(BaseToolExecutor):
         if violations := check_rule_guardrails(draft, self._config, api):
             return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(violations))
         rule = await self._backend.stage_rule(self._session, draft, ActorKind.AGENT)
-        self._state.rule_impacts[rule.rule_id] = await self._backend.simulate_rule(self._session, draft)
+        self._state.rule_impacts[rule.rule_id] = await self._backend.simulate_rule(
+            self._session, draft, window_days=self._config.scope_window_days
+        )
         return await self._remember_and_preview_rule(rule)
 
     async def _get_pending_rules(self, _: dict[str, Any]) -> ToolOutcome:
@@ -681,7 +685,7 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _find_apis_with_param(self, tool_input: dict[str, Any]) -> ToolOutcome:
         param = self._sanitize(tool_input.get("param"), 80)
-        apis = await self._backend.find_apis_with_param(self._session, param)
+        apis = (await self._backend.find_apis_with_param(self._session, param)).items
         for api in apis:
             self._state.remember_api(api)
         return self._fenced(

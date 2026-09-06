@@ -1,6 +1,7 @@
 # ruff: noqa: F401 -- this module's job is to re-export; __all__ is computed from dir().
 from .backend import AtworksBackend
 from .config import AtworksAgentConfig
+from .cursor import decode_cursor, encode_cursor
 from .executor import AtworksToolExecutor, build_memory
 from .gates import (
     check_apply_profile,
@@ -40,7 +41,7 @@ from .rules import (
     evaluate,
     verify_examples,
 )
-from .selection import Resolution, resolve_select_where
+from .selection import Resolution, collect_runs, resolve_select_where
 from .serialization import profile_record
 from .types import (
     ActorKind,

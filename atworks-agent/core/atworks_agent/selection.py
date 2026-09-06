@@ -8,7 +8,7 @@ from datetime import datetime
 from .backend import AtworksBackend
 from .config import AtworksAgentConfig
 from .jobs import SelectWhere
-from .types import ApiSpec, AtworksSessionContext
+from .types import ApiSpec, AtworksSessionContext, RunResult, RunsQuery
 
 CATALOGUE_SCAN_LIMIT = 1000
 
@@ -25,15 +25,37 @@ def path_prefix(path: str, segments: int) -> str:
     return "/" + "/".join(parts[:segments])
 
 
+async def collect_runs(
+    backend: AtworksBackend, session: AtworksSessionContext, *, cap: int,
+    since: datetime | None = None, until: datetime | None = None, status: str | None = None,
+    api_id: str | None = None, executed_by: str | None = None, job_id: str | None = None,
+) -> list[RunResult]:
+    """Gathers up to ``cap`` runs (newest first) by paging ``list_runs`` — ``RunsQuery.limit``
+    caps a single page at 200, so a caller that wants "up to N runs" (an aggregation window, a
+    catalogue scan) pages through cursors here rather than requesting one oversized page."""
+    items: list[RunResult] = []
+    cursor: str | None = None
+    while len(items) < cap:
+        page = await backend.list_runs(session, RunsQuery(
+            since=since, until=until, status=status, api_id=api_id, executed_by=executed_by,
+            job_id=job_id, cursor=cursor, limit=min(200, cap - len(items)),
+        ))
+        items.extend(page.items)
+        if page.next_cursor is None or not page.items:
+            break
+        cursor = page.next_cursor
+    return items[:cap]
+
+
 async def resolve_select_where(
     backend: AtworksBackend, session: AtworksSessionContext, where: SelectWhere, config: AtworksAgentConfig, *, now: datetime
 ) -> Resolution:
     del now  # reserved for relative windows; kept in the signature so callers pass the execution clock
-    base = await backend.search_apis(
+    page = await backend.search_apis(
         session, query=where.query, group=where.group, updated_after=where.updated_after,
         limit=CATALOGUE_SCAN_LIMIT if (where.related_to or where.failed_since) else config.max_apis_per_job + 1,
     )
-    apis = {a.api_id: a for a in base}
+    apis = {a.api_id: a for a in page.items}
     basis: list[str] = []
     if where.related_to:
         anchor = await backend.get_api(session, where.related_to)
@@ -47,7 +69,9 @@ async def resolve_select_where(
         group_text = f"같은 group({anchor.group})" if anchor.group else "같은 group"
         basis.append(f"{anchor.api_id}과 {group_text} 또는 {prefix}/*")
     if where.failed_since:
-        failed = await backend.list_runs(session, since=where.failed_since, status="non_pass", api_id=None, limit=config.max_aggregate_runs)
+        failed = await collect_runs(
+            backend, session, since=where.failed_since, status="non_pass", cap=config.max_aggregate_runs,
+        )
         failed_ids = {r.api_id for r in failed}
         apis = {i: a for i, a in apis.items() if i in failed_ids}
         sentence = f"{where.failed_since.date().isoformat()} 이후 실패·에러가 있던 API"

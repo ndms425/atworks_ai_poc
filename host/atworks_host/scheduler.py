@@ -109,7 +109,7 @@ class Scheduler:
                 ignore_paths: list[str] = []
                 per_api_ignore: dict[str, list[str]] = {}
                 try:
-                    profiles = await self.backend.list_profiles(self.session, job_id)
+                    profiles = (await self.backend.list_profiles(self.session, job_id)).items
                     for profile in profiles:
                         if profile.status is not ProfileStatus.APPLIED:
                             continue

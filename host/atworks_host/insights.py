@@ -21,6 +21,7 @@ from atworks_agent import (
     InsightItem,
     InsightNarrative,
     InsightPanel,
+    collect_runs,
 )
 from atworks_agent.insights import candidate_insights, operator_scope
 
@@ -73,9 +74,9 @@ class InsightPanels:
     ) -> InsightPanel:
         cfg = self.config
         since = now - timedelta(days=max(cfg.scope_window_days, cfg.max_aggregate_window_days))
-        runs = await backend.list_runs(session, since=since, status=None, limit=cfg.max_aggregate_runs)
-        apis = {a.api_id: a for a in await backend.search_apis(session, query="", limit=1000)}
-        jobs = await backend.all_jobs(session)
+        runs = await collect_runs(backend, session, since=since, cap=cfg.max_aggregate_runs)
+        apis = {a.api_id: a for a in (await backend.search_apis(session, query="", limit=1000)).items}
+        jobs = (await backend.all_jobs(session, limit=1000)).items
         profile = next((p for p in await backend.list_operators(session) if p.operator_id == session.operator), None)
         name = profile.name if profile is not None else session.operator
         role = session.role or "developer"

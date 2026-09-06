@@ -228,8 +228,8 @@ async def test_list_and_pending_profiles(tmp_path):
     staged = await backend.stage_profile(SESSION, draft, ActorKind.OPERATOR)
 
     assert [p.profile_id for p in await backend.get_pending_profiles(SESSION)] == [staged.profile_id]
-    assert [p.profile_id for p in await backend.list_profiles(SESSION, job_id=job.job_id)] == [staged.profile_id]
-    assert await backend.list_profiles(SESSION, job_id="no-such-job") == []
+    assert [p.profile_id for p in (await backend.list_profiles(SESSION, job_id=job.job_id)).items] == [staged.profile_id]
+    assert (await backend.list_profiles(SESSION, job_id="no-such-job")).items == []
 
     discarded = await backend.discard_profile(SESSION, staged.profile_id, ActorKind.OPERATOR)
     assert discarded.status is ProfileStatus.DISCARDED

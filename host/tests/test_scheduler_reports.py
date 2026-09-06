@@ -14,6 +14,7 @@ from atworks_agent import (
     JobSchedule,
     JobSpec,
     JobStatus,
+    Page,
     RunResult,
     RunStatus,
     TestDataSet,
@@ -178,19 +179,43 @@ class RecordingBackend(AtworksBackend):
         self.run = run
         self.calls: list[str] = []
 
-    async def search_apis(self, session, query="", updated_after=None, group=None, limit=20):
+    async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20):
         raise NotImplementedError
 
     async def get_api(self, session, api_id):
         raise NotImplementedError
 
-    async def list_runs(self, session, since=None, status=None, api_id=None, limit=50):
+    async def list_runs(self, session, q):
         raise NotImplementedError
 
     async def get_run(self, session, run_id):
         raise NotImplementedError
 
-    async def count_runs(self, session, since, status):
+    async def count_runs(self, session, since=None, until=None, status=None, api_id=None):
+        raise NotImplementedError
+
+    async def aggregate_runs(self, session, q):
+        raise NotImplementedError
+
+    async def current_state(self, session, scope_api_ids=None):
+        raise NotImplementedError
+
+    async def watermarks(self, session, api_ids=None, first_non_pass_since=None):
+        raise NotImplementedError
+
+    async def operator_scope(self, session, operator_id, window_days):
+        raise NotImplementedError
+
+    async def get_body(self, session, run_id):
+        raise NotImplementedError
+
+    async def audit(self, session, cursor=None, limit=50):
+        raise NotImplementedError
+
+    async def append_audit(self, session, action, target_kind, target_id):
+        raise NotImplementedError
+
+    async def active_jobs(self, session):
         raise NotImplementedError
 
     async def stage_job(self, session, draft, actor_kind):
@@ -217,10 +242,10 @@ class RecordingBackend(AtworksBackend):
     async def discard_rule(self, session, rule_id, actor_kind):
         raise NotImplementedError
 
-    async def list_rules(self, session, api_id=None):
+    async def list_rules(self, session, api_id=None, status=None, cursor=None, limit=50):
         raise NotImplementedError
 
-    async def simulate_rule(self, session, draft):
+    async def simulate_rule(self, session, draft, window_days):
         raise NotImplementedError
 
     async def stage_profile(self, session, draft, actor_kind):
@@ -235,16 +260,16 @@ class RecordingBackend(AtworksBackend):
     async def discard_profile(self, session, profile_id, actor_kind):
         raise NotImplementedError
 
-    async def list_profiles(self, session, job_id=None):
+    async def list_profiles(self, session, job_id=None, status=None, cursor=None, limit=50):
         raise NotImplementedError
 
     async def get_parity_report(self, session, job_id):
         raise NotImplementedError
 
-    async def find_apis_with_param(self, session, param):
+    async def find_apis_with_param(self, session, param, cursor=None, limit=20):
         raise NotImplementedError
 
-    async def recommend_rules_for_api(self, session, api_id):
+    async def recommend_rules_for_api(self, session, api_id, limit=20):
         raise NotImplementedError
 
     async def get_format(self, session, name):
@@ -281,9 +306,9 @@ class RecordingBackend(AtworksBackend):
         self.calls.append("applied_jobs")
         return [self.job]
 
-    async def all_jobs(self, session):
+    async def all_jobs(self, session, status=None, cursor=None, limit=50):
         self.calls.append("all_jobs")
-        return [self.job]
+        return Page(items=[self.job], total=1)
 
     async def runs_by_ids(self, session, run_ids):
         self.calls.append("runs_by_ids")

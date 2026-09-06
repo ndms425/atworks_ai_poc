@@ -12,14 +12,22 @@ from .profiles import ProfileDraft
 from .rules import FormatBatchDraft, FormatDefinition, RuleDraft, RuleImpact, ValidationRule
 from .types import (
     ActorKind,
+    AggregateQuery,
     ApiSpec,
+    ApiWatermark,
     AtworksSessionContext,
+    AuditEntry,
+    CellState,
     ComparisonProfile,
     FormatBatch,
     JobSpec,
     OperatorProfile,
+    Page,
     RuleRecommendation,
+    RunGroup,
     RunResult,
+    RunsQuery,
+    ScopeSummary,
 )
 
 
@@ -27,34 +35,66 @@ class AtworksBackend(ABC):
     # -- 읽기 ------------------------------------------------------------------------
     @abstractmethod
     async def search_apis(
-        self, session: AtworksSessionContext, query: str = "",
-        updated_after: datetime | None = None, group: str | None = None, limit: int = 20,
-    ) -> list[ApiSpec]:
-        """텍스트·갱신일·그룹으로 API 스펙 검색. updated_after는 '지난 1주일 업데이트' 류의 리졸버."""
+        self, session: AtworksSessionContext, query: str = "", group: str | None = None,
+        updated_after: datetime | None = None, cursor: str | None = None, limit: int = 20,
+    ) -> Page[ApiSpec]:
+        """텍스트·갱신일·그룹으로 API 스펙 검색. updated_after는 '지난 1주일 업데이트' 류의 리졸버.
+
+        REST 구현 의무: ``cursor``는 서버가 만든 불투명 문자열이다(다른 프로세스가 만든 값을 절대
+        직접 해석하지 않는다) — ``updated_at`` DESC, ``api_id`` DESC 순서에서 이 커서 이후의 다음
+        페이지를 낸다. ``Page.total``은 이 필터를 적용한 전체 건수, limit과 무관하다."""
 
     @abstractmethod
     async def get_api(self, session: AtworksSessionContext, api_id: str) -> ApiSpec | None: ...
 
     @abstractmethod
-    async def list_runs(
-        self, session: AtworksSessionContext, since: datetime | None = None,
-        status: str | None = None, api_id: str | None = None, limit: int = 50,
-    ) -> list[RunResult]:
-        """실행 이력. status는 pass/fail/error/non_pass. 판정값은 aTworks DSL이 낸 그대로다.
+    async def list_runs(self, session: AtworksSessionContext, q: RunsQuery) -> Page[RunResult]:
+        """실행 이력. q.status는 pass/fail/error/non_pass. 판정값은 aTworks DSL이 낸 그대로다.
         non_pass는 fail과 error를 함께 묶는다(트리아지 모집단).
 
-        A REST adapter must honor two obligations the Mock backend already does: results are
-        ordered newest ``executed_at`` first (callers truncate to ``limit`` on that assumption),
-        and every ``executed_at`` is timezone-aware (a naive value compared against an aware
-        ``since``/``updated_after``/``failed_since`` raises ``TypeError`` downstream)."""
+        REST 구현 의무: 결과는 ``executed_at`` DESC, ``run_id`` DESC 순서다(동률을 run_id로 깨
+        페이지 경계가 안정적이다). ``q.cursor``는 서버가 만든 불투명 문자열 — 이 순서에서 그 지점
+        이후의 다음 페이지를 낸다. ``Page.total``은 이 필터를 적용한 전체 건수, ``q.limit``과
+        무관하다. 모든 ``executed_at``은 timezone-aware여야 한다(naive 값을 aware ``q.since``와
+        비교하면 하위에서 ``TypeError``가 난다)."""
 
     @abstractmethod
     async def get_run(self, session: AtworksSessionContext, run_id: str) -> RunResult | None: ...
 
     @abstractmethod
-    async def count_runs(self, session: AtworksSessionContext, since: datetime | None, status: str | None) -> int:
+    async def count_runs(
+        self, session: AtworksSessionContext, since: datetime | None = None, until: datetime | None = None,
+        status: str | None = None, api_id: str | None = None,
+    ) -> int:
         """triage 카드의 모수(population). list_runs의 limit과 무관하게 전체 건수.
-        status는 pass/fail/error/non_pass; non_pass는 fail과 error를 함께 묶는다."""
+        status는 pass/fail/error/non_pass; non_pass는 fail과 error를 함께 묶는다. 이 필터를 적용한
+        전체 건수이며 정렬은 하지 않는다(population 집계에는 순서가 필요 없다)."""
+
+    @abstractmethod
+    async def aggregate_runs(self, session: AtworksSessionContext, q: AggregateQuery) -> list[RunGroup]:
+        """q.group_by로 실행 이력을 묶는다(원인별/계별/API별). 숫자는 전부 host가 계산하고, 모델은
+        어떤 그룹을 보여줄지만 고른다. q.scope_api_ids가 주어지면 그 API로만 스코프를 좁힌다."""
+
+    @abstractmethod
+    async def current_state(
+        self, session: AtworksSessionContext, scope_api_ids: list[str] | None = None
+    ) -> list[CellState]:
+        """api_id × target_env × test_data_label 셀마다 최신 상태 1행(물질화 뷰). transitions_total은
+        그 셀의 시간순 상태 시퀀스에서 계산한다."""
+
+    @abstractmethod
+    async def watermarks(
+        self, session: AtworksSessionContext, api_ids: list[str] | None = None,
+        first_non_pass_since: datetime | None = None,
+    ) -> list[ApiWatermark]:
+        """API별 pass/non-pass 워터마크. flaky/regression 판정을 전체 히스토리 재스캔 없이 낸다."""
+
+    @abstractmethod
+    async def operator_scope(
+        self, session: AtworksSessionContext, operator_id: str, window_days: int
+    ) -> ScopeSummary:
+        """operator_id가 최근 window_days일 동안 건드린 API 모집단 요약. api_ids는 표본(<=100),
+        total이 실제 개수."""
 
     # -- 실행 계획 (propose → preview → approve → apply) ----------------------------
     @abstractmethod
@@ -79,8 +119,18 @@ class AtworksBackend(ABC):
         """승인(applied) 상태인 job 전체. 스케줄러가 매 tick마다 순회하는 대상."""
 
     @abstractmethod
-    async def all_jobs(self, session: AtworksSessionContext) -> list[JobSpec]:
-        """pending + applied job (Jobs 페이지가 보여주는 전체). discarded는 빠진다."""
+    async def all_jobs(
+        self, session: AtworksSessionContext, status: str | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[JobSpec]:
+        """pending + applied job (Jobs 페이지가 보여주는 전체). discarded는 빠진다. status가 주어지면
+        그 상태(staged/applied)로 더 좁힌다. REST 구현 의무: ``created_at`` DESC, ``job_id`` DESC
+        순서, ``cursor``는 서버가 만든 불투명 문자열, ``Page.total``은 이 필터를 적용한 전체 건수."""
+
+    @abstractmethod
+    async def active_jobs(self, session: AtworksSessionContext) -> list[JobSpec]:
+        """applied 상태이고 remaining_executions > 0인 job만 — 스케줄러가 아직 소비할 슬롯이 남은
+        job을 빠르게 추리는 데 쓴다(다 소진된 applied job까지 매 tick 다시 스캔하지 않도록)."""
 
     @abstractmethod
     async def runs_by_ids(self, session: AtworksSessionContext, run_ids: list[str]) -> list[RunResult]:
@@ -129,16 +179,19 @@ class AtworksBackend(ABC):
 
     @abstractmethod
     async def list_rules(
-        self, session: AtworksSessionContext, api_id: str | None = None
-    ) -> list[ValidationRule]:
-        """api_id가 주어지면 그 API의 규칙만, 아니면 전체(상태 무관)."""
+        self, session: AtworksSessionContext, api_id: str | None = None, status: str | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[ValidationRule]:
+        """api_id가 주어지면 그 API의 규칙만, status가 주어지면 그 상태로 더 좁힌다(둘 다 없으면
+        전체, 상태 무관). REST 구현 의무: ``created_at`` DESC, ``rule_id`` DESC 순서, ``cursor``는
+        서버가 만든 불투명 문자열, ``Page.total``은 이 필터를 적용한 전체 건수."""
 
     @abstractmethod
-    async def simulate_rule(self, session: AtworksSessionContext, draft: RuleDraft) -> RuleImpact:
+    async def simulate_rule(self, session: AtworksSessionContext, draft: RuleDraft, window_days: int) -> RuleImpact:
         """읽기 전용: 아무 것도 쓰지 않는다 — 규칙 레저에도 실행 이력에도 흔적을 남기지 않는다.
-        최근 실행 중 draft.param에 대한 입력값을 복원할 수 있는 것만 세어(``known_inputs``) 그 중
-        드래프트가 실패시켰을 것을 ``would_fail``로 센다; 복원 불가능한 나머지는
-        ``excluded_unknown``이다."""
+        window_days 안의 실행만 본다(더 오래된 run은 애초에 셈에서 빠진다). 최근 실행 중
+        draft.param에 대한 입력값을 복원할 수 있는 것만 세어(``known_inputs``) 그 중 드래프트가
+        실패시켰을 것을 ``would_fail``로 센다; 복원 불가능한 나머지는 ``excluded_unknown``이다."""
 
     # -- 값 비교 프로파일 (propose → approve → apply; effective_from 이후에도 과거 판정은 안 건드림) --
     @abstractmethod
@@ -164,9 +217,12 @@ class AtworksBackend(ABC):
 
     @abstractmethod
     async def list_profiles(
-        self, session: AtworksSessionContext, job_id: str | None = None
-    ) -> list[ComparisonProfile]:
-        """job_id가 주어지면 그 job의 프로파일만, 아니면 전체(상태 무관)."""
+        self, session: AtworksSessionContext, job_id: str | None = None, status: str | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[ComparisonProfile]:
+        """job_id가 주어지면 그 job의 프로파일만, status가 주어지면 그 상태로 더 좁힌다(둘 다 없으면
+        전체, 상태 무관). REST 구현 의무: ``created_at`` DESC, ``profile_id`` DESC 순서, ``cursor``는
+        서버가 만든 불투명 문자열, ``Page.total``은 이 필터를 적용한 전체 건수."""
 
     @abstractmethod
     async def get_parity_report(self, session: AtworksSessionContext, job_id: str) -> dict | None:
@@ -208,20 +264,43 @@ class AtworksBackend(ABC):
 
     # -- 추천 (읽기 전용, 판정 없음) -----------------------------------------------------
     @abstractmethod
-    async def find_apis_with_param(self, session: AtworksSessionContext, param: str) -> list[ApiSpec]:
+    async def find_apis_with_param(
+        self, session: AtworksSessionContext, param: str, cursor: str | None = None, limit: int = 20,
+    ) -> Page[ApiSpec]:
         """param을 선언한 API 중, 그 API에 이미 적용된(``applied``) format 규칙이 그 param에 대해
         없는 것만 돌려준다 — 한 API에 포맷을 적용한 뒤 '다른 API에도 이 이름의 param이 있는데
-        확장할까요'를 결정론으로 묻기 위한 카탈로그 스캔. 아무것도 쓰지 않는다."""
+        확장할까요'를 결정론으로 묻기 위한 카탈로그 스캔. 아무것도 쓰지 않는다. REST 구현 의무:
+        ``updated_at`` DESC, ``api_id`` DESC 순서, ``cursor``는 서버가 만든 불투명 문자열,
+        ``Page.total``은 이 필터를 적용한 전체 건수."""
 
     @abstractmethod
     async def recommend_rules_for_api(
-        self, session: AtworksSessionContext, api_id: str
+        self, session: AtworksSessionContext, api_id: str, limit: int = 20,
     ) -> list[RuleRecommendation]:
         """대상 API의 param마다: 이미 적용된 규칙이 있으면 건너뛰고, 없으면 같은 이름의 param을 가진
         *다른* API에 이미 적용된 규칙들을 제안(``RuleRecommendation``)으로 돌려준다. 대응하는 peer가
         전혀 없는 param은 아무것도 제안하지 않는다 — param 이름만으로 제약을 지어내지 않는다(no
         fabrication). 각 제안은 operator가 개별적으로 ``stage_rule``에 실어 스테이징하고 승인한다.
         읽기 전용: 아무것도 쓰지 않는다."""
+
+    @abstractmethod
+    async def get_body(self, session: AtworksSessionContext, run_id: str) -> dict | None:
+        """run 1건의 저장된 응답 바디만 읽는다(run_result 전체가 아니라) — parity 재-diff처럼 바디만
+        필요한 경로가 나머지 필드를 실어 나르지 않게 한다. 없는 run이면 None."""
+
+    # -- 감사 로그 (append-only, seq가 전역 순서) -----------------------------------------
+    @abstractmethod
+    async def audit(
+        self, session: AtworksSessionContext, cursor: str | None = None, limit: int = 50,
+    ) -> Page[AuditEntry]:
+        """감사 로그를 최신순으로 읽는다. REST 구현 의무: ``at`` DESC, ``seq`` DESC 순서, ``cursor``는
+        서버가 만든 불투명 문자열, ``Page.total``은 전체 건수."""
+
+    @abstractmethod
+    async def append_audit(
+        self, session: AtworksSessionContext, action: str, target_kind: str, target_id: str
+    ) -> None:
+        """감사 로그에 한 행을 남긴다(append-only) — seq는 구현이 전역 순서로 부여한다."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod
