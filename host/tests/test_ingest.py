@@ -29,6 +29,7 @@ from atworks_agent import (
     RunStatus,
     TestDataSet,
 )
+from atworks_agent.aggregation import _keys as _group_keys
 from atworks_agent.aggregation import aggregate
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.store import Store
@@ -69,6 +70,30 @@ def _rollup_rows(store: Store) -> list[dict]:
         "SELECT * FROM rollup_day ORDER BY day, api_id, target_env, test_data_label").fetchall()]
 
 
+def _key_rollup_rows(store: Store) -> dict[tuple[str, str, str], tuple[int, int, int, tuple[str, ...]]]:
+    return {
+        (r["day"], r["axis"], r["key"]): (r["count"], r["fail"], r["error"],
+                                         tuple(sorted(json.loads(r["api_ids"]))))
+        for r in store.conn().execute('SELECT * FROM rollup_key_day').fetchall()
+    }
+
+
+def _key_rollup_from_cells(store: Store) -> dict[tuple[str, str, str], tuple[int, int, int, tuple[str, ...]]]:
+    """The same figures derived independently from `rollup_day`'s JSON maps -- the derivation
+    `aggregate_rollups` USED to do inline with `json_each` on every read. `rollup_key_day` must
+    equal it exactly, or the fast path answers a different number from the slow one."""
+    derived: dict[tuple[str, str, str], list] = {}
+    for row in _rollup_rows(store):
+        for axis, column in (("failed_rule", "failed_rule_counts"), ("http_status", "http_status_counts")):
+            for key, counts in json.loads(row[column] or "{}").items():
+                acc = derived.setdefault((row["day"], axis, key), [0, 0, 0, set()])
+                acc[0] += counts["count"]
+                acc[1] += counts["fail"]
+                acc[2] += counts["error"]
+                acc[3].add(row["api_id"])
+    return {k: (v[0], v[1], v[2], tuple(sorted(v[3]))) for k, v in derived.items()}
+
+
 def _snapshot(store: Store) -> dict:
     """Every materialized row, as plain data, for the idempotency comparison."""
     conn = store.conn()
@@ -78,7 +103,8 @@ def _snapshot(store: Store) -> dict:
         return sorted(raw, key=lambda r: json.dumps(r, sort_keys=True, default=str))
 
     return {t: rows(t) for t in
-            ("runs", "bodies", "current_state", "rollup_day", "api_watermark", "operator_api")}
+            ("runs", "bodies", "current_state", "rollup_day", "rollup_key_day",
+             "api_watermark", "operator_api")}
 
 
 # -- transactional safety (final review C1) ------------------------------------------------------
@@ -202,6 +228,29 @@ def test_incremental_ingest_matches_the_recompute_oracles():
         for row in _rollup_rows(store)
     )
     assert total_failed == sum(1 for r in runs if r.status is not RunStatus.PASS)
+
+    # ...and rollup_key_day, the transposed copy the key axes now read, holds EXACTLY that same
+    # derivation -- counters summed, api_ids unioned -- so the fast path and the json_each path
+    # can never answer different numbers.
+    assert _key_rollup_rows(store) == _key_rollup_from_cells(store)
+    for group_by in ("failed_rule", "http_status"):
+        expected = {g.key: g for g in aggregate(runs, APIS, group_by, flaky_min_transitions=3)}
+        stored: dict[str, list] = {}
+        for (_day, axis, key), (count, fail, error, api_ids) in _key_rollup_rows(store).items():
+            if axis != group_by:
+                continue
+            acc = stored.setdefault(key, [0, 0, 0, set()])
+            acc[0] += count
+            acc[1] += fail
+            acc[2] += error
+            acc[3].update(api_ids)
+        assert set(stored) == set(expected), group_by
+        for key, (count, fail, error, api_ids) in stored.items():
+            group = expected[key]
+            assert (count, fail, error) == (group.count, group.fail, group.error), key
+            # api_ids is what api_count is derived from: the TRUE distinct set behind the key
+            assert api_ids == {r.api_id for r in runs
+                               if key in _group_keys(r, group_by)}, key
 
     # -- idempotency: every batch again, in a different order, changes nothing -------------------
     before = _snapshot(store)

@@ -14,21 +14,33 @@ Timing rule: best of 3 timed calls after 1 warm-up, except ``insights.build`` an
 ``briefing.generate``, which run **once** (they write files and are seconds-scale; a best-of-3
 would only measure a warm page cache).
 
-Measurement order matters, and the last two rows both MUTATE the dataset: the retention probe moves
-the whole run set into the cold partition and drops every body, and the SSE-latency probe then
-executes a real 400-cell job that writes 400 fresh runs. Both run after every read row, so those
-see the dataset exactly as generated. Run the bench on a throwaway copy -- ``test_scale`` does.
+Measurement order matters, and the last two rows MUTATE. ``--no-mutate`` (the DEFAULT) copies
+``scale.sqlite`` to a temp file for the retention probe, because that probe moves runs into the
+cold partition and deleting a 2M-run dataset's hot partition to measure one row is not a trade
+worth making twice -- the Task 11 full-set bench did exactly that and left the dataset unusable.
+Pass ``--mutate`` to run it in place. The SSE-latency probe still appends its own 400 runs to the
+dataset (it executes a real 400-cell job); that is an append, not a destruction, and it now runs
+against a FULL hot partition rather than the emptied one the in-place retention probe left behind.
+
+The retention row measures **one day partition** ageing out (spec §6/§12 "하루치"), not the whole
+set: ``now`` is pinned to the oldest day partition's local midnight plus ``retention_hot_days + 1``,
+so exactly that one partition crosses the cutoff. Ageing the whole dataset out in one pass was an
+upper bound on a real day's work, and at 2M runs it read as 128 seconds against a 30-second limit
+for a job that really does about a second.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import shutil
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from atworks_agent import (
     ActorKind,
@@ -103,7 +115,8 @@ def _busiest_apis(store: Store, since: datetime, limit: int = 400) -> list[str]:
 
 
 async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
-                    work_dir: Path | None = None, quiet: bool = False) -> list[Row]:
+                    work_dir: Path | None = None, quiet: bool = False,
+                    mutate: bool = False) -> list[Row]:
     config = config or AtworksAgentConfig(model="scale")
     meta_path = dataset / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
@@ -186,31 +199,54 @@ async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
         await briefings.generate(backend, session, now)
         rows.append(Row("briefing.generate", config.slo_briefing_ms, (time.perf_counter() - start) * 1000))
 
-    # -- retention day job (Task 9) -------------------------------------------------------
-    #    `now` is pushed past the newest run by the whole hot window, so the ENTIRE dataset ages
-    #    out in this one pass -- an upper bound on any real day's work, not a typical one.
-    rows.append(await _retention_probe(store, config, work_dir))
+    # -- retention: ONE day partition ages out (Task 9 + final review) ----------------------
+    rows.append(await _retention_probe(dataset, store, config, work_dir, mutate))
 
-    # -- SSE latency while a 400-cell job executes. Writes 400 runs -- keep it last. Its runs
-    #    are stamped "now", so the retention pass above (which archived everything older) left
-    #    the write path exactly as a production one: an empty-ish hot partition it appends to.
+    # -- SSE latency while a 400-cell job executes. Writes 400 runs -- keep it last. With the
+    #    retention probe on a copy, this now runs against the FULL hot partition, which is the
+    #    honest shape: a production write appends to a store that already holds its history.
     rows.append(await _sse_probe(backend, session, config, amount_apis))
     return rows
 
 
-async def _retention_probe(store: Store, config: AtworksAgentConfig, work_dir: Path | None) -> Row:
-    newest = store.newest_run_at()
-    if newest is None:
-        return Row("retention day job", config.slo_retention_ms, note="empty dataset")
-    when = newest + timedelta(days=config.retention_hot_days + 1)
+def _retention_now(store: Store, config: AtworksAgentConfig) -> datetime | None:
+    """The clock at which EXACTLY the oldest day partition has aged out: that partition's local
+    midnight plus ``retention_hot_days`` plus one day, so the archive cutoff
+    (``now - hot_days``) lands on the NEXT partition's midnight and nothing newer moves."""
+    oldest = store.oldest_run_day()
+    if oldest is None:
+        return None
+    midnight = datetime.combine(date.fromisoformat(oldest), dtime.min,
+                                tzinfo=ZoneInfo(config.briefing_tz))
+    return midnight + timedelta(days=config.retention_hot_days + 1)
+
+
+async def _retention_probe(dataset: Path, store: Store, config: AtworksAgentConfig,
+                           work_dir: Path | None, mutate: bool) -> Row:
+    name = "retention (one day partition)"
+    when = _retention_now(store, config)
+    if when is None:
+        return Row(name, config.slo_retention_ms, note="empty dataset")
     with tempfile.TemporaryDirectory(dir=work_dir) as tmp:
-        retention = Retention(store, config, Path(tmp) / "insights")
+        target, note_suffix = store, ""
+        if not mutate:
+            # The one destructive probe runs on a COPY: it moves runs out of the hot partition,
+            # and a 2M-run dataset takes minutes to regenerate. Copy cost is outside the timing.
+            copy = Path(tmp) / "retention.sqlite"
+            shutil.copyfile(dataset / "scale.sqlite", copy)
+            target = Store(copy)
+            note_suffix = ", on a copy"
+        retention = Retention(target, config, Path(tmp) / "insights")
         start = time.perf_counter()
         counts = await retention.run(when)
         ms = (time.perf_counter() - start) * 1000
-    return Row("retention day job", config.slo_retention_ms, ms,
-               note=f"archived {counts['runs_archived']:,}, bodies {counts['bodies_deleted']:,} "
-                    f"(whole set ages out)")
+        if target is not store:
+            # Windows will not delete a file another handle still holds, and the copy lives
+            # inside the TemporaryDirectory this `with` is about to remove.
+            target.conn().close()
+    return Row(name, config.slo_retention_ms, ms,
+               note=f"archived {counts['runs_archived']:,}, bodies {counts['bodies_deleted']:,}"
+                    f"{note_suffix}")
 
 
 async def _sse_probe(backend: MockAtworks, session: AtworksSessionContext,
@@ -274,11 +310,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB,
                         help="dataset directory written by generate.py (or the scale.sqlite inside it)")
     parser.add_argument("--json", type=Path, default=None, help="also dump the rows as JSON here")
+    parser.add_argument("--mutate", action="store_true",
+                        help="run the retention probe IN PLACE (it moves runs into the cold "
+                             "partition). Default --no-mutate copies scale.sqlite for that probe.")
+    parser.add_argument("--no-mutate", dest="mutate", action="store_false",
+                        help=argparse.SUPPRESS)
+    parser.set_defaults(mutate=False)
     args = parser.parse_args(argv)
     dataset = Path(args.db)
     if dataset.is_file():
         dataset = dataset.parent
-    rows = asyncio.run(run_bench(dataset))
+    rows = asyncio.run(run_bench(dataset, mutate=args.mutate))
     print_table(rows)
     if args.json:
         args.json.write_text(json.dumps([asdict(r) | {"verdict": r.verdict} for r in rows],

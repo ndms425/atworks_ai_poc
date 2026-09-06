@@ -70,23 +70,25 @@ SIZES = (
 # 400-cell execute`, which the chunked WRITE fixed -- the unbroken 400-run `store.ingest` measured
 # 162ms on the mid set in Task 7 and now measures 18ms (reduced 12ms, limit 100ms).
 #
-# The rows still False were never rewired by any of these tasks: the list/count/simulate reads
-# were already inside their budget before Task 8, so there is nothing here to guard.
+# The final fix wave flipped the last four (I10). The list/count/simulate reads were never rewired
+# by any of these tasks -- they were inside their budget from the start -- but "measured green and
+# never asserted" is not a guarantee: a row nobody asserts is a row that can rot silently. Every
+# row the bench measures is now asserted, so there is no unguarded path left in the table.
 SLO_ASSERT: dict[str, bool] = {
     "get_context": True,
-    "list_runs page 1 (limit 50)": False,
-    "list_runs page 2 (cursor)": False,
-    "count_runs (fail, 30d)": False,
+    "list_runs page 1 (limit 50)": True,
+    "list_runs page 2 (cursor)": True,
+    "count_runs (fail, 30d)": True,
     "aggregate_runs group_by=api": True,
     "aggregate_runs group_by=env": True,
     "aggregate_runs group_by=http_status": True,
     "aggregate_runs group_by=failed_rule": True,
     "aggregate_runs group_by=api_env_data": True,
     "aggregate_runs (max of 5)": True,
-    "simulate_rule (30d, amount)": False,
+    "simulate_rule (30d, amount)": True,
     "insights.build (deterministic)": True,
     "briefing.generate": True,
-    "retention day job": True,
+    "retention (one day partition)": True,
     "chat SSE latency during 400-cell execute": True,
 }
 
@@ -250,8 +252,10 @@ def test_bench_runs_end_to_end_and_records_its_table(bench_rows: list) -> None:
     names = [row.name for row in rows]
     assert len(names) == len(set(names))
     assert sum(1 for n in names if n.startswith("aggregate_runs group_by=")) == 5
-    retention = next(r for r in rows if r.name == "retention day job")
-    assert retention.ms is not None and "whole set ages out" in retention.note   # Task 9 owns it
+    retention = next(r for r in rows if r.name == "retention (one day partition)")
+    # ONE day partition, on a copy (final review): ageing the WHOLE set out measured an upper
+    # bound nobody runs, and it destroyed the dataset it measured.
+    assert retention.ms is not None and "on a copy" in retention.note
     measured = [r for r in rows if r.counts]
     assert len(measured) >= 13 and all(r.ms is not None and r.ms >= 0 for r in measured)
 

@@ -26,11 +26,14 @@ from .masking import (
     policy_from_config,
 )
 from .materialize import (
+    KEY_AXES,
     CellKey,
     KeyCounts,
+    KeyRollupRow,
     OperatorApiDelta,
     RollupRow,
     cell_key,
+    key_rollup_delta,
     merge_watermark,
     rollup_delta,
 )

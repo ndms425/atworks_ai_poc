@@ -32,7 +32,7 @@ from atworks_agent import (
     encode_cursor,
     operator_scope,
 )
-from atworks_agent.aggregation import GROUP_BY, aggregate
+from atworks_agent.aggregation import GROUP_BY, _keys, aggregate
 from atworks_agent.serialization import run_record
 from atworks_host.store import Store
 
@@ -1000,6 +1000,117 @@ def test_list_runs_query_plan_uses_an_index():
     assert "SEARCH apis USING INDEX" in details, details
     assert "SCALAR SUBQUERY" in details, details
     assert re.search(r"SEARCH bodies USING (COVERING )?INDEX", details), details
+
+
+def test_watermark_since_filters_use_an_index():
+    """Final review I7. `first_non_pass_since` (every insight-panel build) and
+    `last_non_pass_since` (`select_where.failed_since`, on the stage AND the LATE execution path)
+    are the only two watermark reads that are PREDICATES rather than primary-key lookups, and
+    `api_watermark` had no index for either -- so both scanned one row per API, 50,000 of them on
+    the full set, on a request path, to return a handful."""
+    store = _store_with_fixtures()
+    for column, kwargs in (("first_non_pass_at", {"first_non_pass_since": datetime(2026, 9, 1, tzinfo=UTC)}),
+                           ("last_non_pass_at", {"last_non_pass_since": datetime(2026, 9, 1, tzinfo=UTC)})):
+        sql, params = store.watermarks_sql(**kwargs)        # the REAL statement, not a copy
+        plan = store.conn().execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+        detail = " | ".join(row["detail"] for row in plan)
+        assert "SEARCH api_watermark USING INDEX" in detail and column in detail, (column, detail)
+        # ...and the read itself still answers exactly what the run-scan oracle does
+        assert ({w.api_id for w in store.watermarks(**kwargs)}
+                == {w.api_id for w in store.recompute_watermarks(**kwargs)})
+
+    # with no since-filter the primary key IS the right access path, and the api_id order stays
+    unfiltered, _ = store.watermarks_sql()
+    assert unfiltered.endswith("ORDER BY api_id")
+    assert [w.api_id for w in store.watermarks()] == sorted(w.api_id for w in store.watermarks())
+
+
+# -- rollup_key_day: the transposed key axis ----------------------------------------------------
+
+
+def _statements(store: Store, run) -> list[str]:
+    seen: list[str] = []
+    store.conn().set_trace_callback(seen.append)
+    try:
+        run()
+    finally:
+        store.conn().set_trace_callback(None)
+    return seen
+
+
+def test_the_two_map_axes_read_rollup_key_day_unless_the_query_is_api_scoped():
+    """Pre-ruled after the full-set bench: a key-axis group used to be derived by `json_each`-ing
+    EVERY cell rollup row in the window (170k rows -> a quarter-million tuples at 2M runs, 0.53s
+    of the 0.62s `group_by=http_status` took). `rollup_key_day` holds the same fold transposed, so
+    the window is (days x keys) rows.
+
+    A query scoped to a SET OF APIs cannot use it -- a key row is already summed across every API
+    that touched the key, and there is no api column left to filter -- so those keep the exact
+    `json_each` arm. Same numbers either way; that is what the second half asserts."""
+    store = _store_with_fixtures()
+    apis = _load_fixture_apis()
+
+    def aggregate_with(q):
+        return store.aggregate_rollups(q, flaky_min=2, apis=apis)
+
+    for group_by in ("failed_rule", "http_status"):
+        plain = AggregateQuery(group_by=group_by, limit=50)
+        sql = " ".join(_statements(store, lambda q=plain: aggregate_with(q)))
+        assert "rollup_key_day" in sql, group_by
+        assert "json_each" not in sql, group_by
+
+        scoped = AggregateQuery(group_by=group_by, limit=50, scope_api_ids=["api-004", "api-007"])
+        scoped_sql = " ".join(_statements(store, lambda q=scoped: aggregate_with(q)))
+        assert "json_each" in scoped_sql, group_by          # falls back, exactly and knowingly
+
+        # the two paths agree on the keys they share -- the scope only removes APIs
+        fast = {g.key: g for g in aggregate_with(plain)}
+        narrow = {g.key: g for g in aggregate_with(scoped)}
+        assert set(narrow) <= set(fast), group_by
+        for key, group in narrow.items():
+            assert group.count <= fast[key].count, key
+
+    # the cell axes are untouched by any of this
+    cell_sql = " ".join(_statements(
+        store, lambda: aggregate_with(AggregateQuery(group_by="api", limit=50))))
+    assert "rollup_key_day" not in cell_sql
+
+
+def test_api_count_is_the_windowed_union_not_a_per_day_sum():
+    """`api_count` promises the TRUE distinct API count behind a key. Summing each day's count
+    would double-count an API that appears on several days, so the union is taken over the stored
+    `api_ids` for the returned keys only."""
+    store = _store_with_fixtures()
+    apis = _load_fixture_apis()
+    runs = _load_fixture_runs()
+    groups = store.aggregate_rollups(
+        AggregateQuery(group_by="failed_rule", limit=50), flaky_min=2, apis=apis)
+    assert groups
+    for group in groups:
+        expected = {r.api_id for r in runs.values() if group.key in _keys(r, "failed_rule")}
+        assert group.api_count == len(expected), group.key
+
+
+def test_rollup_key_day_is_backfilled_on_a_store_written_before_it_existed(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` leaves a NEW table empty on an existing file, and an empty
+    `rollup_key_day` would make the key axes answer "no groups" -- silently wrong, not merely
+    slow. So `init_schema` derives it once from the JSON maps `rollup_day` already carries."""
+    path = tmp_path / "old.sqlite"
+    store = Store(path)
+    store.load_fixtures(FIXTURES, briefing_tz="Asia/Seoul")
+    at_ingest = [dict(r) for r in store.conn().execute(
+        'SELECT * FROM rollup_key_day ORDER BY axis, day, "key"').fetchall()]
+    assert at_ingest
+    store.conn().execute("DELETE FROM rollup_key_day")      # a store written before the table
+    store.conn().commit()
+    store.conn().close()
+
+    reopened = Store(path)                                  # init_schema backfills
+    after = [dict(r) for r in reopened.conn().execute(
+        'SELECT * FROM rollup_key_day ORDER BY axis, day, "key"').fetchall()]
+    for row in after:
+        row["api_ids"] = json.dumps(sorted(json.loads(row["api_ids"])), ensure_ascii=False)
+    assert after == at_ingest
 
 
 def test_count_runs_by_api_id_query_plan_uses_an_index():

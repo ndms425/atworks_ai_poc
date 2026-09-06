@@ -51,6 +51,7 @@ from atworks_agent import (
     RunStatus,
     decode_cursor,
     encode_cursor,
+    key_rollup_delta,
     merge_watermark,
     rollup_delta,
 )
@@ -173,6 +174,29 @@ CREATE INDEX IF NOT EXISTS idx_rollup_day_covering ON rollup_day(
     "count", "pass", fail, error, transitions, p95_duration_ms);
 CREATE INDEX IF NOT EXISTS idx_rollup_day_api_day ON rollup_day(api_id, day);
 
+-- The two JSON maps above, transposed onto their own key axis (final review, pre-ruled). Reading
+-- a key-axis group off `rollup_day` means `json_each`-ing EVERY cell row in the window: 170k rows
+-- became a quarter-million tuples on the 2M-run set, 0.53s of the 0.62s `aggregate_runs
+-- group_by=http_status` took. Here the same window is (days x keys) rows -- three orders of
+-- magnitude fewer -- and the fold is exactly the same arithmetic, computed once at ingest.
+-- `api_ids` is the set of APIs that contributed to that (day, key): a per-day COUNT cannot be
+-- summed across the window without double-counting, and `RunGroup.api_count` promises the TRUE
+-- distinct total, so the union is taken over the ids themselves for the returned keys only.
+-- The CHECK pins the axis vocabulary to `materialize.KEY_AXES`.
+CREATE TABLE IF NOT EXISTS rollup_key_day (
+    day TEXT NOT NULL,
+    axis TEXT NOT NULL CHECK (axis IN ('failed_rule', 'http_status')),
+    key TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    fail INTEGER NOT NULL DEFAULT 0,
+    error INTEGER NOT NULL DEFAULT 0,
+    api_ids JSON NOT NULL DEFAULT '[]',
+    PRIMARY KEY (day, axis, key)
+);
+-- Every read here is "one axis, a day range": axis leads so the range scan starts inside the
+-- right half of the table instead of straddling both.
+CREATE INDEX IF NOT EXISTS idx_rollup_key_day_axis_day ON rollup_key_day(axis, day);
+
 CREATE TABLE IF NOT EXISTS api_watermark (
     api_id TEXT PRIMARY KEY,
     last_pass_at TEXT,
@@ -181,6 +205,13 @@ CREATE TABLE IF NOT EXISTS api_watermark (
     latest_status TEXT,
     api_updated_at TEXT
 );
+-- The two watermark columns that are READ AS PREDICATES, not by primary key (final review I7):
+-- `first_non_pass_since` (the insight panel's regression candidates, every Home build) and
+-- `last_non_pass_since` (`select_where.failed_since`, on the stage AND the LATE re-resolution
+-- path). Without these the filter was a full scan of one row per API -- 50,000 of them on the
+-- full set, on a request path, to return a handful.
+CREATE INDEX IF NOT EXISTS idx_api_watermark_first_non_pass ON api_watermark(first_non_pass_at);
+CREATE INDEX IF NOT EXISTS idx_api_watermark_last_non_pass ON api_watermark(last_non_pass_at);
 
 CREATE TABLE IF NOT EXISTS operator_api (
     operator_id TEXT NOT NULL,
@@ -517,6 +548,26 @@ class Store:
             self._conn.execute(
                 "CREATE TABLE retention_state (partition_key TEXT PRIMARY KEY, archived_at TEXT NOT NULL)"
             )
+        self._backfill_key_rollup()
+
+    def _backfill_key_rollup(self) -> None:
+        """``rollup_key_day`` is a NEW TABLE, and `CREATE TABLE IF NOT EXISTS` leaves it empty on a
+        store written before it existed -- which would make the two key axes answer "no groups"
+        rather than merely answer slowly. So a store that has cell rollups but no key rollups
+        derives them here, once, from the JSON maps those cell rows already carry: the same fold
+        `key_rollup_delta` does at ingest, expressed in SQL, needing no run rows at all."""
+        if self._conn.execute("SELECT EXISTS(SELECT 1 FROM rollup_key_day)").fetchone()[0]:
+            return
+        if not self._conn.execute("SELECT EXISTS(SELECT 1 FROM rollup_day)").fetchone()[0]:
+            return
+        for axis, column in _MAP_COLUMN.items():
+            self._conn.execute(
+                'INSERT OR REPLACE INTO rollup_key_day (day, axis, "key", "count", fail, error, api_ids) '
+                f"SELECT day, '{axis}', je.key, "
+                "SUM(json_extract(je.value, '$.count')), SUM(json_extract(je.value, '$.fail')), "
+                "SUM(json_extract(je.value, '$.error')), json_group_array(DISTINCT api_id) "
+                f"FROM rollup_day, json_each(rollup_day.{column}) je GROUP BY day, je.key"
+            )
 
     # -- fixtures ----------------------------------------------------------------------------
 
@@ -721,7 +772,7 @@ class Store:
     # -- ingest-time materialization (spec §4) ---------------------------------------------------
 
     def _clear_materialized(self) -> None:
-        for table in ("current_state", "rollup_day", "api_watermark", "operator_api"):
+        for table in ("current_state", "rollup_day", "rollup_key_day", "api_watermark", "operator_api"):
             self._conn.execute(f"DELETE FROM {table}")
 
     def rebuild_materialized(self, briefing_tz: str = "Asia/Seoul") -> None:
@@ -777,6 +828,26 @@ class Store:
                  (existing["error"] if existing else 0) + row.error,
                  (existing["transitions"] if existing else 0) + row.transitions,
                  p95, rules, https),
+            )
+
+        # The same batch, transposed onto the key axis (see rollup_key_day's DDL comment). Counts
+        # add; api_ids UNION -- a per-day distinct count cannot be summed across a window.
+        for key_row in key_rollup_delta(rollups):
+            existing = self._conn.execute(
+                'SELECT "count", fail, error, api_ids FROM rollup_key_day '
+                'WHERE day = ? AND axis = ? AND "key" = ?',
+                (key_row.day, key_row.axis, key_row.key),
+            ).fetchone()
+            api_ids = set(json.loads(existing["api_ids"]) if existing and existing["api_ids"] else [])
+            api_ids.update(key_row.api_ids)
+            self._conn.execute(
+                'INSERT OR REPLACE INTO rollup_key_day (day, axis, "key", "count", fail, error, api_ids) '
+                "VALUES (?,?,?,?,?,?,?)",
+                (key_row.day, key_row.axis, key_row.key,
+                 (existing["count"] if existing else 0) + key_row.count,
+                 (existing["fail"] if existing else 0) + key_row.fail,
+                 (existing["error"] if existing else 0) + key_row.error,
+                 json.dumps(sorted(api_ids), ensure_ascii=False)),
             )
 
         for mark in marks:
@@ -1088,6 +1159,14 @@ class Store:
         newest = self._conn.execute("SELECT MAX(executed_at) FROM runs").fetchone()[0]
         return _parse_iso(newest) if newest is not None else None
 
+    def oldest_run_day(self) -> str | None:
+        """The oldest ``day`` partition holding runs (local ``YYYY-MM-DD``), or None when the hot
+        partition is empty. Public for the same reason as ``newest_run_at``: the bench times ONE
+        day partition ageing out (spec §6 "일 단위 이관"), and it needs to know which day that is
+        without reaching into the connection."""
+        return self._conn.execute(
+            "SELECT MIN(day) FROM runs WHERE day IS NOT NULL").fetchone()[0]
+
     def run_days_before(self, cutoff: datetime) -> list[str | None]:
         """The distinct ``day`` partitions holding runs older than ``cutoff``, oldest first —
         the unit retention archives in (spec §6 "일 단위 이관"). One day per transaction is what
@@ -1224,13 +1303,31 @@ class Store:
         rows instead of one accumulator per group in the window.
         """
         interior, edges = _window_partitions(q.since, q.until, briefing_tz)
-        arms = [self._rollup_arm(q, interior)] if interior is not None else []
+        by_key = self._uses_key_rollup(q)
+        arms = [self._rollup_arm(q, interior, by_key)] if interior is not None else []
         arms += [self._edge_arm(q, lo, hi) for lo, hi in edges]
         groups = self._top_groups(q, arms, apis, flaky_min)
+        if by_key and interior is not None:
+            self._fill_key_api_count(groups, q, interior)
         if q.include_run_ids:
             self._fill_run_ids(groups, q)
         self._fill_derived(groups, q, apis)
         return groups
+
+    @staticmethod
+    def _uses_key_rollup(q: AggregateQuery) -> bool:
+        """Can this query's whole-day arm come off ``rollup_key_day``?
+
+        Only for the two map-keyed axes, and only when nothing scopes the query to a SET OF APIs.
+        A key-rollup row is already summed ACROSS every API that touched that key, so an
+        ``api_id`` predicate cannot be applied to it after the fact -- there is no api column left
+        to filter, and the counters cannot be split back apart. A scoped map-axis read (the
+        insight panel's ``failed_rule`` groups, which carry ``scope_operator``) therefore keeps
+        the ``rollup_day`` + ``json_each`` arm, which is exact under a scope and merely slower.
+        The unscoped reads -- the briefing's cause groups, the Home tiles, every `aggregate_runs`
+        the model asks for -- are the ones that were breaching, and they take the fast path."""
+        return (q.group_by in _MAP_COLUMN
+                and q.scope_api_ids is None and q.scope_operator is None)
 
     @staticmethod
     def _rollup_scope(q: AggregateQuery, interior: tuple[str | None, str | None]) -> tuple[list[str], list]:
@@ -1264,9 +1361,15 @@ class Store:
         cursor.row_factory = None
         return cursor.execute(sql, params).fetchall()
 
-    def _rollup_arm(self, q: AggregateQuery, interior: tuple[str | None, str | None]) -> tuple[str, list]:
+    def _rollup_arm(self, q: AggregateQuery, interior: tuple[str | None, str | None],
+                    by_key: bool = False) -> tuple[str, list]:
         """The whole local days of the window, shaped to the union's column list
         (``gkey, c, p, f, e, t, q95[, n]``).
+
+        ``by_key`` takes the map axes off ``rollup_key_day``, where one row already IS one
+        (day, key) group: the window becomes (days x keys) rows instead of every cell row in it
+        exploded by ``json_each``. ``n`` (api_count) comes back as 0 and is filled afterwards from
+        the ``api_ids`` union -- see ``_fill_key_api_count``; the counters are exact either way.
 
         The api/env/cell axes emit one raw rollup ROW and let the outer GROUP BY do all the work:
         the cell axis has roughly one group per row anyway, so grouping twice only adds a second
@@ -1276,6 +1379,20 @@ class Store:
         Grouping them in the arm keeps that collapse where it was before the union, and keeps
         ``api_count`` what it always was: ``COUNT(DISTINCT api_id)`` over the WHOLE DAYS, carried
         out as ``n`` and merged with MAX (an edge day contributes no api_count, as before)."""
+        if by_key:
+            day_from, day_to = interior
+            clauses, params = ["axis = ?"], [q.group_by]
+            if day_from is not None:
+                clauses.append("day >= ?")
+                params.append(day_from)
+            if day_to is not None:
+                clauses.append("day <= ?")
+                params.append(day_to)
+            return (
+                'SELECT "key" AS gkey, SUM("count") AS c, SUM("count" - fail - error) AS p, '
+                "SUM(fail) AS f, SUM(error) AS e, 0 AS t, NULL AS q95, 0 AS n "
+                f"FROM rollup_key_day WHERE {' AND '.join(clauses)} GROUP BY gkey"
+            ), params
         clauses, params = self._rollup_scope(q, interior)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         if q.group_by in _MAP_COLUMN:
@@ -1364,6 +1481,38 @@ class Store:
                    (row[7] or 0) if is_map else None]
             groups.append(_group_from_acc(key, acc, _counts(acc, q.status), q, apis, flaky_min))
         return groups
+
+    def _fill_key_api_count(
+        self, groups: list[RunGroup], q: AggregateQuery, interior: tuple[str | None, str | None],
+    ) -> None:
+        """``api_count`` for the keys ``_top_groups`` actually returned: the union of each key's
+        stored ``api_ids`` across the window's whole days -- the same TRUE distinct count the
+        ``COUNT(DISTINCT api_id)`` over ``rollup_day`` produced, and never ``len(run_ids)``.
+
+        A stored per-day count would be cheaper and WRONG: the same API appears on many days of
+        the window, so summing days double-counts it. The union is taken in python over at most
+        (days x q.limit) rows, and only after the cut -- never over every key in the window."""
+        if not groups:
+            return
+        day_from, day_to = interior
+        clauses, params = ["axis = ?"], [q.group_by]
+        if day_from is not None:
+            clauses.append("day >= ?")
+            params.append(day_from)
+        if day_to is not None:
+            clauses.append("day <= ?")
+            params.append(day_to)
+        placeholders = ",".join("?" for _ in groups)
+        clauses.append(f'"key" IN ({placeholders})')
+        params.extend(g.key for g in groups)
+        unions: dict[str, set[str]] = {g.key: set() for g in groups}
+        for key, api_ids in self._tuples(
+            f'SELECT "key", api_ids FROM rollup_key_day WHERE {" AND ".join(clauses)}', params,
+        ):
+            if api_ids:
+                unions[key].update(json.loads(api_ids))
+        for group in groups:
+            group.api_count = len(unions[group.key])
 
     def _fill_run_ids(self, groups: list[RunGroup], q: AggregateQuery) -> None:
         """Newest-first run ids (<= MAX_RUN_IDS) for each returned group. The api/env/cell axes get
@@ -1590,22 +1739,44 @@ class Store:
 
         ``scope_operator``/``scope_since`` add the server-side operator scope as a subquery on
         ``operator_api`` -- never an id list on ``api_ids``, which has a cap and therefore a hole."""
+        sql, params = self.watermarks_sql(
+            api_ids, first_non_pass_since, last_non_pass_since,
+            scope_operator=scope_operator, scope_since=scope_since)
+        return [self._row_to_watermark(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    @staticmethod
+    def watermarks_sql(
+        api_ids: Sequence[str] | None = None, first_non_pass_since: datetime | None = None,
+        last_non_pass_since: datetime | None = None, *,
+        scope_operator: str | None = None, scope_since: datetime | None = None,
+    ) -> tuple[str, list]:
+        """``watermarks``' statement, verbatim -- built here so the query-plan test can EXPLAIN the
+        REAL query rather than a hand-copied string that rots the first time this changes.
+
+        The ORDER BY is CONDITIONAL, and that is the whole of final review I7's fix. `ORDER BY
+        api_id` is served for free by the primary key, so SQLite always chose to scan the PK in
+        api_id order -- one row per API, 50,000 of them on the full set -- rather than seek the
+        `first_non_pass_at` index and then sort a handful of rows; the index existed and was never
+        used. When a ``*_since`` predicate is present the order becomes that column (api_id still
+        breaking ties), which is both deterministic and index-served. No caller depends on api_id
+        order: every one of them re-sorts (`insights` by first_non_pass_at, `resolve_select_where`
+        by api_updated_at) or dict-ifies by api_id."""
         clauses, params = _operator_scope_clause(scope_operator, scope_since)
         if api_ids is not None:
             placeholders = ",".join("?" for _ in api_ids)
             clauses.append(f"api_id IN ({placeholders})" if api_ids else "0")
             params.extend(api_ids)
+        order = "api_id"
         if first_non_pass_since is not None:
             clauses.append("first_non_pass_at >= ?")
             params.append(_iso(first_non_pass_since))
+            order = "first_non_pass_at, api_id"
         if last_non_pass_since is not None:
             clauses.append("last_non_pass_at >= ?")
             params.append(_iso(last_non_pass_since))
+            order = "last_non_pass_at, api_id"
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self._conn.execute(
-            f"SELECT * FROM api_watermark {where_sql} ORDER BY api_id", params,
-        ).fetchall()
-        return [self._row_to_watermark(r) for r in rows]
+        return f"SELECT * FROM api_watermark {where_sql} ORDER BY {order}", params
 
     def operator_scope_ids(self, operator_id: str, window_days: int, now: datetime) -> set[str]:
         """One indexed read of ``operator_api`` (PK ``(operator_id, api_id)`` -- the leading

@@ -81,6 +81,57 @@ class RollupRow(BaseModel):
         return (self.api_id, self.target_env, self.test_data_label)
 
 
+#: The two group axes whose key lives inside a rollup row's JSON map rather than in a column.
+KEY_AXES = ("failed_rule", "http_status")
+
+
+class KeyRollupRow(BaseModel):
+    """``rollup_key_day`` 한 행의 증분 — (day, axis, key) 하나의 건수와 그 키가 걸친 API 집합.
+
+    ``rollup_day``의 두 JSON 맵(``failed_rule_counts``/``http_status_counts``)을 **키 축으로
+    뒤집은** 것이다. 같은 수를 두 번 저장하는 이유는 읽기 모양이 정반대이기 때문이다: 셀 축
+    질의는 하루치 행 하나만 보면 되지만, 키 축 질의는 창 안의 **모든** 셀 행을 ``json_each``로
+    펼쳐야 키 하나의 합을 안다 — 2M run 데이터셋의 30일 창에서 롤업 행 17만 개가 25만 튜플로
+    부풀고, 그게 ``aggregate_runs group_by=http_status``가 SLO를 넘긴 이유의 전부였다(0.62초 중
+    0.53초). 여기서는 같은 창이 (일수 × 키 수) 행이다.
+
+    ``api_ids``는 그 (day, key)에 실제로 기여한 API id의 정렬된 집합이다. 개수만으로는 창 단위
+    합집합을 낼 수 없어서(하루씩 더하면 중복 계산) 목록을 든다 — ``RunGroup.api_count``는 창
+    전체의 **참** distinct 개수여야 하기 때문이다."""
+    day: str
+    axis: str
+    key: str
+    count: int = 0
+    fail: int = 0
+    error: int = 0
+    api_ids: list[str] = Field(default_factory=list)
+
+
+def key_rollup_delta(rollups: Sequence[RollupRow]) -> list[KeyRollupRow]:
+    """``rollup_delta``가 낸 셀 롤업 증분을 키 축으로 접는다. 순수 함수이고, 입력이 이미 배치
+    하나의 증분이므로 저장소는 이 결과를 그대로 (day, axis, key)에 병합하면 된다 — 건수는 더하고
+    ``api_ids``는 합집합."""
+    rows: dict[tuple[str, str, str], KeyRollupRow] = {}
+    members: dict[tuple[str, str, str], set[str]] = {}
+    for row in rollups:
+        for axis, counts in (("failed_rule", row.failed_rule_counts),
+                             ("http_status", row.http_status_counts)):
+            for key, key_counts in counts.items():
+                ident = (row.day, axis, key)
+                acc = rows.get(ident)
+                if acc is None:
+                    acc = KeyRollupRow(day=row.day, axis=axis, key=key)
+                    rows[ident] = acc
+                    members[ident] = set()
+                acc.count += key_counts.count
+                acc.fail += key_counts.fail
+                acc.error += key_counts.error
+                members[ident].add(row.api_id)
+    for ident, row in rows.items():
+        row.api_ids = sorted(members[ident])
+    return list(rows.values())
+
+
 class OperatorApiDelta(BaseModel):
     """``operator_api`` 한 행의 증분. ``executed_by`` 가 없는 run(레거시/미귀속)은 아무것도
     만들지 않는다 — 오퍼레이터 스코프는 "내가 돌린 API"이지 "주인 없는 API"가 아니다."""
