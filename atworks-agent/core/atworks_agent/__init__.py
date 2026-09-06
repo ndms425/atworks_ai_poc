@@ -7,6 +7,7 @@ from .gates import (
     check_discard_profile,
     take_profile_discard_actor_kind,
 )
+from .insights import KIND_LABEL, ROLE_PRIORITY, candidate_insights, operator_scope
 from .jobs import (
     GuardrailViolation,
     JobDraft,
