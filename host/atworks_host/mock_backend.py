@@ -41,10 +41,13 @@ from atworks_agent import (
     SelectWhere,
     TestDataSet,
     ValidationRule,
+    body_capture_enabled,
     decode_cursor,
     encode_cursor,
     enforce_execution_matrix,
     evaluate,
+    mask_body,
+    policy_from_config,
     resolve_select_where,
 )
 from atworks_agent.aggregation import aggregate
@@ -105,6 +108,13 @@ def stub_response(api: ApiSpec, env: str, data: TestDataSet | None, seq: int) ->
     # a real, deterministic value difference on the renewed server for one payment API:
     if api.api_id == "api-004":
         body["limit"] = 1000 if env != "renewed" else 900   # renewed changed the value → real diff
+    # Task 6 (scale spec §7): a PII-shaped sample so masking-at-capture has something real to
+    # catch. Neither field depends on env/seq, so no existing parity/stub_response test that
+    # asserts "everything but serverTime matches" breaks -- api-001 carries no field-by-field
+    # diff_paths assertion anywhere in the suite (unlike api-002/api-004/api-008).
+    if api.api_id == "api-001":
+        body["contact"] = "hong@example.com"
+        body["ssn"] = "900101-1234567"
     return body
 
 
@@ -465,6 +475,11 @@ class MockAtworks(AtworksBackend):
             self.ledger.record_execution(job_id, [], schedule_index)
             return []
         produced: list[RunResult] = []
+        # Task 6 (scale spec §7): one policy per call. `body_capture_enabled` decides, per API
+        # group, whether a body is even built; `mask_body` scrubs whatever body IS built on its
+        # way into `bodies` at the `store.ingest` boundary below -- masking never touches the
+        # in-memory `produced` list itself, only what SQLite ends up storing.
+        policy = policy_from_config(self._config)
         bindings: list[TestDataSet | None] = list(job.test_data) or [None]
         # The matrix is flattened first so the yield points below are evenly spaced over the
         # whole envs × data × apis product, not per environment. Mock execution is CPU-only, so
@@ -493,18 +508,28 @@ class MockAtworks(AtworksBackend):
                 if extra_failed:
                     status = RunStatus.FAIL if status is RunStatus.PASS else status
                     rules = [*rules, *extra_failed]
+                # A group opted out of body capture (`masking_disabled_groups`) never gets a
+                # body built at all -- response_body stays None from construction, so no
+                # `bodies` row is ever written and `has_body` is False on the model-facing
+                # record (serialization.py).
+                body = (
+                    stub_response(api, env, data, self._run_seq)
+                    if body_capture_enabled(api, policy) else None
+                )
                 run = RunResult(
                     run_id=f"run-{self._run_seq:04d}", api_id=api_id, executed_at=datetime.now(UTC),
                     target_env=env, test_data_label=data.label if data is not None else None,
                     status=status, failed_rules=rules, http_status=http,
                     duration_ms=100 + self._run_seq % 50,
-                    response_body=stub_response(api, env, data, self._run_seq), job_id=job_id,
+                    response_body=body, job_id=job_id,
                     executed_by=job.applied_by)
                 produced.append(run)
             await asyncio.sleep(0)
         # One transaction for the whole execution (spec §4): runs + bodies + the four
         # materialized tables move together, then exactly one record_execution for the slot.
-        self.store.ingest(produced, self._config.briefing_tz)
+        # `mask` rewrites each body on its way into `bodies` -- store-boundary masking only,
+        # per Task 5's `ingest(mask=...)` hook.
+        self.store.ingest(produced, self._config.briefing_tz, mask=lambda b: mask_body(b, policy))
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
         return produced
 

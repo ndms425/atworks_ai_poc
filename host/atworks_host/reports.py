@@ -84,16 +84,25 @@ def _parity(
         if a_run is None or b_run is None:
             continue
         if a_run.response_body is None or b_run.response_body is None:
+            # Task 6 (scale spec §7): a group opted out of body capture (or the body simply
+            # never got stored) falls back to a status-only verdict -- never a fabricated body
+            # diff. The note names why, verbatim, for the report template.
             verdict = "equal" if a_run.status == b_run.status else "status_diff"
             diff_paths: list[str] = []
+            basis = "status_only"
+            note: str | None = "본문 캡처 해제"
         elif a_run.status != b_run.status:
             verdict = "status_diff"
             diff_paths = []
+            basis = "body"
+            note = None
         else:
             row_ignore = [*ignore_paths, *per_api_ignore.get(api_id, [])]
             body_diff = compare_bodies(a_run.response_body, b_run.response_body, row_ignore)
             verdict = "equal" if body_diff.equal else "value_diff"
             diff_paths = body_diff.diff_paths
+            basis = "body"
+            note = None
         rows.append({
             "api_id": api_id,
             "test_data_label": label,
@@ -101,6 +110,8 @@ def _parity(
             "diff_paths": diff_paths,
             "a_run_id": a_run.run_id,
             "b_run_id": b_run.run_id,
+            "basis": basis,
+            "note": note,
         })
     clusters = cluster_diffs([
         {"diff_paths": r["diff_paths"], "row_key": f"{r['api_id']}|{r['test_data_label'] or ''}"}

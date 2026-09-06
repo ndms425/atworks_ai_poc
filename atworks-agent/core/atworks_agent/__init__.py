@@ -18,6 +18,12 @@ from .jobs import (
     check_job_guardrails,
     enforce_execution_matrix,
 )
+from .masking import (
+    DEFAULT_MASKING_RULES,
+    body_capture_enabled,
+    mask_body,
+    policy_from_config,
+)
 from .materialize import (
     CellKey,
     OperatorApiDelta,
