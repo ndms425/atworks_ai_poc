@@ -3,8 +3,8 @@
 
 "use client";
 
-import { useCallback, useEffect } from "react";
-import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pill, plural, Skeleton } from "web-shared";
+import { useCallback, useEffect, useState } from "react";
+import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton } from "web-shared";
 import { fetchRules } from "@/lib/api";
 import Pager from "@/components/Pager";
 import { usePagedList } from "@/lib/usePagedList";
@@ -13,6 +13,15 @@ import { useScreenFocus } from "@/lib/useScreenFocus";
 import FormatsView from "@/components/views/FormatsView";
 import ProfilesView from "@/components/views/ProfilesView";
 import type { ScreenFilter, ScreenIntent, ScreenTarget, ValidationRule } from "@/lib/types";
+
+type StatusFilter = "staged" | "applied" | "discarded" | "all";
+
+const STATUS_TITLE: Record<StatusFilter, string> = {
+  staged: "승인 대기",
+  applied: "적용됨",
+  discarded: "기각됨",
+  all: "전체",
+};
 
 function RuleRow({
   rule,
@@ -61,15 +70,19 @@ export default function RulesView({
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
-  // One paged read over the whole rule ledger; the three panels below split the CURRENT PAGE by
-  // status. The header's count is the envelope's `total`, so it stays honest even though a status
-  // group's panel only ever shows this page's share of it.
-  const load = useCallback((cursor: string | null) => fetchRules(cursor), []);
-  const page = usePagedList<ValidationRule>(load, "rules", [refreshKey]);
+  // The status segment is a SERVER-side filter (`/rules?status=`) and doubles as usePagedList's
+  // reset key, so switching it re-queries the ledger from page one. It used to be a client-side
+  // split of one 50-row page: "적용됨" then showed whichever applied rules happened to land on that
+  // page, and an applied rule sitting on page 3 was simply invisible.
+  // Default "all": arriving on the page still shows the whole ledger (and so a `navigate_screen`
+  // focus on any rule still finds its row); the segments narrow it.
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const load = useCallback(
+    (cursor: string | null) => fetchRules(status === "all" ? undefined : status, cursor),
+    [status],
+  );
+  const page = usePagedList<ValidationRule>(load, status, [refreshKey]);
   const rules = page.items;
-  const staged = rules.filter((rule) => rule.status === "staged");
-  const applied = rules.filter((rule) => rule.status === "applied");
-  const discarded = rules.filter((rule) => rule.status === "discarded");
 
   // RulesView has no filter of its own, so there's nothing to apply-once by nonce — the shared
   // hook handles the whole focus/scroll lifecycle.
@@ -83,45 +96,35 @@ export default function RulesView({
 
   return (
     <div className="ac-reveal flex flex-col gap-4">
-      <PageHeader title="Rules" subtitle={page.loaded ? plural(page.total, "rule") : undefined} />
+      <PageHeader title="Rules" subtitle={page.loaded ? plural(page.total, "rule") : undefined}>
+        <Segmented<StatusFilter>
+          label="Filter rules"
+          value={status}
+          onChange={setStatus}
+          options={[
+            { id: "staged", label: "승인 대기" },
+            { id: "applied", label: "적용됨" },
+            { id: "discarded", label: "기각됨" },
+            { id: "all", label: "전체" },
+          ]}
+        />
+      </PageHeader>
       {page.failed && !page.loaded ? (
         <Notice>The aTworks AI host isn&apos;t reachable, so rules can&apos;t load.</Notice>
       ) : !page.loaded ? (
         <Skeleton className="h-96" />
       ) : rules.length === 0 ? (
-        <Notice>등록된 규칙이 없습니다.</Notice>
+        <Notice>{status === "all" ? "등록된 규칙이 없습니다." : "해당 상태의 규칙이 없습니다."}</Notice>
       ) : (
         <>
-          {staged.length > 0 ? (
-            <Panel title="승인 대기">
-              {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
-              <ul className="cv-rows divide-y divide-(--line)">
-                {staged.map((rule) => (
-                  <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
-                ))}
-              </ul>
-            </Panel>
-          ) : null}
-          {applied.length > 0 ? (
-            <Panel title="적용됨">
-              {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
-              <ul className="cv-rows divide-y divide-(--line)">
-                {applied.map((rule) => (
-                  <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
-                ))}
-              </ul>
-            </Panel>
-          ) : null}
-          {discarded.length > 0 ? (
-            <Panel title="기각됨">
-              {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
-              <ul className="cv-rows divide-y divide-(--line)">
-                {discarded.map((rule) => (
-                  <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
-                ))}
-              </ul>
-            </Panel>
-          ) : null}
+          <Panel title={STATUS_TITLE[status]}>
+            {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
+            <ul className="cv-rows divide-y divide-(--line)">
+              {rules.map((rule) => (
+                <RuleRow key={rule.rule_id} rule={rule} onAct={onAct} />
+              ))}
+            </ul>
+          </Panel>
           <Pager page={page} />
         </>
       )}

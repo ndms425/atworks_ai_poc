@@ -15,6 +15,8 @@ _API_PAGE = 200             # one catalogue page; the scan below pages by cursor
 # Sort floor for a watermark row whose api_updated_at is unknown (an API the catalogue dropped):
 # it orders last rather than raising against the aware datetimes beside it.
 _EPOCH = datetime(1, 1, 1, tzinfo=UTC)
+# Appended ONCE per selection basis (see `truncation_noted` in resolve_select_where).
+_TRUNCATED_NOTE = " (표본 상한 도달)"
 
 
 @dataclass
@@ -89,6 +91,10 @@ async def resolve_select_where(
             updated_after=where.updated_after,
         )
     basis: list[str] = []
+    # The cap note belongs to the SELECTION, not to each clause. `related_to` and `failed_since`
+    # share one catalogue scan (`truncated` is that scan's flag), so with both set the sentence
+    # loop would stamp the same cap twice and read like two independent caps were hit.
+    truncation_noted = False
     if where.related_to:
         anchor = await backend.get_api(session, where.related_to)
         if anchor is None:
@@ -110,11 +116,12 @@ async def resolve_select_where(
         }
         group_text = f"같은 group({anchor.group})" if anchor.group else "같은 group"
         sentence = f"{anchor.api_id}과 {group_text} 또는 {prefix}/*"
-        if truncated:
+        if truncated and not truncation_noted:
             # The impact scan stopped at CATALOGUE_SCAN_LIMIT (either half of the union) — APIs
             # past it were never considered. Say so here too, not only on the failed_since branch:
             # a related_to-only selection was the one truncation the basis used to swallow.
-            sentence += " (표본 상한 도달)"
+            sentence += _TRUNCATED_NOTE
+            truncation_noted = True
         basis.append(sentence)
     if where.failed_since:
         # The exact set of APIs with a non-pass run at or after the cutoff, straight off the
@@ -143,10 +150,11 @@ async def resolve_select_where(
                 if api is not None:
                     apis[api.api_id] = api
         sentence = f"{where.failed_since.date().isoformat()} 이후 실패·에러가 있던 API"
-        if truncated:
+        if truncated and not truncation_noted:
             # The scan stopped at its cap — APIs past it were never considered, so the basis says
             # so rather than silently under-reporting.
-            sentence += " (표본 상한 도달)"
+            sentence += _TRUNCATED_NOTE
+            truncation_noted = True
         basis.append(sentence)
     ordered = sorted(apis.values(), key=lambda a: (a.updated_at, a.api_id), reverse=True)
     # Cap the returned selection so an oversized result still trips the job guardrail with a

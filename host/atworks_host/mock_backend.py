@@ -358,6 +358,10 @@ class MockAtworks(AtworksBackend):
     async def discard_rule(self, session, rule_id, actor_kind):
         return self.rule_ledger.discard(rule_id, actor=session.operator, actor_kind=actor_kind)
 
+    async def get_rule(self, session, rule_id: str) -> ValidationRule | None:
+        del session
+        return self.rule_ledger.get(rule_id)
+
     async def list_rules(self, session, api_id=None, status=None, cursor=None, limit=50) -> Page[ValidationRule]:
         rows = self.rule_ledger.list(api_id=api_id)
         if status is not None:
@@ -419,6 +423,10 @@ class MockAtworks(AtworksBackend):
 
     async def discard_profile(self, session, profile_id, actor_kind):
         return self.profile_ledger.discard(profile_id, actor=session.operator, actor_kind=actor_kind)
+
+    async def get_profile(self, session, profile_id: str) -> ComparisonProfile | None:
+        del session
+        return self.profile_ledger.get(profile_id)
 
     async def list_profiles(self, session, job_id=None, status=None, cursor=None, limit=50) -> Page[ComparisonProfile]:
         rows = self.profile_ledger.list(job_id=job_id)

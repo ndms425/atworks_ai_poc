@@ -47,6 +47,18 @@ python scripts/smoke_chat.py           # host가 떠 있는 상태에서 — 발
    "총 실행 N건 × M회 = K건"이 보인다(승인 한 번이 이 전부를 덮는다) → Jobs 뷰에서 승인 →
    `POST /api/atworks/scheduler/tick` → 리포트 상단에 계 비교 표와 "차이 N건" 타일이 뜬다.
 
+### 데모 픽스처와 30일 창 (주의)
+
+픽스처 실행 이력(`host/atworks_host/fixtures/runs.json`)은 **2026-09-01 ~ 09-03**에 고정돼 있고,
+Home 타일·`GET /runs/insights`·`get_context`의 요약은 모두 `scope_window_days`(30일) 창 안의 실행만
+센다. 그래서 **2026-10-03이 지나면** 픽스처만으로 띄운 데모의 실패/에러·불안정 타일은 정상적으로 0으로
+읽힌다 — 버그가 아니라 창 밖으로 나간 것이다. 숫자를 다시 채우려면 job을 하나 승인해 스케줄러로
+실제 실행을 만들거나(`POST /scheduler/tick`), 픽스처의 날짜를 오늘 기준으로 옮기면 된다
+(테스트는 `host/tests/test_app.py`의 `_redate_fixture_runs`가 같은 일을 한다).
+회귀 의심(`regression_suspect`) 타일은 픽스처에서 **0이 정상**이다: 스펙 §3의 규칙은
+`last_pass_at < api.updated_at <= first_non_pass_at`인데, 픽스처의 12개 API는 모두 마지막 pass가
+자기 `updated_at`보다 뒤에 있다(예: api-004는 실패 뒤 다시 통과했다 — 회복한 API는 회귀가 아니다).
+
 ## Insights & briefing
 
 새로 생긴 질문 축 네 가지 — 숫자는 항상 호스트 계산이고 모델은 축과 표시만 고른다.

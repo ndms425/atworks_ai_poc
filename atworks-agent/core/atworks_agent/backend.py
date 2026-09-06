@@ -257,6 +257,13 @@ class AtworksBackend(ABC):
     ) -> ValidationRule: ...
 
     @abstractmethod
+    async def get_rule(self, session: AtworksSessionContext, rule_id: str) -> ValidationRule | None:
+        """rule_id 하나를 그대로 읽는다 — 없으면 None. 호스트의 승인/폐기 라우트가 아직 이 세션이
+        모르는 rule을 클릭 직전에 기억시킬 때 쓰는 **단건 조회**다. 목록 페이지를 크게 떠서 그
+        안에서 찾는 방식(list_rules(limit=1000))은 그 한도를 넘긴 오래된 rule을 못 찾는 조용한
+        구멍이었다. REST 구현 의무: 인덱스된 단건 조회여야 하고, 목록의 정렬/커서와 무관하다."""
+
+    @abstractmethod
     async def list_rules(
         self, session: AtworksSessionContext, api_id: str | None = None, status: str | None = None,
         cursor: str | None = None, limit: int = 50,
@@ -293,6 +300,12 @@ class AtworksBackend(ABC):
     async def discard_profile(
         self, session: AtworksSessionContext, profile_id: str, actor_kind: ActorKind
     ) -> ComparisonProfile: ...
+
+    @abstractmethod
+    async def get_profile(
+        self, session: AtworksSessionContext, profile_id: str
+    ) -> ComparisonProfile | None:
+        """profile_id 하나를 그대로 읽는다 — 없으면 None. get_rule과 같은 이유의 단건 조회다."""
 
     @abstractmethod
     async def list_profiles(

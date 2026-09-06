@@ -878,7 +878,11 @@ class Store:
         params.extend(scope_params)
         return clauses, params
 
-    def list_runs(self, q: RunsQuery) -> Page[RunResult]:
+    def list_runs_sql(self, q: RunsQuery) -> tuple[tuple[str, list], tuple[str, list]]:
+        """``((count_sql, count_params), (page_sql, page_params))`` -- the two statements
+        ``list_runs`` executes, verbatim. Built here rather than inline so the query-plan tests can
+        EXPLAIN the REAL query: a hand-copied SQL string in a test rots silently the first time the
+        select list, the joins or the keyset clause change, and then it proves nothing."""
         clauses, params = self._runs_predicates(
             since=q.since, until=q.until, status=q.status, api_id=q.api_id,
             executed_by=q.executed_by, job_id=q.job_id,
@@ -888,7 +892,7 @@ class Store:
         # an archived page can never drift from a hot one (spec §6 "조회는 명시적 archived=true").
         source = "runs_archive AS runs" if q.archived else "runs"
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        total = self._conn.execute(f"SELECT COUNT(*) FROM {source} {where_sql}", params).fetchone()[0]
+        count = (f"SELECT COUNT(*) FROM {source} {where_sql}", list(params))
 
         keyset_clauses = list(clauses)
         keyset_params = list(params)
@@ -899,11 +903,17 @@ class Store:
             keyset_clauses.append("(runs.executed_at < ? OR (runs.executed_at = ? AND runs.run_id < ?))")
             keyset_params += [_iso(after_dt), _iso(after_dt), after_id]
         keyset_where = f"WHERE {' AND '.join(keyset_clauses)}" if keyset_clauses else ""
-        rows = self._conn.execute(
+        page = (
             f"SELECT {self._RUN_SELECT} FROM {source} {self._RUN_JOINS} "
             f"{keyset_where} ORDER BY runs.executed_at DESC, runs.run_id DESC LIMIT ?",
             [*keyset_params, q.limit + 1],
-        ).fetchall()
+        )
+        return count, page
+
+    def list_runs(self, q: RunsQuery) -> Page[RunResult]:
+        (count_sql, count_params), (page_sql, page_params) = self.list_runs_sql(q)
+        total = self._conn.execute(count_sql, count_params).fetchone()[0]
+        rows = self._conn.execute(page_sql, page_params).fetchall()
         items = [self._row_to_run(r) for r in rows[: q.limit]]
         next_cursor = encode_cursor(items[-1].executed_at, items[-1].run_id) if len(rows) > q.limit else None
         return Page(items=items, next_cursor=next_cursor, total=total)

@@ -34,7 +34,8 @@ Injected patterns (all deterministic):
   ``updated_at`` **is** that instant, which puts it strictly between the last pass and the first
   failure -- exactly the ``regression_suspect`` predicate in ``aggregation._build``.
 * **operator skew** -- a Zipf-ish weight table over the operators, so a few run most of the traffic.
-* **bodies** -- only for runs inside ``retention_body_days`` (90) of ``now``; a small 3-5 key dict,
+* **bodies** -- only for runs inside ``AtworksAgentConfig.retention_body_days`` of ``now``
+  (``--body-days`` defaults to it); a small 3-5 key dict,
   and roughly 1% carry a PII-shaped string leaf so capture-time masking
   (``mask_body``/``policy_from_config``) is actually exercised on the way into ``bodies``.
 
@@ -63,6 +64,10 @@ from atworks_agent import (
 from atworks_host.store import Store
 
 DEFAULT_OUT = Path(__file__).resolve().parent / "out"
+# The body window is a retention tier, not a generator opinion: keep the synthetic ``bodies`` table
+# exactly as wide as the running config would keep it, so a bench/test that asserts
+# "bodies cover exactly the runs inside retention_body_days" stays true when the tier moves.
+DEFAULT_BODY_DAYS = AtworksAgentConfig(model="scale").retention_body_days
 
 # 12 group names on a skewed distribution (weights sum to 100) -- a real catalogue is never flat.
 GROUP_WEIGHTS: dict[str, int] = {
@@ -207,7 +212,8 @@ def _day_cells(window: list[int], active: int, count: int):
 def generate(
     *, out: Path, apis: int, days: int, per_day: int, operators: int, now: datetime,
     peak_days: dict[int, int] | None = None, seed: int = 42, batch_size: int = 20_000,
-    runs_per_api_day: int = 8, briefing_tz: str = "Asia/Seoul", body_days: int = 90,
+    runs_per_api_day: int = 8, briefing_tz: str = "Asia/Seoul",
+    body_days: int = DEFAULT_BODY_DAYS,
     progress_every: int = 1, quiet: bool = False,
 ) -> dict:
     peak_days = peak_days or {}
@@ -388,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--now", default=None, help="ISO instant the dataset ends at (default: wall clock)")
     parser.add_argument("--batch", type=int, default=20_000, help="runs per Store.ingest transaction")
     parser.add_argument("--runs-per-api-day", type=int, default=8)
-    parser.add_argument("--body-days", type=int, default=90)
+    parser.add_argument("--body-days", type=int, default=DEFAULT_BODY_DAYS)
     parser.add_argument("--progress-every", type=int, default=1, help="print progress every N batches")
     parser.add_argument("--quiet", action="store_true")
     return parser

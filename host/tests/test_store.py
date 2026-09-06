@@ -916,22 +916,52 @@ def _assert_no_unindexed_scan(rows, table: str) -> None:
             assert "INDEX" in detail, f"unindexed access on {table!r}: {detail!r}"
 
 
+def _explain_list_runs(store, q: RunsQuery):
+    """EXPLAIN the page statement `list_runs` ACTUALLY runs, taken from `Store.list_runs_sql`.
+    Task 10 review minor: this test used to EXPLAIN a hand-copied SQL string, so when Task 10 added
+    the api-label join to `_RUN_SELECT`/`_RUN_JOINS` the test kept happily explaining the old,
+    join-less query and proved nothing about the shipped one."""
+    (_, _), (page_sql, page_params) = store.list_runs_sql(q)
+    return store.conn().execute(f"EXPLAIN QUERY PLAN {page_sql}", page_params).fetchall()
+
+
+def _runs_access(plan) -> str:
+    """The one plan line that touches `runs`. A BARE `SCAN runs` (no `USING INDEX`) is the failure
+    this test exists for -- it means the page read the whole table. `SCAN runs USING INDEX
+    idx_runs_executed_at` is NOT that failure: it is the keyset order being served straight off the
+    index, which is exactly what an unfiltered first page should do under `LIMIT`."""
+    for row in plan:
+        if re.match(r"^(SCAN|SEARCH) runs\b", row["detail"]):
+            return row["detail"]
+    raise AssertionError(f"no access line for `runs` in the plan: {[r['detail'] for r in plan]}")
+
+
 def test_list_runs_query_plan_uses_an_index():
     store = _store_with_fixtures()
-    plan = store.conn().execute(
-        "EXPLAIN QUERY PLAN SELECT runs.*, bodies.body AS body FROM runs "
-        "LEFT JOIN bodies ON bodies.run_id = runs.run_id "
-        "WHERE api_id = ? ORDER BY executed_at DESC, run_id DESC LIMIT 11",
-        ("api-001",),
-    ).fetchall()
-    _assert_no_unindexed_scan(plan, "runs")
 
-    plan_no_filter = store.conn().execute(
-        "EXPLAIN QUERY PLAN SELECT runs.*, bodies.body AS body FROM runs "
-        "LEFT JOIN bodies ON bodies.run_id = runs.run_id "
-        "ORDER BY executed_at DESC, run_id DESC LIMIT 11"
-    ).fetchall()
+    # 1. filtered page -> an index SEEK, not a table walk.
+    plan = _explain_list_runs(store, RunsQuery(api_id="api-001", limit=10))
+    _assert_no_unindexed_scan(plan, "runs")
+    assert _runs_access(plan).startswith("SEARCH runs USING INDEX"), _runs_access(plan)
+
+    # 2. unfiltered first page -> the ORDER BY is served by an index, never a sort of the table.
+    plan_no_filter = _explain_list_runs(store, RunsQuery(limit=10))
     _assert_no_unindexed_scan(plan_no_filter, "runs")
+    assert "USING INDEX" in _runs_access(plan_no_filter), _runs_access(plan_no_filter)
+    assert not any(row["detail"].startswith("USE TEMP B-TREE") for row in plan_no_filter), \
+        [r["detail"] for r in plan_no_filter]
+
+    # 3. the cursor page, which adds the keyset clause on top of the same statement.
+    cursored = _explain_list_runs(
+        store, RunsQuery(api_id="api-001", limit=10,
+                         cursor=encode_cursor(datetime(2026, 9, 3, tzinfo=UTC), "run-999")))
+    _assert_no_unindexed_scan(cursored, "runs")
+    assert "USING INDEX" in _runs_access(cursored), _runs_access(cursored)
+
+    # 4. the joins the SELECT list now needs (bodies, and Task 10's api label) are PK lookups.
+    details = " | ".join(row["detail"] for row in plan)
+    assert "SEARCH bodies USING INDEX" in details, details
+    assert "SEARCH apis USING INDEX" in details, details
 
 
 def test_count_runs_by_api_id_query_plan_uses_an_index():

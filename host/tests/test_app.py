@@ -128,9 +128,48 @@ async def test_list_routes_answer_only_in_the_paged_envelope(client):
         assert set(body) == {"items", "next_cursor", "total"}, path
         assert len(body["items"]) <= 2, path
 
-    # The route cap is 200 whatever the caller asks for (RunsQuery.limit's own bound).
-    assert (await client.get("/api/atworks/runs?limit=500", headers=h)).status_code == 422
-    assert (await client.get("/api/atworks/apis?limit=500", headers=h)).status_code == 422
+    # The route cap is 200 whatever the caller asks for (RunsQuery.limit's own bound), and the
+    # FLOOR is 1 -- `/runs` was the one route missing `ge=1`, so `limit=0` fell through to
+    # RunsQuery's own validator and surfaced as a 500 instead of a 422 (Task 10 review minor).
+    for path in ("/api/atworks/runs", "/api/atworks/apis", "/api/atworks/jobs",
+                 "/api/atworks/rules", "/api/atworks/profiles"):
+        assert (await client.get(f"{path}?limit=500", headers=h)).status_code == 422, path
+        assert (await client.get(f"{path}?limit=0", headers=h)).status_code == 422, path
+        assert (await client.get(f"{path}?limit=-1", headers=h)).status_code == 422, path
+
+
+async def test_rules_route_filters_by_status_server_side(client_backend):
+    """Task 10 review carry-forward: the Rules page used to fetch one page and bucket it by
+    status client-side, so an applied rule beyond page one was invisible and each group's count
+    was the page's share. `?status=` pushes the filter to the ledger; `total` is that status's
+    real count."""
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    staged = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT)
+    to_apply = await backend.stage_rule(
+        session, RuleDraft(api_id="api-002", param="id", kind="required"), ActorKind.AGENT)
+    to_discard = await backend.stage_rule(
+        session, RuleDraft(api_id="api-006", param="amount", kind="required"), ActorKind.AGENT)
+    await backend.apply_rule(session, to_apply.rule_id)
+    await backend.discard_rule(session, to_discard.rule_id, ActorKind.OPERATOR)
+
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    all_rules = (await client.get("/api/atworks/rules", headers=h)).json()
+    assert all_rules["total"] == 3
+
+    expected = {"staged": [staged.rule_id], "applied": [to_apply.rule_id],
+                "discarded": [to_discard.rule_id]}
+    for status, ids in expected.items():
+        body = (await client.get(f"/api/atworks/rules?status={status}", headers=h)).json()
+        assert set(body) == {"items", "next_cursor", "total"}
+        assert [row["rule_id"] for row in body["items"]] == ids, status
+        # `total` is the ledger's count for THIS status, not the page's share of a mixed page
+        assert body["total"] == 1, status
+
+    unknown = (await client.get("/api/atworks/rules?status=nonsense", headers=h)).json()
+    assert unknown["items"] == [] and unknown["total"] == 0
 
 
 async def test_run_records_carry_the_api_label(client):
@@ -399,6 +438,36 @@ async def test_rules_route_lists_staged_rules(client_backend):
     r = await client.get("/api/atworks/rules", headers={"X-Session-Id": sid})
     assert r.status_code == 200
     assert [row["rule_id"] for row in r.json()["items"]] == [rule.rule_id]
+
+
+async def test_rule_and_profile_actions_look_the_id_up_directly(client_backend, monkeypatch):
+    """Task 10 review carry-forward: the approve/discard routes used to re-learn an unseen
+    rule/profile by scanning `list_rules(limit=1000)`, which silently stopped finding anything
+    older than that page. They now call the ABC's `get_rule`/`get_profile`, so a LISTING call on
+    this path is a bug -- these stubs make it a loud one."""
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    rule = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT)
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"],
+                          target_envs=["legacy", "renewed"]), ActorKind.AGENT)
+    profile = await backend.stage_profile(
+        session, ProfileDraft(job_id=job.job_id, summary="serverTime 무시", ignore_paths=["$.serverTime"]), ActorKind.AGENT)
+
+    async def _boom(*args, **kwargs):
+        raise AssertionError("the action path must not page the ledger to find one id")
+
+    monkeypatch.setattr(backend, "list_rules", _boom)
+    monkeypatch.setattr(backend, "list_profiles", _boom)
+
+    # a brand-new session that has never seen either id -- the re-learn branch is what runs
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    r = await client.post(f"/api/atworks/rules/{rule.rule_id}/apply", headers=h)
+    assert r.status_code == 200 and r.json()["change"]["status"] == "applied"
+    p = await client.post(f"/api/atworks/profiles/{profile.profile_id}/apply", headers=h)
+    assert p.status_code == 200 and p.json()["change"]["status"] == "applied"
 
 
 async def test_apply_rule_route_marks_then_consumes_approval(client_backend):

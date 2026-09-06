@@ -37,6 +37,13 @@ _GROUP_LIMIT = 50
 # top_failed_rule takes the 3 highest-`fail` rules, but the backend ranks by (fail + error) --
 # so a rule with many errors can outrank one with more plain failures. `limit=3` would let that
 # reorder which rules the panel names; 10 gives the re-rank room without paying for 50.
+#
+# The bound this buys, stated plainly: the panel can only ever name a rule that the BACKEND's
+# (fail + error) ranking already put in the top 10. A rule sitting at position 11+ on that first
+# key is invisible to the re-rank no matter how many plain failures it has -- an error-heavy tail
+# of ten rules would have to sit above it for that to happen, so the miss is possible but far
+# outside the shapes this panel is for. Widening the window is a one-number change here; making
+# it exact would mean a second, `fail`-ordered aggregate read on every panel build.
 _RULE_LIMIT = 10
 _JOB_LIMIT = 200
 

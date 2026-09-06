@@ -219,9 +219,12 @@ async def _sse_probe(backend: MockAtworks, session: AtworksSessionContext,
     matrix as a task, a probe coroutine repeatedly does ``await asyncio.sleep(0)`` followed by
     one ``get_context`` -- exactly what an SSE turn does between chunks. The reported number is
     the WORST such round trip; if execution hogged the loop, this is where it shows."""
-    api_ids = sorted(amount_apis)[:config.max_apis_per_job]
-    if len(api_ids) < config.max_apis_per_job:
-        api_ids = (api_ids + sorted(backend.apis)[:config.max_apis_per_job])[:config.max_apis_per_job]
+    # `amount_apis` are the ones carrying the `amount` param; pad with any other API to fill the
+    # matrix. `dict.fromkeys` keeps insertion order AND dedupes -- a plain concat would repeat an
+    # id that is in both lists (likely on a small custom dataset). `matrix_size` counts entries,
+    # not distinct APIs, so a repeat would still claim 400 cells while executing one cell twice.
+    api_ids = list(dict.fromkeys(sorted(amount_apis) + sorted(backend.apis)))[
+        :config.max_apis_per_job]
     draft = JobDraft(
         kind=JobKind.RUN_NOW, summary="scale bench 400-cell matrix", api_ids=api_ids,
         target_envs=["dev", "stg"],

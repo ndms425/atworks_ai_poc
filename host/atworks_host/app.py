@@ -169,7 +169,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/runs")
     async def runs(record: CurrentSession, status: str | None = None, since: str | None = None,
-                   cursor: str | None = None, limit: int = Query(50, le=200)) -> dict:
+                   cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
         s = context(record)
         since_dt = _aware(since)
         # RunsQuery.limit caps at 200 (the paged read contract, spec 2026-09-06); the route's
@@ -249,9 +249,13 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return await job_action(job_id, "discard_job", record)
 
     @router.get("/rules")
-    async def rules(record: CurrentSession, cursor: str | None = None,
+    async def rules(record: CurrentSession, status: str | None = None, cursor: str | None = None,
                     limit: int = Query(50, ge=1, le=200)) -> dict:
-        page = await backend.list_rules(context(record), cursor=cursor, limit=limit)
+        # `status` is a SERVER-side filter (the ABC's `list_rules(status=...)`), not a client-side
+        # split of one page: the Rules page used to fetch page 1 and bucket it into
+        # staged/applied/discarded, so "applied" showed whatever applied rules happened to be in
+        # the newest 50 and its count was the page's, not the ledger's.
+        page = await backend.list_rules(context(record), status=status, cursor=cursor, limit=limit)
         return {"items": [rule_record(r) for r in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
@@ -261,13 +265,11 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 게 아니다: 이 세션이 아직 모르는 rule이라도, 호스트가 그 rule을 실제로 소유(ledger)
         # 하고 있으면 클릭 전에 기억시킨다.
         if rule_id not in record.state.seen_rules:
-            # limit=1000 is a bounded *lookup by id*, not a listing (the /rules route pages at 50):
-            # the ABC has no get_rule, so a rule older than the newest 1000 would not be re-learned
-            # here — the click then fails the provenance gate rather than approving the wrong thing.
-            known = next(
-                (r for r in (await backend.list_rules(context(record), limit=1000)).items if r.rule_id == rule_id),
-                None,
-            )
+            # A single indexed read by id (ABC `get_rule`). The earlier shape — scan the newest
+            # `list_rules(limit=1000)` for a match — silently stopped working for any rule older
+            # than that page, and the click then failed the provenance gate instead of approving
+            # the rule the operator was looking at.
+            known = await backend.get_rule(context(record), rule_id)
             if known is not None:
                 record.state.remember_rule(known)
         if action == "apply_rule":
@@ -324,11 +326,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 게 아니다: 이 세션이 아직 모르는 profile이라도, 호스트가 그 profile을 실제로 소유(ledger)
         # 하고 있으면 클릭 전에 기억시킨다.
         if profile_id not in record.state.seen_profiles:
-            # limit=1000: a bounded lookup by id, not a listing — see rule_action above.
-            known = next(
-                (p for p in (await backend.list_profiles(context(record), limit=1000)).items if p.profile_id == profile_id),
-                None,
-            )
+            # A single indexed read by id (ABC `get_profile`) — see rule_action above.
+            known = await backend.get_profile(context(record), profile_id)
             if known is not None:
                 record.state.remember_profile(known)
         if action == "apply_profile":

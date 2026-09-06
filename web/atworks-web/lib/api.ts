@@ -36,7 +36,11 @@ export const fetchApis = (query = "", cursor: string | null = null) =>
 export const fetchRuns = (status?: string, cursor: string | null = null) =>
   api.getPage<RunResult>("/runs", { status, cursor, limit: PAGE_SIZE });
 export const fetchJobs = (cursor: string | null = null) => api.getPage<JobSpec>("/jobs", { cursor, limit: PAGE_SIZE });
-export const fetchRules = (cursor: string | null = null) => api.getPage<ValidationRule>("/rules", { cursor, limit: PAGE_SIZE });
+// `status` is a SERVER-side filter (host `/rules?status=`): the Rules page re-queries per
+// segment instead of bucketing one page, so "적용됨" is the ledger's applied rules and its
+// count is the envelope's `total`, not this page's share.
+export const fetchRules = (status?: string, cursor: string | null = null) =>
+  api.getPage<ValidationRule>("/rules", { status, cursor, limit: PAGE_SIZE });
 // /changes/ 가 아니다 — rule_action은 job_action의 미러지만 별도 경로다.
 export const actOnRule = (ruleId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ValidationRule | null }>(`/rules/${encodeURIComponent(ruleId)}/${action}`, {});

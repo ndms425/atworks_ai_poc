@@ -193,6 +193,14 @@ def test_masking_ran_at_capture(dataset: Path) -> None:
 def test_injected_patterns_are_present(dataset: Path) -> None:
     meta = json.loads((dataset / "meta.json").read_text(encoding="utf-8"))
     conn = _conn(dataset)
+    # These are the GENERATOR's counters, not detection counts, and that is deliberate for
+    # `regression_apis`: on the reduced set 5,000 APIs share 30 days x 2,000 runs at 8 runs per
+    # api-day, i.e. ~1.5 ACTIVE DAYS PER API, so most injected regressions never get both a pass
+    # day before their flip instant and a fail day after it -- the `regression_suspect` predicate
+    # (last_pass_at < updated_at <= first_non_pass_at) simply has nothing to fire on, and a
+    # detection-count assertion here would be flaky by construction. The full set (180 days,
+    # ~4-5 active days per API) does surface them; the detection rule itself is proven exactly by
+    # the aggregation/insights unit tests, not by this dataset.
     assert meta["regression_apis"] > 0 and meta["flaky_cells"] > 0
     # flaky cells alternate, so they cross the flaky_v1 threshold in the materialized counter
     threshold = AtworksAgentConfig(model="m").flaky_min_transitions

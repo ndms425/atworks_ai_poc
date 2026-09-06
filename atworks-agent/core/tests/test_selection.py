@@ -101,6 +101,22 @@ async def test_related_to_truncation_is_named_in_the_basis_sentence(wide, config
     assert res.basis is not None and "표본 상한" in res.basis
 
 
+async def test_the_sample_cap_is_named_once_even_when_both_clauses_truncate(wide, config, monkeypatch):
+    """Task 8 re-review minor: `related_to` and `failed_since` read the SAME truncated catalogue
+    scan, so both sentences used to stamp `(표본 상한 도달)` and the basis read like two separate
+    caps were hit. One selection, one cap, one note."""
+    monkeypatch.setattr(selection, "CATALOGUE_SCAN_LIMIT", 1)
+    monkeypatch.setattr(selection, "_API_PAGE", 1)
+
+    res = await resolve_select_where(
+        wide, SESSION, SelectWhere(related_to="api-3", failed_since=T0 - timedelta(hours=1)),
+        config, now=T0,
+    )
+
+    assert res.basis is not None
+    assert res.basis.count("표본 상한 도달") == 1
+
+
 async def test_failed_since_is_exact_and_not_a_run_sample(config):
     # The old path paged max_aggregate_runs non-pass runs and intersected; an API whose only
     # failure fell outside that sample vanished from the selection. The watermark read has no

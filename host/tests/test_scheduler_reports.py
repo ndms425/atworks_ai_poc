@@ -263,6 +263,9 @@ class RecordingBackend(AtworksBackend):
     async def discard_rule(self, session, rule_id, actor_kind):
         raise NotImplementedError
 
+    async def get_rule(self, session, rule_id):
+        raise NotImplementedError
+
     async def list_rules(self, session, api_id=None, status=None, cursor=None, limit=50):
         raise NotImplementedError
 
@@ -279,6 +282,9 @@ class RecordingBackend(AtworksBackend):
         raise NotImplementedError
 
     async def discard_profile(self, session, profile_id, actor_kind):
+        raise NotImplementedError
+
+    async def get_profile(self, session, profile_id):
         raise NotImplementedError
 
     async def list_profiles(self, session, job_id=None, status=None, cursor=None, limit=50):
