@@ -393,7 +393,9 @@ class MockAtworks(AtworksBackend):
         return run.response_body if run is not None else None
 
     async def audit(self, session, cursor=None, limit=50) -> Page[AuditEntry]:
-        return _page(self._audit, cursor, limit, key=lambda e: (e.at, str(e.seq)))
+        # seq is zero-padded to a fixed width so the tie-break orders numerically, not
+        # lexicographically (str(9) > str(10) would otherwise mis-page same-timestamp rows).
+        return _page(self._audit, cursor, limit, key=lambda e: (e.at, f"{e.seq:020d}"))
 
     async def append_audit(self, session, action: str, target_kind: str, target_id: str) -> None:
         self._audit_seq += 1

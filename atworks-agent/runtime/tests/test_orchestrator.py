@@ -140,6 +140,37 @@ async def test_prose_without_figures_in_closing_round_is_not_reminded(make_agent
     assert events[-1].type == "turn_complete"
 
 
+async def test_compact_history_clears_oldest_results_and_leaves_the_stub(make_agent, session, state):
+    """Task 3's compaction contract: a turn whose last call was given
+    ``compact_history_above_tokens`` or more must clear at least one earlier tool result down
+    to ``CLEARED_RESULT`` and report how many on ``turn_complete`` -- the host reads that count
+    to know the stored transcript needs a full rewrite (streaming.py)."""
+    from commerce_common.turn import CLEARED_RESULT
+
+    agent = make_agent(
+        [
+            tool_use_message("list_runs", {"filters": {"status": "fail"}}),
+            tool_use_message("list_runs", {"filters": {"status": "non_pass"}}),
+            text_message("확인했습니다."),
+        ],
+        compact_history_above_tokens=1,
+    )
+    events, messages = await run_turn(agent, "안녕", session, state)
+
+    turn_complete = events[-1]
+    assert turn_complete.type == "turn_complete"
+    assert turn_complete.data["results_cleared"] >= 1
+
+    cleared_blocks = [
+        block
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if block.get("type") == "tool_result" and block.get("content") == CLEARED_RESULT
+    ]
+    assert len(cleared_blocks) == turn_complete.data["results_cleared"]
+
+
 async def test_attached_items_reach_the_system_prompt(make_agent, session, state):
     agent = make_agent([text_message("run-1은 amount >= 0 규칙에 걸렸습니다.")])
     item = AttachedItem(order=1, kind="run", ref_id="run-1", label="POST /v1/contracts", field="amount", actual="-300", expected="amount >= 0", comment="왜 실패?")

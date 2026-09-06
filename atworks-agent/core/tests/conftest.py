@@ -7,6 +7,7 @@ from commerce_common.skills import Skill, SkillRegistry
 
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
+from atworks_agent.cursor import decode_cursor, encode_cursor
 from atworks_agent.jobs import JobDraft, JobLedger
 from atworks_agent.profiles import ProfileLedger
 from atworks_agent.rules import FormatBatchLedger, FormatLibrary, RuleImpact, RuleLedger
@@ -60,8 +61,18 @@ class InMemoryBackend(AtworksBackend):
                 and (q.api_id is None or r.api_id == q.api_id)
                 and (q.executed_by is None or r.executed_by == q.executed_by)
                 and (q.job_id is None or r.job_id == q.job_id)]
-        ordered = sorted(rows, key=lambda r: r.executed_at, reverse=True)
-        return Page(items=ordered[: q.limit], total=len(ordered))
+        # Real keyset pagination (mirrors mock_backend.py's ``_page``): a caller collecting
+        # more than one page (aggregate_runs' collect_runs) needs a real next_cursor to
+        # actually advance, not the always-None stub this used to return.
+        ordered = sorted(rows, key=lambda r: (r.executed_at, r.run_id), reverse=True)
+        total = len(ordered)
+        remaining = ordered
+        if q.cursor:
+            after = decode_cursor(q.cursor)
+            remaining = [r for r in ordered if (r.executed_at, r.run_id) < after]
+        items = remaining[: q.limit]
+        next_cursor = encode_cursor(items[-1].executed_at, items[-1].run_id) if len(remaining) > q.limit else None
+        return Page(items=items, next_cursor=next_cursor, total=total)
 
     async def get_run(self, session, run_id):
         return next((r for r in self.runs if r.run_id == run_id), None)

@@ -20,7 +20,11 @@ def api_record(api: ApiSpec) -> dict[str, Any]:
 
 
 def run_record(run: RunResult) -> dict[str, Any]:
-    return run.model_dump(mode="json", exclude_none=True)
+    # response_body must never reach a model-facing payload (a safety line, not just a size
+    # cut) -- has_body tells the model whether one exists without ever carrying its content.
+    record = run.model_dump(mode="json", exclude_none=True, exclude={"response_body"})
+    record["has_body"] = run.response_body is not None
+    return record
 
 
 def rank_record(rank: FailedRank) -> dict[str, Any]:

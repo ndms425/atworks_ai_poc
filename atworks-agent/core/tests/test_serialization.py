@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from atworks_agent.serialization import job_record
-from atworks_agent.types import JobKind, JobSchedule, JobSpec, TestDataSet
+from atworks_agent.serialization import job_record, run_record
+from atworks_agent.types import JobKind, JobSchedule, JobSpec, RunResult, RunStatus, TestDataSet
 
 
 def test_job_record_carries_derived_matrix_counts():
@@ -19,3 +19,24 @@ def test_job_record_carries_derived_matrix_counts():
     assert record["total_executions"] == 4        # 3 + 1
     assert record["remaining_executions"] == 4
     assert record["runs_total"] == 32
+
+
+def test_run_record_drops_the_body_but_flags_it_present():
+    run = RunResult(run_id="run-1", api_id="api-1", executed_at=datetime.now(UTC),
+                     target_env="dev", status=RunStatus.PASS, http_status=200,
+                     response_body={"secret": "never leaves this process"})
+
+    record = run_record(run)
+
+    assert "response_body" not in record
+    assert record["has_body"] is True
+
+
+def test_run_record_has_body_false_when_there_is_none():
+    run = RunResult(run_id="run-2", api_id="api-1", executed_at=datetime.now(UTC),
+                     target_env="dev", status=RunStatus.PASS, http_status=200)
+
+    record = run_record(run)
+
+    assert "response_body" not in record
+    assert record["has_body"] is False

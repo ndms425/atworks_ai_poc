@@ -1,10 +1,12 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from commerce_common.types import PROVENANCE_CAP
 
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.executor import AtworksToolExecutor
 from atworks_agent.rules import RuleDraft
-from atworks_agent.types import ApiSpec
+from atworks_agent.types import ApiSpec, RunResult, RunStatus
 
 from .conftest import T0
 
@@ -26,6 +28,33 @@ async def test_search_apis_records_provenance(backend, config, skills, session, 
 async def test_list_runs_records_population_and_runs(backend, config, skills, session, state):
     out = await _exec(backend, config, skills, session, state).execute("list_runs", {"filters": {"status": "fail"}})
     assert not out.refused and state.last_population == 1 and "run-1" in state.seen_runs
+
+
+async def test_list_runs_envelope_carries_total_and_next_cursor(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute("list_runs", {})
+    payload = _payload(out)
+    assert payload["total"] == 3 and len(payload["items"]) == 3 and payload["next_cursor"] is None
+
+
+async def test_list_runs_with_bodies_stays_under_the_fence_cap_and_parses_as_json(backend, config, skills, session, state):
+    # 50 runs each carrying a response body large enough that including the bodies would
+    # blow well past the fence's 12,000-char truncation cap (config.max_fenced_chars) and
+    # truncate mid-JSON; run_record drops response_body so the envelope stays small and the
+    # fenced text always parses.
+    backend.runs = [
+        RunResult(run_id=f"run-{i:04d}", api_id="api-1", executed_at=T0 + timedelta(minutes=i),
+                  target_env="dev", status=RunStatus.PASS, http_status=200,
+                  response_body={"echo": {"note": "x" * 400}})
+        for i in range(50)
+    ]
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("list_runs", {"limit": 50})
+    assert not out.refused
+    raw = out.result_text.split("<atworks_data>", 1)[1].split("</atworks_data>", 1)[0]
+    assert len(raw) < 12_000
+    payload = json.loads(raw)
+    assert payload["total"] == 50 and len(payload["items"]) == 50
+    assert all("response_body" not in item and item["has_body"] is True for item in payload["items"])
 
 
 async def test_list_runs_non_pass_population(backend, config, skills, session, state):
@@ -426,14 +455,49 @@ async def test_aggregate_runs_keeps_the_listed_window_coherent(backend, config, 
     assert state.last_population == 3
 
 
-async def test_aggregate_runs_population_counts_the_true_total_and_flags_truncation(backend, skills, session, state):
+async def test_aggregate_runs_population_counts_the_true_total_even_when_the_window_truncates(backend, skills, session, state):
     small_config = AtworksAgentConfig(model="m", max_aggregate_runs=2)
     ex = AtworksToolExecutor(backend=backend, config=small_config, skills=skills, session=session, state=state)
     out = await ex.execute("aggregate_runs", {"group_by": "api"})
     assert not out.is_error
+    # population is the backend's true count_runs, not len(runs) -- the aggregation window
+    # (max_aggregate_runs=2) truncates the runs collected for grouping, but not the population
+    # a card is allowed to cite; "truncated" is gone from the envelope entirely (Task 3).
     assert state.last_population == 3
-    assert '"truncated": true' in out.result_text
+    assert "truncated" not in out.result_text
     assert len(state.last_listed_run_ids) == 2
+
+
+async def test_aggregate_runs_population_for_api_id_uses_count_runs_not_the_truncated_window(
+    backend, skills, session, state
+):
+    # Regression: population used to be len(runs) whenever api_id was given, which silently
+    # undercounted once max_aggregate_runs truncated the collected window. It must equal the
+    # backend's own count_runs(api_id=...) instead.
+    small_config = AtworksAgentConfig(model="m", max_aggregate_runs=1)
+    ex = AtworksToolExecutor(backend=backend, config=small_config, skills=skills, session=session, state=state)
+    await ex.execute("get_api", {"api_id": "api-1"})
+    out = await ex.execute("aggregate_runs", {"group_by": "api", "api_id": "api-1"})
+    assert not out.is_error
+    assert state.last_population == 2       # run-1 and run-3 both belong to api-1
+    assert len(state.last_listed_run_ids) == 1   # the collection window was still capped at 1
+
+
+async def test_aggregate_runs_caps_last_listed_run_ids_at_the_provenance_cap(backend, skills, session, state):
+    # A window well past PROVENANCE_CAP (200): the aggregation cap (max_aggregate_runs) lets
+    # collect_runs gather more than 200 runs, but last_listed_run_ids must still be trimmed to
+    # PROVENANCE_CAP the way every other seen-record map already is (remember()).
+    backend.runs = [
+        RunResult(run_id=f"run-{i:04d}", api_id="api-1", executed_at=T0 + timedelta(minutes=i),
+                  target_env="dev", status=RunStatus.PASS, http_status=200)
+        for i in range(300)
+    ]
+    big_config = AtworksAgentConfig(model="m", max_aggregate_runs=300)
+    ex = AtworksToolExecutor(backend=backend, config=big_config, skills=skills, session=session, state=state)
+    out = await ex.execute("aggregate_runs", {"group_by": "api"})
+    assert not out.is_error
+    assert state.last_population == 300
+    assert len(state.last_listed_run_ids) == PROVENANCE_CAP
 
 
 async def test_stage_rule_holds_unknown_api_then_stages(backend, config, skills, session, state):
@@ -699,7 +763,8 @@ async def test_find_apis_with_param_excludes_apis_with_an_applied_format_rule(ba
     ex = _exec(backend, config, skills, session, state)
     out = await ex.execute("find_apis_with_param", {"param": "contractNo"})
     payload = _payload(out)
-    assert [a["api_id"] for a in payload["apis"]] == ["api-1"]
+    assert [a["api_id"] for a in payload["items"]] == ["api-1"]
+    assert payload["total"] == 1
     assert "api-1" in state.seen_apis
     rule = backend.rule_ledger.stage(
         RuleDraft(api_id="api-1", param="contractNo", kind="format", format="uuid"), actor="op")

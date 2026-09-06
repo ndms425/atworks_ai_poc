@@ -67,7 +67,9 @@ def build_tools(
             "name": "search_apis",
             "description": ("Find registered APIs by text, group, or last-updated date. Use updated_after to resolve "
                             "'updated in the last week' style selections; the ids it returns are the only ids a job may name. "
-                            "/ 등록된 API를 검색한다. '지난 1주일 업데이트'는 updated_after로 푼다."),
+                            "The result carries `total` (the true count for this filter, independent of `limit`) and "
+                            "`next_cursor`; cite `total`, never the length of `items`. / 등록된 API를 검색한다. '지난 1주일 "
+                            "업데이트'는 updated_after로 푼다. total이 모집단, items 길이가 아니다."),
             "input_schema": {"type": "object", "properties": {
                 "query": {"type": "string", "maxLength": 120, "description": "Free text over method, path, name; empty scans everything."},
                 "group": {"type": "string", "maxLength": 60},
@@ -84,9 +86,11 @@ def build_tools(
         {
             "name": "list_runs",
             "description": ("Run results, newest first, filtered by `filters` (time window `since`, `status` "
-                            "pass|fail|error|non_pass, or `api_id`). It also records the total count for the window "
-                            "(the digest's population). The status on each run is the deterministic verdict; never "
-                            "restate it as your own judgment. / 실행 이력. status는 결정론 판정이다."),
+                            "pass|fail|error|non_pass, or `api_id`). The result carries `total` — the true count for "
+                            "this filter, independent of `limit` — and `next_cursor`; `total` is the population to "
+                            "cite (the digest's population), never the length of `items`. The status on each run is "
+                            "the deterministic verdict; never restate it as your own judgment. / 실행 이력. status는 "
+                            "결정론 판정이다. total이 모집단이다."),
             "input_schema": {"type": "object", "properties": {
                 "filters": {"type": "object", "properties": {
                     "since": {"type": "string", "description": _ISO_DATETIME},
@@ -249,8 +253,9 @@ def build_tools(
             "description": ("Find APIs that declare a given parameter and do NOT already have an applied format "
                             "rule for it — candidates for extending a format you just applied to more APIs. Use "
                             "it after applying a format rule, to offer the operator the same shape on other APIs "
-                            "sharing that parameter name. / 해당 파라미터를 선언했지만 아직 포맷 규칙이 적용되지 "
-                            "않은 API를 찾는다. 방금 적용한 포맷을 다른 API로 넓힐 때 쓴다."),
+                            "sharing that parameter name. The result carries `total` (the true count, independent "
+                            "of `items`' length) and `next_cursor`. / 해당 파라미터를 선언했지만 아직 포맷 규칙이 적용되지 "
+                            "않은 API를 찾는다. 방금 적용한 포맷을 다른 API로 넓힐 때 쓴다. total이 실제 건수다."),
             "input_schema": {"type": "object", "properties": {
                 "param": {"type": "string", "maxLength": 80, "description": "Parameter name, e.g. one get_api listed."}},
                 "required": ["param"], "additionalProperties": False},

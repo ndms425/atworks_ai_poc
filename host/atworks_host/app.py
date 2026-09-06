@@ -193,6 +193,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/rules")
     async def rules(record: CurrentSession) -> dict:
+        # limit=1000: the route has always returned the whole rule set (Task 10 exposes real
+        # paging to the web); this keeps that shape under the new paged contract.
         return {"rules": [rule_record(r) for r in (await backend.list_rules(context(record), limit=1000)).items]}
 
     async def rule_action(rule_id: str, action: str, record: Record) -> dict:
@@ -236,6 +238,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/profiles")
     async def profiles(record: CurrentSession, job_id: str | None = None) -> dict:
+        # limit=1000: the route has always returned the whole profile set (Task 10 exposes
+        # real paging to the web); this keeps that shape under the new paged contract.
         page = await backend.list_profiles(context(record), job_id, limit=1000)
         return {"profiles": [profile_record(p) for p in page.items]}
 

@@ -1,11 +1,12 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
     AtworksSessionContext,
+    AuditEntry,
     Binding,
     JobDraft,
     JobKind,
@@ -383,3 +384,16 @@ async def test_active_jobs_excludes_an_exhausted_applied_job():
 
     after = await b.active_jobs(SESSION)
     assert job.job_id not in {j.job_id for j in after}
+
+
+async def test_audit_pages_same_timestamp_rows_by_seq_numerically_not_lexicographically():
+    # A str(seq) tie-break sorts "9" after "10" (lexicographic), mis-paging same-timestamp
+    # rows once seq reaches double digits; the fix zero-pads seq so the tie-break is numeric.
+    b = _backend()
+    at = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    b._audit = [
+        AuditEntry(seq=9, at=at, operator="minseong", action="apply_job", target_kind="job", target_id="job-9", session_id="s"),
+        AuditEntry(seq=10, at=at, operator="minseong", action="apply_job", target_kind="job", target_id="job-10", session_id="s"),
+    ]
+    page = await b.audit(SESSION, limit=50)
+    assert [e.seq for e in page.items] == [10, 9]

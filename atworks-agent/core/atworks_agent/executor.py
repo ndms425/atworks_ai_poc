@@ -13,6 +13,7 @@ from commerce_common.memory import MemoryRuntime
 from commerce_common.presentation import PresentationComponent, PresentationExtension
 from commerce_common.skills import SkillRegistry
 from commerce_common.streaming import AgentEvent, ToolOutcome
+from commerce_common.types import PROVENANCE_CAP
 
 from .aggregation import GROUP_BY, aggregate
 from .backend import AtworksBackend
@@ -332,14 +333,18 @@ class AtworksToolExecutor(BaseToolExecutor):
     # -- 읽기 -------------------------------------------------------------------------
 
     async def _search_apis(self, tool_input: dict[str, Any]) -> ToolOutcome:
-        apis = (await self._backend.search_apis(
+        page = await self._backend.search_apis(
             self._session, query=self._sanitize(tool_input.get("query"), 120),
             updated_after=_iso(tool_input.get("updated_after"), "updated_after"), group=tool_input.get("group") or None,
             limit=_limit(tool_input.get("limit"), 20, 200),
-        )).items
-        for api in apis:
+        )
+        for api in page.items:
             self._state.remember_api(api)
-        return self._fenced({"count": len(apis), "apis": [api_record(a) for a in apis]} if apis else {"note": "No APIs matched."})
+        if not page.items:
+            return self._fenced({"note": "No APIs matched."})
+        return self._fenced({
+            "items": [api_record(a) for a in page.items], "total": page.total, "next_cursor": page.next_cursor,
+        })
 
     async def _get_api(self, tool_input: dict[str, Any]) -> ToolOutcome:
         api = await self._backend.get_api(self._session, str(tool_input.get("api_id", "")))
@@ -354,17 +359,21 @@ class AtworksToolExecutor(BaseToolExecutor):
         status = filters.get("status") or None
         if status is not None and status not in RUN_STATUS_FILTERS:
             raise InvalidToolArgument("filters.status", kind="status")
-        runs = (await self._backend.list_runs(self._session, RunsQuery(
+        page = await self._backend.list_runs(self._session, RunsQuery(
             since=since, status=status, api_id=filters.get("api_id") or None,
             limit=_limit(tool_input.get("limit"), 50, 200),
-        ))).items
-        population = await self._backend.count_runs(self._session, since=since, status=status)
-        self._state.last_population = population
-        for run in runs:
+        ))
+        self._state.last_population = page.total
+        for run in page.items:
             self._state.remember_run(run)
-        self._state.last_listed_run_ids = [r.run_id for r in runs]
+        # Provenance state is capped like every other seen-record map (R32-adjacent):
+        # PROVENANCE_CAP bounds how many ids this window can name even though page.total
+        # (the population a card cites) is the true, uncapped count.
+        self._state.last_listed_run_ids = [r.run_id for r in page.items][:PROVENANCE_CAP]
         self._state.last_listed_filter = status or "all"
-        return self._fenced({"population": population, "shown": len(runs), "runs": [run_record(r) for r in runs]})
+        return self._fenced({
+            "items": [run_record(r) for r in page.items], "total": page.total, "next_cursor": page.next_cursor,
+        })
 
     async def _get_run(self, tool_input: dict[str, Any]) -> ToolOutcome:
         run = await self._backend.get_run(self._session, str(tool_input.get("run_id", "")))
@@ -434,9 +443,12 @@ class AtworksToolExecutor(BaseToolExecutor):
                 if api is not None:
                     self._state.remember_api(api)
         groups = aggregate(runs, self._state.seen_apis, group_by, flaky_min_transitions=self._config.flaky_min_transitions)
-        population = len(runs) if api_id is not None else await self._backend.count_runs(self._session, since=since, status=status)
+        # Always the true population from the backend's own count, never len(runs): the
+        # aggregation window (max_aggregate_runs) can truncate the runs collected for
+        # grouping without truncating what the card is allowed to cite as population.
+        population = await self._backend.count_runs(self._session, since=since, until=None, status=status, api_id=api_id)
         self._state.last_population = population
-        self._state.last_listed_run_ids = [r.run_id for r in runs]
+        self._state.last_listed_run_ids = [r.run_id for r in runs][:PROVENANCE_CAP]
         self._state.last_listed_filter = status or "all"
         self._state.remember_groups(group_by, groups, since)
         shown = groups[: self._config.max_group_items * 2]
@@ -444,7 +456,6 @@ class AtworksToolExecutor(BaseToolExecutor):
             "group_by": group_by, "since": since.isoformat(), "population": population,
             "groups": [g.model_dump(mode="json", exclude_none=True, exclude={"run_ids"}) | {"run_ids": g.run_ids[:3]} for g in shown],
             "more": max(0, len(groups) - len(shown)),
-            "truncated": len(runs) >= self._config.max_aggregate_runs,
             "note": "Figures are host-computed; show them with present_run_groups (group keys above), never in prose.",
         })
 
@@ -649,7 +660,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             return ToolOutcome.held(GUARDRAIL_GATE, _rule_guardrail_message(violations))
         rule = await self._backend.stage_rule(self._session, draft, ActorKind.AGENT)
         self._state.rule_impacts[rule.rule_id] = await self._backend.simulate_rule(
-            self._session, draft, window_days=self._config.scope_window_days
+            self._session, draft, window_days=self._config.max_aggregate_window_days
         )
         return await self._remember_and_preview_rule(rule)
 
@@ -685,13 +696,14 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _find_apis_with_param(self, tool_input: dict[str, Any]) -> ToolOutcome:
         param = self._sanitize(tool_input.get("param"), 80)
-        apis = (await self._backend.find_apis_with_param(self._session, param)).items
-        for api in apis:
+        page = await self._backend.find_apis_with_param(self._session, param)
+        for api in page.items:
             self._state.remember_api(api)
-        return self._fenced(
-            {"count": len(apis), "apis": [api_record(a) for a in apis]} if apis
-            else {"note": "No APIs declare that parameter without an already-applied format rule for it."}
-        )
+        if not page.items:
+            return self._fenced({"note": "No APIs declare that parameter without an already-applied format rule for it."})
+        return self._fenced({
+            "items": [api_record(a) for a in page.items], "total": page.total, "next_cursor": page.next_cursor,
+        })
 
     async def _recommend_rules_for_api(self, tool_input: dict[str, Any]) -> ToolOutcome:
         api_id = str(tool_input.get("api_id", ""))
@@ -699,7 +711,12 @@ class AtworksToolExecutor(BaseToolExecutor):
         if api is None:
             return ToolOutcome.error("No API with that id.")
         self._state.remember_api(api)
-        recommendations = await self._backend.recommend_rules_for_api(self._session, api_id)
+        # max_group_items: the existing cap on how many grouped items a card shows at once
+        # (present_run_groups' schema maxItems) -- reused here as the recommendation cap
+        # rather than inventing a new config field for a second read-only list.
+        recommendations = await self._backend.recommend_rules_for_api(
+            self._session, api_id, limit=self._config.max_group_items
+        )
         return self._fenced(
             [rule_recommendation_record(r) for r in recommendations] if recommendations
             else {"note": "No rule-less parameter of this API has a peer with an applied rule to suggest."}
