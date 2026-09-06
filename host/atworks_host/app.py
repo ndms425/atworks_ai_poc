@@ -5,8 +5,9 @@ Route parameters below are annotated with dependencies built at call time (``Cur
 annotations``) — FastAPI resolves string annotations against a function's globals, and these
 names are local to ``create_app``."""
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -17,6 +18,7 @@ from atworks_agent import (
     AtworksSessionContext,
     AtworksSessionState,
     RunsQuery,
+    RunStatusFilter,
     ScreenState,
 )
 from atworks_agent.serialization import (
@@ -42,6 +44,30 @@ from .streaming import append_user_turn, build_app, stream_turn
 
 PROJECT_ID = "mes-demo"
 DEFAULT_OPERATOR_ID = "minseong"
+
+#: The staged/applied/discarded ledgers all share one status vocabulary (JobStatus / RuleStatus /
+#: ProfileStatus are the same three members). Declared as a Literal so FastAPI validates it: a
+#: `?status=nonsense` used to reach the backend as a plain string, match nothing, and come back as
+#: an empty page with `total: 0` -- indistinguishable from "no rules in that state" (M18).
+LedgerStatusFilter = Literal["staged", "applied", "discarded"]
+
+T = TypeVar("T")
+
+#: What a paged route says when the cursor it was handed cannot be decoded (or no longer points
+#: anywhere). It is the CLIENT's input, so it is a 400, not a 500, and the message says what to do.
+BAD_CURSOR = "stale or malformed cursor; start from the first page"
+
+
+async def _paged(call: Coroutine[Any, Any, T]) -> T:
+    """Await a backend read that takes a cursor, turning the one exception a bad cursor produces
+    into a 400. `decode_cursor` raises `ValueError` for every malformed shape (bad base64, bad
+    JSON, missing keys, bad datetime); before this, that propagated out of the route as a 500 on
+    every one of the six paged endpoints (final review I5). Nothing else in these reads raises
+    `ValueError`, so the catch stays exactly as narrow as the failure it names."""
+    try:
+        return await call
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=BAD_CURSOR) from error
 
 
 def _aware(value: str | None) -> datetime | None:
@@ -116,7 +142,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
                     limit: int = Query(50, ge=1, le=200)) -> dict:
         """읽기 전용 감사 로그(최신순, keyset 커서). "AI가 무엇을 바꿨나 → 아무것도;
         사람이 이 시각에 승인했다"를 그대로 보여주는 증적."""
-        page = await backend.audit(context(record), cursor=cursor, limit=limit)
+        page = await _paged(backend.audit(context(record), cursor=cursor, limit=limit))
         return {"items": [audit_record(e) for e in page.items],
                 "next_cursor": page.next_cursor, "total": page.total}
 
@@ -150,7 +176,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.get("/apis")
     async def apis(record: CurrentSession, query: str = "", group: str | None = None,
                    cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
-        page = await backend.search_apis(context(record), query=query, group=group, cursor=cursor, limit=limit)
+        page = await _paged(
+            backend.search_apis(context(record), query=query, group=group, cursor=cursor, limit=limit))
         return {"items": [api_record(a) for a in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
@@ -168,14 +195,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
                 "window_days": cfg.max_aggregate_window_days}
 
     @router.get("/runs")
-    async def runs(record: CurrentSession, status: str | None = None, since: str | None = None,
-                   cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
+    async def runs(record: CurrentSession, status: RunStatusFilter | None = None,
+                   since: str | None = None, cursor: str | None = None,
+                   limit: int = Query(50, ge=1, le=200)) -> dict:
         s = context(record)
         since_dt = _aware(since)
         # RunsQuery.limit caps at 200 (the paged read contract, spec 2026-09-06); the route's
         # own bound matches so an over-limit request 422s here instead of a validation error
         # surfacing from inside list_runs.
-        page = await backend.list_runs(s, RunsQuery(since=since_dt, status=status, cursor=cursor, limit=limit))
+        page = await _paged(
+            backend.list_runs(s, RunsQuery(since=since_dt, status=status, cursor=cursor, limit=limit)))
         # `page.total` IS the old `population` (the count after this filter, limit-independent) —
         # the separate count_runs call that used to fill it was a second scan of the same predicate.
         return {"items": [run_record(r) for r in page.items], "next_cursor": page.next_cursor,
@@ -184,7 +213,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.get("/jobs")
     async def jobs(record: CurrentSession, cursor: str | None = None,
                    limit: int = Query(50, ge=1, le=200)) -> dict:
-        page = await backend.all_jobs(context(record), cursor=cursor, limit=limit)
+        page = await _paged(backend.all_jobs(context(record), cursor=cursor, limit=limit))
         return {"items": [job_record(j) for j in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
@@ -249,13 +278,14 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return await job_action(job_id, "discard_job", record)
 
     @router.get("/rules")
-    async def rules(record: CurrentSession, status: str | None = None, cursor: str | None = None,
-                    limit: int = Query(50, ge=1, le=200)) -> dict:
+    async def rules(record: CurrentSession, status: LedgerStatusFilter | None = None,
+                    cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
         # `status` is a SERVER-side filter (the ABC's `list_rules(status=...)`), not a client-side
         # split of one page: the Rules page used to fetch page 1 and bucket it into
         # staged/applied/discarded, so "applied" showed whatever applied rules happened to be in
         # the newest 50 and its count was the page's, not the ledger's.
-        page = await backend.list_rules(context(record), status=status, cursor=cursor, limit=limit)
+        page = await _paged(
+            backend.list_rules(context(record), status=status, cursor=cursor, limit=limit))
         return {"items": [rule_record(r) for r in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
@@ -316,7 +346,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.get("/profiles")
     async def profiles(record: CurrentSession, job_id: str | None = None, cursor: str | None = None,
                        limit: int = Query(50, ge=1, le=200)) -> dict:
-        page = await backend.list_profiles(context(record), job_id, cursor=cursor, limit=limit)
+        page = await _paged(
+            backend.list_profiles(context(record), job_id, cursor=cursor, limit=limit))
         return {"items": [profile_record(p) for p in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 

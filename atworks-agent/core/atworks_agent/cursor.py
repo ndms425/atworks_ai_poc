@@ -16,7 +16,15 @@ def encode_cursor(executed_at: datetime, run_id: str) -> str:
 
 
 def decode_cursor(cursor: str) -> tuple[datetime, str]:
-    """Raises ValueError on any malformed input: bad base64, bad JSON, missing keys, bad datetime."""
+    """Raises ``ValueError("malformed cursor: ...")`` on ANY malformed input: bad base64, bad
+    JSON, missing keys, bad datetime, undecodable bytes.
+
+    The uniformity matters, because the paged routes turn this one exception type into a 400. The
+    earlier shape re-raised a bare ``ValueError`` untouched, and most of what goes wrong here IS
+    already a ValueError -- ``binascii.Error``, ``UnicodeDecodeError`` and ``JSONDecodeError`` all
+    subclass it. So ``?cursor=zzz`` escaped as an opaque "Invalid base64-encoded string", nothing
+    recognised it, and the route answered 500 for what is plainly a bad request (final review I5).
+    Catching ``Exception`` and re-wrapping gives every failure one type and one message."""
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
@@ -24,9 +32,7 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
         ts = datetime.fromisoformat(data["t"])
         row_id = data["id"]
         if not isinstance(row_id, str):
-            raise ValueError(f"cursor id must be a string, got {type(row_id).__name__}")
+            raise TypeError(f"cursor id must be a string, got {type(row_id).__name__}")
         return ts, row_id
-    except ValueError:
-        raise
     except Exception as error:
-        raise ValueError(f"malformed cursor: {cursor!r}") from error
+        raise ValueError(f"malformed cursor: {cursor!r} ({type(error).__name__})") from error

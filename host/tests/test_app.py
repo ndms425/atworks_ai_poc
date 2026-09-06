@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from atworks_agent import (
     ActorKind,
+    AggregateQuery,
     AtworksAgentConfig,
     AtworksSessionContext,
     AtworksSessionState,
@@ -138,6 +139,53 @@ async def test_list_routes_answer_only_in_the_paged_envelope(client):
         assert (await client.get(f"{path}?limit=-1", headers=h)).status_code == 422, path
 
 
+async def test_runs_status_all_means_no_filter_and_a_bogus_status_is_422(client):
+    """Final review I4. `all` is a MEMBER of RunStatusFilter -- the portal's own default segment
+    sends it, and the model's tool schema offers it -- but every reader took it as a status VALUE,
+    so `?status=all` matched no row and answered an empty page with `total: 0`. Nothing looked
+    wrong; the runs simply were not there. And an unknown status reached `RunsQuery`'s validator
+    from inside the route and surfaced as a 500 rather than the 422 it plainly is."""
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+
+    unfiltered = (await client.get("/api/atworks/runs?limit=5", headers=h)).json()
+    every = (await client.get("/api/atworks/runs?limit=5&status=all", headers=h)).json()
+    assert every["total"] == unfiltered["total"] > 0
+    assert [r["run_id"] for r in every["items"]] == [r["run_id"] for r in unfiltered["items"]]
+    # ...and a real filter still narrows
+    failed = (await client.get("/api/atworks/runs?limit=5&status=fail", headers=h)).json()
+    assert 0 < failed["total"] < every["total"]
+
+    assert (await client.get("/api/atworks/runs?status=bogus", headers=h)).status_code == 422
+
+
+async def test_every_paged_route_answers_400_for_a_malformed_cursor(client):
+    """Final review I5. `decode_cursor` raises `ValueError`, and half the things that go wrong
+    inside it (binascii.Error, UnicodeDecodeError, JSONDecodeError) ARE ValueErrors, so the old
+    `except ValueError: raise` re-raised them untouched and all six routes answered 500 to a
+    client-supplied string."""
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    for path in ("/api/atworks/apis", "/api/atworks/runs", "/api/atworks/jobs",
+                 "/api/atworks/rules", "/api/atworks/profiles", "/api/atworks/audit"):
+        for bad in ("zzz", "!!!!", "eyJ0Ijog"):          # bad padding, bad base64, truncated JSON
+            response = await client.get(f"{path}?cursor={bad}", headers=h)
+            assert response.status_code == 400, (path, bad, response.status_code)
+            assert "cursor" in response.json()["detail"], path
+
+
+async def test_aggregate_status_all_is_the_same_as_no_status(client_backend):
+    """The same `all` normalization on the aggregate side, where taking it as a value did more
+    than empty a page: it zeroed every group's `transitions` (the rank's leading term for the
+    flaky order) as well as its counts."""
+    _client, backend = client_backend
+    session = AtworksSessionContext(session_id="s", project_id="mes", operator="minseong")
+    plain = await backend.aggregate_runs(session, AggregateQuery(group_by="api", limit=50))
+    everything = await backend.aggregate_runs(
+        session, AggregateQuery(group_by="api", status="all", limit=50))
+    assert everything == plain and plain
+
+
 async def test_rules_route_filters_by_status_server_side(client_backend):
     """Task 10 review carry-forward: the Rules page used to fetch one page and bucket it by
     status client-side, so an applied rule beyond page one was invisible and each group's count
@@ -168,8 +216,11 @@ async def test_rules_route_filters_by_status_server_side(client_backend):
         # `total` is the ledger's count for THIS status, not the page's share of a mixed page
         assert body["total"] == 1, status
 
-    unknown = (await client.get("/api/atworks/rules?status=nonsense", headers=h)).json()
-    assert unknown["items"] == [] and unknown["total"] == 0
+    # M18: an unknown status is a BAD REQUEST, not an empty page. It used to reach the backend as
+    # a plain string, match nothing, and answer `{"items": [], "total": 0}` -- which reads exactly
+    # like "there are no rules in that state", so a typo in a client looked like data.
+    unknown = await client.get("/api/atworks/rules?status=nonsense", headers=h)
+    assert unknown.status_code == 422
 
 
 async def test_run_records_carry_the_api_label(client):

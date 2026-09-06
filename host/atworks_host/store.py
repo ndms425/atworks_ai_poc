@@ -286,6 +286,16 @@ _MAP_COLUMN = {"failed_rule": "failed_rule_counts", "http_status": "http_status_
 _COUNT, _PASSED, _FAIL, _ERROR, _TRANSITIONS, _P95, _API_COUNT = range(7)
 
 
+def _status_filter(status: str | None) -> str | None:
+    """``"all"`` is a MEMBER of ``RunStatusFilter`` and it means "no status filter" -- it is the
+    portal's own default segment, and the model's tool schema offers it. Every reader used to take
+    it as a status VALUE, so ``status=all`` matched no row: ``/runs?status=all`` answered an empty
+    page (with ``total: 0``, so nothing looked wrong) over a project full of runs, and an
+    aggregate under it reported zero transitions. Normalized in one place, next to the two
+    readers, so a route can never disagree with a predicate builder (final review I4)."""
+    return None if status in (None, "all") else status
+
+
 def _rank_exprs(q: AggregateQuery) -> tuple[str, str]:
     """``(ORDER BY, the HAVING count expression)`` for ``q``, over the outer SELECT's aliases
     (``c`` count, ``p`` passed, ``f`` fail, ``e`` error, ``t`` transitions).
@@ -308,7 +318,7 @@ def _rank_exprs(q: AggregateQuery) -> tuple[str, str]:
     SQLite ORDER BY is a column ORDINAL, not a value. Dropping it is exactly equivalent: a
     constant leading term ranks nothing.
     """
-    status = q.status
+    status = _status_filter(q.status)
     failures: str | None
     if status == "pass":
         failures, count = None, "SUM(p)"
@@ -397,6 +407,7 @@ def _counts(row: list, status: str | None) -> tuple[int, int, int, int]:
     """``(count, passed, fail, error)`` a group reports under ``status``. A rollup row keeps the
     three verdict counters side by side, so a status filter is a choice of counters, never a scan."""
     count, passed, fail, error = row[_COUNT], row[_PASSED], row[_FAIL], row[_ERROR]
+    status = _status_filter(status)
     if status == "pass":
         return passed, passed, 0, 0
     if status == "fail":
@@ -415,7 +426,7 @@ def _group_from_acc(
     count, passed, fail, error = counts
     # A status filter leaves a single-verdict population, whose pass<->non-pass transition count is
     # zero by construction -- the same number the pre-rollup scan produced over a filtered run list.
-    transitions = 0 if q.status else row[_TRANSITIONS]
+    transitions = 0 if _status_filter(q.status) else row[_TRANSITIONS]
     api = apis.get(key) if q.group_by == "api" else None
     return RunGroup(
         key=key, label=f"{api.method} {api.path}" if api is not None else key,
@@ -913,6 +924,7 @@ class Store:
         if until is not None:
             clauses.append("executed_at < ?")
             params.append(_iso(until))
+        status = _status_filter(status)
         if status is not None:
             if status == "non_pass":
                 clauses.append("status != ?")
