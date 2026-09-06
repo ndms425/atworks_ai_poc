@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 from datetime import datetime
@@ -11,9 +12,11 @@ from dotenv import load_dotenv
 
 from atworks_agent import AtworksAgentConfig
 from atworks_agent_runtime import AtworksAgent
+from atworks_agent_runtime.insight_narrator import narrate_insights
 
 from .app import create_app
 from .briefing import Briefings
+from .insights import InsightPanels
 from .mock_backend import MockAtworks
 from .reports import Reports
 from .scheduler import Scheduler
@@ -48,6 +51,7 @@ def build() -> tuple:
     portal_origin = os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110")
     reports = Reports(HERE / "reports_out", portal_origin=portal_origin)
     briefings = Briefings(HERE / "briefings_out", config, portal_origin=portal_origin)
+    insights = InsightPanels(HERE / "insights_out", config, narrator=functools.partial(narrate_insights, agent.client, config))
     scheduler = Scheduler(backend, reports, None, briefings=briefings)
 
     async def loop() -> None:
@@ -66,7 +70,7 @@ def build() -> tuple:
         spawn_background(loop())
 
     app = create_app(agent=agent, backend=backend, scheduler=scheduler, reports=reports, briefings=briefings,
-                      on_startup=[start_loop])
+                      insights=insights, on_startup=[start_loop])
     return app, backend, scheduler
 
 

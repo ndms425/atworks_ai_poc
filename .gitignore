@@ -9,6 +9,7 @@ out/
 *.egg-info/
 host/atworks_host/reports_out/
 host/atworks_host/briefings_out/
+host/atworks_host/insights_out/
 .pytest_cache/
 .ruff_cache/
 .claude/settings.local.json

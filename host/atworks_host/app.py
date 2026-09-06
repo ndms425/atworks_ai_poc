@@ -31,6 +31,7 @@ from atworks_agent.serialization import (
 from atworks_agent_runtime import AtworksAgent
 
 from .briefing import Briefings
+from .insights import InsightPanels
 from .mock_backend import MockAtworks
 from .reports import Reports
 from .scheduler import Scheduler
@@ -70,8 +71,14 @@ class SessionStart(BaseModel):
 
 
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
-               briefings: Briefings, on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
+               briefings: Briefings, insights: InsightPanels | None = None,
+               on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
     backend.reports = reports  # lets Mock's apply_profile re-diff the target job's stored report
+    # A local route below is itself named `insights` (the existing GET /runs/insights) — Python
+    # functions have one flat namespace, so that `async def insights(...)` would silently
+    # rebind this parameter for the rest of create_app. Alias it immediately so the panel
+    # routes always see the InsightPanels instance, never the shadowing route function.
+    insight_panels = insights
     app = build_app("atworks-ai host", on_startup=on_startup)
     sessions: SessionStore[AtworksSessionState] = SessionStore(AtworksSessionState)
     CurrentSession = session_dependency(sessions, "/api/atworks/session")
@@ -333,6 +340,22 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         if html is None:
             raise HTTPException(status_code=404, detail="no briefing")
         return html
+
+    @router.get("/home/insights")
+    async def home_insights(record: CurrentSession) -> dict:
+        if insight_panels is None or not agent.config.enable_insight_panel:
+            raise HTTPException(status_code=404, detail="insight panel disabled")
+        s = context(record)
+        panel = await insight_panels.build(backend, s, s.now or datetime.now().astimezone())
+        return panel.model_dump(mode="json")
+
+    @router.post("/home/insights/refresh")
+    async def home_insights_refresh(record: CurrentSession) -> dict:
+        if insight_panels is None or not agent.config.enable_insight_panel:
+            raise HTTPException(status_code=404, detail="insight panel disabled")
+        s = context(record)
+        panel = await insight_panels.build(backend, s, s.now or datetime.now().astimezone(), refresh=True)
+        return panel.model_dump(mode="json")
 
     @router.get("/health")
     async def health() -> dict:

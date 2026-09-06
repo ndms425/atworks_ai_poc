@@ -21,12 +21,18 @@ from atworks_agent import (
 from atworks_agent_runtime import AtworksAgent
 from atworks_host.app import create_app
 from atworks_host.briefing import Briefings
+from atworks_host.insights import InsightPanels
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.reports import Reports
 from atworks_host.scheduler import Scheduler
 
 FIXTURES = Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures"
 SKILLS = Path(__file__).resolve().parents[2] / "atworks-agent" / "skills"
+
+
+async def _fake_narrator(candidates, role, *, notes=None):
+    del candidates, role, notes
+    return []
 
 
 @pytest.fixture
@@ -36,8 +42,9 @@ async def client(tmp_path):
     agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=FakeClient([text_message("ok")]))
     reports = Reports(tmp_path)
     briefings = Briefings(tmp_path / "b", config)
+    insights = InsightPanels(tmp_path / "insights", config, narrator=_fake_narrator)
     app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None, briefings=briefings),
-                      reports=reports, briefings=briefings)
+                      reports=reports, briefings=briefings, insights=insights)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         c.backend = backend
         c.reports = reports
@@ -621,3 +628,39 @@ async def test_briefing_routes(client):
     page = await client.get("/api/atworks/briefings/2026-09-03")
     assert page.status_code == 200 and "briefing-data" in page.text
     assert (await client.get("/api/atworks/briefings/..%2F2026")).status_code in (404, 422)
+
+
+async def test_home_insights_routes(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    headers = {"X-Session-Id": sid}
+
+    r = await client.get("/api/atworks/home/insights", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["role"] in ("developer", "qa", "pm")
+    assert "scope_fallback" in body and isinstance(body["items"], list)
+
+    r2 = await client.post("/api/atworks/home/insights/refresh", headers=headers)
+    assert r2.status_code == 200
+
+
+async def test_home_insights_without_insights_kwarg_returns_404(client_backend):
+    client, _backend = client_backend
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    headers = {"X-Session-Id": sid}
+    assert (await client.get("/api/atworks/home/insights", headers=headers)).status_code == 404
+    assert (await client.post("/api/atworks/home/insights/refresh", headers=headers)).status_code == 404
+
+
+async def test_home_insights_returns_404_when_panel_disabled(tmp_path):
+    config = AtworksAgentConfig(model="m", enable_insight_panel=False)
+    backend = MockAtworks(config, FIXTURES)
+    agent = AtworksAgent(backend=backend, skills_dir=SKILLS, config=config, client=FakeClient([text_message("ok")]))
+    reports = Reports(tmp_path)
+    briefings = Briefings(tmp_path / "b", config)
+    insights = InsightPanels(tmp_path / "insights", config, narrator=_fake_narrator)
+    app = create_app(agent=agent, backend=backend, scheduler=Scheduler(backend, reports, None, briefings=briefings),
+                      reports=reports, briefings=briefings, insights=insights)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        sid = (await c.post("/api/atworks/session")).json()["session_id"]
+        assert (await c.get("/api/atworks/home/insights", headers={"X-Session-Id": sid})).status_code == 404

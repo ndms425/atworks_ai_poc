@@ -38,7 +38,7 @@ def test_build_respects_env_file_atworks_trust_os_ca_0(monkeypatch, tmp_path):
     monkeypatch.setattr("truststore.inject_into_ssl", lambda: calls.append(1))
 
     # Mock out the dependencies that try to access the filesystem
-    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: None)
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: type('MockAgent', (), {'client': None})())
     monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
     monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
     monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
@@ -72,7 +72,7 @@ def test_build_respects_env_file_atworks_trust_os_ca_1(monkeypatch, tmp_path):
     monkeypatch.setattr("truststore.inject_into_ssl", lambda: calls.append(1))
 
     # Mock out the dependencies that try to access the filesystem
-    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: None)
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: type('MockAgent', (), {'client': None})())
     monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
     monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
     monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
@@ -108,7 +108,7 @@ def test_build_deletes_empty_credential_env_vars(monkeypatch, tmp_path):
     monkeypatch.setenv("ATWORKS_TRUST_OS_CA", "0")
 
     # Mock out the dependencies that try to access the filesystem
-    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: None)
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: type('MockAgent', (), {'client': None})())
     monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
     monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
     monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
@@ -146,7 +146,7 @@ def test_build_env_overrides_inherited_shell_variables(monkeypatch, tmp_path):
     monkeypatch.setattr("atworks_host.main.ROOT", tmp_path)
 
     # Mock out the dependencies that try to access the filesystem
-    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: None)
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: type('MockAgent', (), {'client': None})())
     monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
     monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
     monkeypatch.setattr("atworks_host.main.Scheduler", lambda *args, **kwargs: type('Scheduler', (), {})())
