@@ -93,10 +93,17 @@ class AtworksBackend(ABC):
         q.status가 주어지면 각 그룹은 그 판정에 해당하는 건수만 보고한다(non_pass = fail+error).
         q.scope_operator가 주어지면 그 오퍼레이터가 창 안에서 실행한 API로만 좁힌다(아래).
         q.include_run_ids=False면 run_ids를 채우지 않는다(카운터만 쓰는 호출자용).
+        q.order_by는 **어느 limit개를 남길지**만 정한다(개수/라벨/파생 필드는 둘 다 같다):
+        ``"failures"``(기본) = ``(fail+error) DESC, count DESC, key ASC``,
+        ``"transitions"`` = ``transitions DESC, (fail+error) DESC, key ASC``.
 
         REST 구현 의무(scale spec §9): 이 읽기는 **표본이 아니다** — 창 안의 모든 API가 그룹으로
-        나와야 하고(롤업 합산), 정렬은 ``(fail+error) DESC, count DESC, key ASC``, 잘림은 오직
-        ``q.limit``이다. ``run_ids``는 그룹당 최신 50건 이하의 증거 표본일 뿐 모집단이 아니며,
+        나와야 하고(롤업 합산), 정렬은 위 두 순서 중 ``q.order_by``가 고른 것, 잘림은 오직
+        ``q.limit``이다. 정렬·LIMIT는 **집계 질의 안에서** 처리한다(GROUP BY … ORDER BY … LIMIT):
+        전체 그룹을 애플리케이션으로 가져와 정렬하면 셀 축에서 프로젝트의 셀 수만큼 행이 넘어온다.
+        ``"transitions"`` 순서가 없으면 "실패는 드물지만 자주 뒤집히는 셀"은 카운트만 되고
+        (``summarize_insights``) 이름은 끝내 나오지 않는다 — flaky 후보가 요구하는 순서다.
+        ``run_ids``는 그룹당 최신 50건 이하의 증거 표본일 뿐 모집단이 아니며,
         ``api_count``는 한 키가 걸친 API의 **참** 개수(len(run_ids)가 아니다)다.
         ``q.scope_operator``는 **서버 측 조인/필터**로 구현한다 — 오퍼레이터의 API id 목록을 받아
         ``scope_api_ids``에 싣는 방식은 금지다(그 목록엔 상한이 있고, 상한은 곧 커버리지 구멍이다).

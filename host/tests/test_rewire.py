@@ -465,3 +465,45 @@ async def test_briefing_generate_never_lists_runs(tmp_path):
 
     await briefings.generate(backend, SESSION, now)
     assert calls == []
+
+
+# -- fix round 2: transition-ordered flaky candidates -------------------------------------------
+
+
+async def test_panel_names_a_quiet_flaky_cell_a_failure_ranked_cut_never_reaches(tmp_path):
+    """The last saturation in the panel. ``_GROUP_LIMIT`` is 50, so the cell aggregate returns 50
+    of the window's cells; ranked by failure volume those are 50 loud, never-flipping cells and the
+    one cell that actually flips is nowhere in the list -- the Home tile could COUNT it
+    (``summarize_insights``) while the panel below it could not NAME it. With
+    ``order_by="transitions"`` the flaky cell is the first row the panel reads."""
+    now = datetime.now(UTC)
+    config = AtworksAgentConfig(model="m")
+    backend = MockAtworks(config, FIXTURES)
+    session = AtworksSessionContext(session_id="rw", project_id="mes", operator="minseong", role="qa")
+    base = now - timedelta(days=5)
+
+    apis = {f"api-loud-{i:03d}": _api(f"api-loud-{i:03d}", now - timedelta(days=300)) for i in range(60)}
+    apis["api-quiet"] = _api("api-quiet", now - timedelta(days=300))
+    backend.apis = apis
+    runs: dict[str, RunResult] = {}
+    for i in range(60):
+        for k in range(8):      # loud: fails and fails and never flips
+            runs[f"run-l-{i:03d}-{k}"] = _run(f"run-l-{i:03d}-{k}", f"api-loud-{i:03d}",
+                                              base + timedelta(minutes=k), status=RunStatus.FAIL,
+                                              rules=("loud >= 0",), executed_by="minseong")
+    for k, status in enumerate((RunStatus.PASS, RunStatus.FAIL, RunStatus.PASS)):
+        runs[f"run-q-{k}"] = _run(f"run-q-{k}", "api-quiet", base + timedelta(hours=k), status=status,
+                                  rules=("quiet >= 0",) if status is RunStatus.FAIL else (),
+                                  executed_by="minseong")
+    backend.runs = runs
+    since = now - timedelta(days=config.max_aggregate_window_days)
+
+    # the pre-fix read: 50 cells by failure volume, and the flaky one is not among them
+    loud_first = await backend.aggregate_runs(session, AggregateQuery(
+        since=since, group_by="api_env_data", scope_operator="minseong", limit=50))
+    assert len(loud_first) == 50 and not any(g.flaky for g in loud_first)
+    # ...while the tile counted it all along
+    assert (await backend.summarize_insights(session, since, scope_operator="minseong")).flaky == 1
+
+    panel = await InsightPanels(tmp_path, config, narrator=_noop_narrator).build(backend, session, now)
+    assert "flaky_cell:api-quiet|dev|-" in [i.candidate.candidate_id for i in panel.items]

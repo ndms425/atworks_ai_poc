@@ -439,6 +439,136 @@ def test_aggregate_rollups_respects_scope_api_ids_and_since():
         for field in ("count", "fail", "error", "passed", "run_ids", "transitions"):
             assert getattr(got, field) == getattr(want, field), (got.key, field)
 
+# -- Task 8 fix round 2: the rank and the cut live in the SQL -------------------------------------
+
+
+def test_aggregate_rollups_transitions_order_matches_a_python_sort_of_the_oracle():
+    """``order_by="transitions"`` returns exactly what sorting the run-scan oracle's own groups by
+    (transitions desc, fail+error desc, key asc) and cutting to ``limit`` returns. The cut is the
+    only thing the field moves: every counter is identical to the ``failures`` order's."""
+    runs = _load_fixture_runs()
+    apis = _load_fixture_apis()
+    store = _store_with_fixtures()
+    for group_by in GROUP_BY:
+        oracle = _oracle_aggregate_runs(runs, apis, AggregateQuery(group_by=group_by, limit=500), flaky_min=2)
+        expected = sorted(oracle, key=lambda g: (-g.transitions, -(g.fail + g.error), g.key))
+        actual = _rollup_groups(store, apis, AggregateQuery(group_by=group_by, order_by="transitions", limit=500))
+        if group_by in ("env", "http_status", "failed_rule"):
+            # These axes carry the documented per-cell `transitions` delta (aggregate_rollups'
+            # docstring), so only the FAILURES order is oracle-comparable key-for-key. What the
+            # transitions order must still hold here is its own contract: the returned list is
+            # sorted by the rank, and it is the same SET of groups as the failures order.
+            failures = _rollup_groups(store, apis, AggregateQuery(group_by=group_by, limit=500))
+            assert {g.key for g in actual} == {g.key for g in failures}, group_by
+            keys = [(-g.transitions, -(g.fail + g.error), g.key) for g in actual]
+            assert keys == sorted(keys), group_by
+            continue
+        assert [g.key for g in actual] == [g.key for g in expected], group_by
+        for got, want in zip(actual, expected, strict=True):
+            for field in ("count", "fail", "error", "passed", "transitions", "flaky", "run_ids"):
+                assert getattr(got, field) == getattr(want, field), (group_by, got.key, field)
+
+
+def test_transitions_order_reaches_a_quiet_flaky_cell_a_failure_ranked_cut_never_does():
+    """The saturation the tile fix removed, removed from the CANDIDATES too: 60 cells that fail
+    loudly and never flip, plus one cell that flips twice and fails once. ``limit=10`` under
+    ``failures`` cannot see it; under ``transitions`` it is the first row."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    base = now - timedelta(days=2)
+    runs = [RunResult(run_id=f"loud-{i:03d}-{k}", api_id=f"api-loud-{i:03d}", executed_at=base + timedelta(minutes=k),
+                      target_env="dev", status=RunStatus.FAIL, failed_rules=["loud >= 0"])
+            for i in range(60) for k in range(5)]
+    runs += [RunResult(run_id=f"quiet-{k}", api_id="api-quiet", executed_at=base + timedelta(hours=k),
+                       target_env="dev", status=status,
+                       failed_rules=["quiet >= 0"] if status is RunStatus.FAIL else [])
+             for k, status in enumerate((RunStatus.PASS, RunStatus.FAIL, RunStatus.PASS))]
+    store.replace_all_runs(runs)
+    since = now - timedelta(days=30)
+
+    def keys(order_by: str) -> list[str]:
+        return [g.key for g in store.aggregate_rollups(
+            AggregateQuery(since=since, group_by="api_env_data", order_by=order_by, limit=10),
+            flaky_min=2, apis={}, briefing_tz="Asia/Seoul")]
+
+    assert "api-quiet|dev|-" not in keys("failures")
+    assert keys("transitions")[0] == "api-quiet|dev|-"
+
+
+def test_the_sql_key_tie_break_is_the_python_one_for_tied_groups():
+    """Every group tied on failures and count, so the rank falls through to the KEY -- which is now
+    SQLite's BINARY collation instead of python's string compare, on a key the cell axis builds by
+    concatenation. The labels are chosen to separate the two collations if they ever differ
+    (case, ``/`` vs letters, a non-ASCII code point)."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    base = now - timedelta(days=1)
+    labels = ["a", "A", "z", "Z", "가", "basic", "b/asic", "b-asic", "b_asic", "0"]
+    runs = [RunResult(run_id=f"tie-{i}", api_id=f"api-{i % 3:03d}", executed_at=base + timedelta(minutes=i),
+                      target_env=("dev", "stg")[i % 2], test_data_label=label, status=RunStatus.FAIL,
+                      failed_rules=["x >= 0"])
+            for i, label in enumerate(labels)]
+    store.replace_all_runs(runs)
+    since = now - timedelta(days=30)
+    apis: dict[str, ApiSpec] = {}
+    for order_by in ("failures", "transitions"):
+        groups = store.aggregate_rollups(
+            AggregateQuery(since=since, group_by="api_env_data", order_by=order_by, limit=500),
+            flaky_min=2, apis=apis, briefing_tz="Asia/Seoul")
+        expected = aggregate(runs, apis, "api_env_data", flaky_min_transitions=2)
+        # every group is one failing run, so both orders collapse onto the key tie-break
+        assert [g.key for g in groups] == [g.key for g in expected], order_by
+        assert [g.count for g in groups] == [g.count for g in expected], order_by
+
+
+def test_the_unbound_test_data_label_is_one_group_in_sql_and_in_python():
+    """The ``''`` sentinel: ``_label_in`` writes '' where the run carried None, and an older row
+    may still hold NULL. All of NULL / '' / an explicit '-' are ONE cell whose key ends in ``|-``
+    -- the SQL key expression and ``aggregation._keys`` must agree, or the SQL-side GROUP BY would
+    split a cell python merges and the ranked cut would hand back a duplicate key."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    base = now - timedelta(days=1)
+    runs = [RunResult(run_id=f"s-{i}", api_id="api-000", executed_at=base + timedelta(minutes=i),
+                      target_env="dev", test_data_label=label, status=RunStatus.FAIL,
+                      failed_rules=["x >= 0"])
+            for i, label in enumerate([None, "", "-"])]
+    store.replace_all_runs(runs)
+    # and one row left NULL by a pre-sentinel writer
+    store.conn().execute("UPDATE rollup_day SET test_data_label = NULL WHERE test_data_label = ''")
+    store.conn().commit()
+    groups = store.aggregate_rollups(
+        AggregateQuery(since=now - timedelta(days=30), group_by="api_env_data", limit=500),
+        flaky_min=2, apis={}, briefing_tz="Asia/Seoul")
+    assert [(g.key, g.count) for g in groups] == [("api-000|dev|-", 3)]
+
+
+def test_only_limit_rows_ever_cross_out_of_sql(monkeypatch):
+    """The point of the round: with 200 groups in the window and ``limit=5``, SQL returns 5 rows.
+    Before, every group in the window was fetched and ranked in python -- one accumulator per cell
+    in the project on a real dataset."""
+    now = datetime(2026, 9, 3, 12, tzinfo=KST)
+    store = Store(":memory:")
+    base = now - timedelta(days=1)
+    store.replace_all_runs([
+        RunResult(run_id=f"r-{i:03d}", api_id=f"api-{i:03d}", executed_at=base + timedelta(minutes=i),
+                  target_env="dev", status=RunStatus.FAIL, failed_rules=["x >= 0"])
+        for i in range(200)])
+    sizes: list[int] = []
+    original = Store._tuples
+
+    def spy(self, sql, params):
+        rows = original(self, sql, params)
+        sizes.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(Store, "_tuples", spy)
+    groups = store.aggregate_rollups(AggregateQuery(since=now - timedelta(days=30), group_by="api", limit=5),
+                                     flaky_min=2, apis={}, briefing_tz="Asia/Seoul")
+    assert len(groups) == 5
+    assert sizes == [5]
+
+
 
 def test_http_status_counts_is_added_and_refilled_on_a_pre_task_8_store(tmp_path):
     """A store written before Task 8 has a rollup_day without http_status_counts. CREATE TABLE IF

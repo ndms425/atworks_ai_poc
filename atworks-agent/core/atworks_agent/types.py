@@ -63,6 +63,14 @@ class AggregateQuery(BaseModel):
     # Evidence ids cost one indexed query per returned group (api/env/cell axes) or one bounded
     # scan (the map axes). A caller that only wants the counters sets this False and pays neither.
     include_run_ids: bool = True
+    # Which `limit` groups the backend keeps (Task 8 fix round 2). The cut is the ONLY thing this
+    # field moves -- counts, labels and derived fields are identical either way.
+    #   "failures"    -- (fail+error) desc, count desc, key asc: the triage order, the default.
+    #   "transitions" -- transitions desc, (fail+error) desc, key asc: the flaky_v1 order. A cell
+    #     that flips pass<->non-pass but fails rarely is exactly what flaky_v1 names, and under
+    #     "failures" it sits behind every louder cell in the project -- so a panel that ranks by
+    #     failure volume can COUNT a quiet flaky cell (summarize_insights) but never NAME it.
+    order_by: Literal["failures", "transitions"] = "failures"
     limit: int = Field(default=50, ge=1, le=500)
 
 

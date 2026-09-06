@@ -34,6 +34,10 @@ SAFE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Panel read bounds (see InsightPanels._inputs): groups per aggregate axis, staged jobs scanned.
 _GROUP_LIMIT = 50
+# top_failed_rule takes the 3 highest-`fail` rules, but the backend ranks by (fail + error) --
+# so a rule with many errors can outrank one with more plain failures. `limit=3` would let that
+# reorder which rules the panel names; 10 gives the re-rank room without paying for 50.
+_RULE_LIMIT = 10
 _JOB_LIMIT = 200
 
 Narrator = Callable[..., Awaitable[list[InsightNarrative]]]
@@ -89,21 +93,27 @@ class InsightPanels:
         got a panel over 100 alphabetically-first ones. ``ScopeSummary`` is still read, for the
         true ``scope_size``, the displayed id sample, and the project-wide fallback decision.
 
-        Remaining bounds, documented rather than silent: the three aggregate reads take the top
-        ``_GROUP_LIMIT`` groups by (fail+error, count), the same order the panel ranks by;
-        regression candidates come from the watermark table filtered to APIs whose FIRST failure
-        falls inside the window, then ranked NEWEST-BREAK-FIRST before that same cut — an
-        alphabetical cut would have hidden the freshest regression behind ``api-000…``."""
+        Remaining bounds, documented rather than silent: each aggregate read takes the top
+        ``_GROUP_LIMIT`` groups **in the order that candidate needs** — flaky cells by
+        ``transitions`` (Task 8 fix round 2), everything else by failure volume. Ranking flaky
+        candidates by failure volume was the last saturation left in this panel: a cell that flips
+        pass↔non-pass but fails rarely is precisely what flaky_v1 names, and it sat behind tens of
+        thousands of louder cells, so ``summarize_insights`` could COUNT it on the Home tile while
+        the panel could never NAME it. Regression candidates come from the watermark table filtered
+        to APIs whose FIRST failure falls inside the window, then ranked NEWEST-BREAK-FIRST before
+        that same cut — an alphabetical cut would have hidden the freshest regression behind
+        ``api-000…``."""
         cfg = self.config
         since = now - timedelta(days=cfg.max_aggregate_window_days)
 
-        def q(group_by: str, api_ids: list[str] | None = None) -> AggregateQuery:
+        def q(group_by: str, api_ids: list[str] | None = None, *,
+              order_by: str = "failures", limit: int = _GROUP_LIMIT) -> AggregateQuery:
             # An explicit id list makes the operator predicate redundant *when the ids themselves
             # came from an operator-scoped read* (the suspects below did), and re-deriving it costs
             # a second index decision on every query -- 146ms of the panel on the mid bench set.
             return AggregateQuery(since=since, group_by=group_by, scope_api_ids=api_ids,
                                   scope_operator=None if api_ids is not None else scope_operator,
-                                  limit=_GROUP_LIMIT)
+                                  order_by=order_by, limit=limit)
 
         # regression_suspect: exact and unsampled -- one indexed read of api_watermark gives every
         # API that broke inside the window, and spec §3's rule picks the suspects out of it.
@@ -117,19 +127,28 @@ class InsightPanels:
         suspects.sort(key=lambda w: (w.first_non_pass_at, w.api_id), reverse=True)
         suspect_ids = [w.api_id for w in suspects][:_GROUP_LIMIT]
         groups_by_api = await backend.aggregate_runs(session, q("api", suspect_ids)) if suspect_ids else []
-        cells = await backend.aggregate_runs(session, q("api_env_data"))
-        groups_by_rule = await backend.aggregate_runs(session, q("failed_rule"))
+        cells = await backend.aggregate_runs(session, q("api_env_data", order_by="transitions"))
+        groups_by_rule = await backend.aggregate_runs(session, q("failed_rule", limit=_RULE_LIMIT))
 
         # env_divergence reads the latest state per cell, and it is the one input that cannot be
         # answered by a count: it needs the actual latest row of EVERY env of an API to compare
         # them. Reading the operator's whole scope here would materialize one CellState per cell in
-        # a 16k-API scope (19k rows / 220ms on the reduced bench set alone) for a single Home tile.
-        # So this read stays keyed to the APIs the window's own top groups named -- a
-        # relevance-ranked bound (a diverging API has a non-pass latest status, so its cell carries
-        # fail/error and ranks high) rather than the alphabetical one fix (A) removed, and the same
-        # bound the project-wide fallback has always used. The groups it reads from are themselves
-        # operator-scoped, so the scope is still exact; only the per-tile breadth is bounded.
-        cell_scope = sorted({g.key.split("|", 2)[0] for g in cells} | set(suspect_ids))
+        # a 16k-API scope (19k rows / 220ms on the reduced bench set alone) for a single Home tile;
+        # a "which APIs have >1 distinct latest status" prefilter is no bound at all (7,978 APIs on
+        # the mid bench set). So this read stays keyed to the APIs the window's own top groups
+        # named -- a relevance-ranked bound rather than the alphabetical one fix (A) removed.
+        #
+        # It takes them from ALL THREE reads, not just the cells: the cell axis is now ranked by
+        # transitions, and a permanently diverging API (dev passes, stg has failed for weeks) has
+        # NO transitions at all. The two failure-ranked reads are where that API shows up -- the
+        # regression suspects, and the api_sample of the top failing rules -- and both were already
+        # fetched, so the breadth costs no extra query. Every source is itself operator-scoped, so
+        # the scope stays exact; only the per-tile breadth is bounded.
+        cell_scope = sorted(
+            {g.key.split("|", 2)[0] for g in cells}
+            | set(suspect_ids)
+            | {api_id for g in groups_by_rule for api_id in (g.api_sample or ())}
+        )
         current = await backend.current_state(session, scope_api_ids=cell_scope) if cell_scope else []
 
         jobs = (await backend.all_jobs(session, status="staged", limit=_JOB_LIMIT)).items

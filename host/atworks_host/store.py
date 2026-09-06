@@ -26,7 +26,6 @@ ordinary indexed text predicates.
 """
 from __future__ import annotations
 
-import heapq
 import json
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -143,6 +142,19 @@ CREATE TABLE IF NOT EXISTS rollup_day (
     PRIMARY KEY (day, api_id, target_env, test_data_label)
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_day_day ON rollup_day(day);
+-- The whole-day fold (`Store._rollup_arm`) reads the group key AND every counter of every rollup
+-- row in the window, so this index carries them all: on the api/env/cell axes SQLite answers the
+-- aggregate from an index-only scan instead of one table seek per in-window row. Measured on the
+-- 450k-run bench set (225,270 rollup rows, 73,926 of them in a 30-day window): group_by=api
+-- 116ms -> 59ms, group_by=api_env_data 246ms -> 117ms.
+-- `idx_rollup_day_day` above STAYS: the two map axes read `failed_rule_counts` /
+-- `http_status_counts`, which no reasonable index can cover, and there the planner rightly wants
+-- the NARROW day index -- forced onto the wide one (or onto the PK autoindex, its fallback when
+-- the narrow one is gone) group_by=http_status measured 151ms -> 197ms. Two day-leading indexes,
+-- one per shape of read.
+CREATE INDEX IF NOT EXISTS idx_rollup_day_covering ON rollup_day(
+    day, api_id, target_env, test_data_label,
+    "count", "pass", fail, error, transitions, p95_duration_ms);
 CREATE INDEX IF NOT EXISTS idx_rollup_day_api_day ON rollup_day(api_id, day);
 
 CREATE TABLE IF NOT EXISTS api_watermark (
@@ -161,6 +173,13 @@ CREATE TABLE IF NOT EXISTS operator_api (
     run_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (operator_id, api_id)
 );
+-- The operator scope predicate (`_operator_scope_clause`) is
+-- `api_id IN (SELECT api_id FROM operator_api WHERE operator_id = ? AND last_executed_at >= ?)`,
+-- and it rides EVERY scoped read. Without this index the PK autoindex gives the operator's rows
+-- but `last_executed_at` costs a table seek per row (19,878 of them for the bench set's busiest
+-- operator, on every scoped query); with it the subquery is one covering range scan.
+-- Measured: `operator_scope_summary` 53ms -> 8ms, `watermarks(scope_operator=…)` 83ms -> 32ms.
+CREATE INDEX IF NOT EXISTS idx_operator_api_window ON operator_api(operator_id, last_executed_at);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,16 +253,44 @@ _MAP_COLUMN = {"failed_rule": "failed_rule_counts", "http_status": "http_status_
 _COUNT, _PASSED, _FAIL, _ERROR, _TRANSITIONS, _P95, _API_COUNT = range(7)
 
 
-def _acc_for(acc: dict[str, list], key: str) -> list:
-    row = acc.get(key)
-    if row is None:
-        row = [0, 0, 0, 0, 0, None, None]
-        acc[key] = row
-    return row
+def _rank_exprs(q: AggregateQuery) -> tuple[str, str]:
+    """``(ORDER BY, the HAVING count expression)`` for ``q``, over the outer SELECT's aliases
+    (``c`` count, ``p`` passed, ``f`` fail, ``e`` error, ``t`` transitions).
 
+    This is the rank that used to run in python over EVERY group in the window; it now sits next
+    to the GROUP BY, so only ``q.limit`` rows ever cross into python (the cell axis reaches one
+    group per (api, env, data) in the project -- 62,748 of them for one operator on the 450k-run
+    bench set). ``q.status`` picks which counters the rank reads, exactly as ``_counts`` does:
+    a status filter leaves a single-verdict population, so its transition count is 0 by
+    construction (``_group_from_acc``) and the ``transitions`` order degenerates into the
+    ``failures`` one -- the same thing the python rank did.
 
-def _max_or_none(a: int | None, b: int | None) -> int | None:
-    return b if a is None else (a if b is None else max(a, b))
+    ``HAVING`` drops the zero-count groups a status filter can produce. Those always sorted LAST
+    in the python rank (a 0 in the leading term, then a 0 count), so they were only ever kept when
+    fewer than ``limit`` real groups existed -- dropping them in SQL returns the same groups, and
+    frees the slot for a real one instead of a placeholder that was trimmed after the cut.
+
+    A term that is constant-zero for every group under this query is written as ``None`` and left
+    OUT of the ORDER BY rather than emitted as a literal ``0`` -- a bare integer literal in an
+    SQLite ORDER BY is a column ORDINAL, not a value. Dropping it is exactly equivalent: a
+    constant leading term ranks nothing.
+    """
+    status = q.status
+    failures: str | None
+    if status == "pass":
+        failures, count = None, "SUM(p)"
+    elif status == "fail":
+        failures = count = "SUM(f)"
+    elif status == "error":
+        failures = count = "SUM(e)"
+    elif status == "non_pass":
+        failures = count = "SUM(f) + SUM(e)"
+    else:
+        failures, count = "SUM(f) + SUM(e)", "SUM(c)"
+    transitions = None if status else "SUM(t)"
+    terms = [transitions, failures] if q.order_by == "transitions" else [failures, count]
+    order = "".join(f"{term} DESC, " for term in terms if term is not None) + "gkey ASC"
+    return order, count
 
 
 def _operator_scope_clause(
@@ -915,31 +962,17 @@ class Store:
           ``first_non_pass_at`` must fall at or after ``q.since``, the same predicate
           ``summarize_insights`` counts with -- one definition of "regression suspect", not two.
         * the window is exact: whole days come from the rollup, the partial first/last day from an
-          indexed GROUP BY over ``runs`` (pure SQL, no RunResult is ever built).
+          indexed read of ``runs`` in the SAME statement (pure SQL, no RunResult is ever built).
+
+        Task 8 fix round 2: the rank and the cut are **in the SQL**. One statement per call --
+        a ``UNION ALL`` of the rollup arm and the (at most two) edge arms, one GROUP BY over it,
+        ``ORDER BY`` per ``q.order_by`` and ``LIMIT q.limit`` -- so python receives ``q.limit``
+        rows instead of one accumulator per group in the window.
         """
         interior, edges = _window_partitions(q.since, q.until, briefing_tz)
-        acc: dict[str, list] = {}
-        if interior is not None:
-            self._fold_rollup_days(acc, q, interior)
-        for lo, hi in edges:
-            self._fold_edge_runs(acc, q, lo, hi)
-        # Rank on plain lists and keep only the top `limit`, THEN build models: the cell axis can
-        # reach one accumulator per (api, env, data) in the project (73k on the mid-scale set),
-        # and both a full sort and a RunGroup per accumulator cost more than the SQL pass itself.
-        # A zero-count group (possible only under a status filter) always sorts last, so trimming
-        # them after the heap selection cannot drop a real group.
-        status = q.status
-
-        def rank(item: tuple[str, list]) -> tuple[int, int, str]:
-            count, _passed, fail, error = _counts(item[1], status)
-            return (-(fail + error), -count, item[0])
-
-        top = heapq.nsmallest(q.limit, acc.items(), key=rank)
-        groups = [
-            _group_from_acc(key, row, counts, q, apis, flaky_min)
-            for key, row, counts in ((k, r, _counts(r, status)) for k, r in top)
-            if counts[0] > 0
-        ]
+        arms = [self._rollup_arm(q, interior)] if interior is not None else []
+        arms += [self._edge_arm(q, lo, hi) for lo, hi in edges]
+        groups = self._top_groups(q, arms, apis, flaky_min)
         if q.include_run_ids:
             self._fill_run_ids(groups, q)
         self._fill_derived(groups, q, apis)
@@ -977,93 +1010,106 @@ class Store:
         cursor.row_factory = None
         return cursor.execute(sql, params).fetchall()
 
-    def _fold_rollup_days(self, acc: dict[str, list], q: AggregateQuery, interior: tuple[str | None, str | None]) -> None:
+    def _rollup_arm(self, q: AggregateQuery, interior: tuple[str | None, str | None]) -> tuple[str, list]:
+        """The whole local days of the window, shaped to the union's column list
+        (``gkey, c, p, f, e, t, q95[, n]``).
+
+        The api/env/cell axes emit one raw rollup ROW and let the outer GROUP BY do all the work:
+        the cell axis has roughly one group per row anyway, so grouping twice only adds a second
+        temp b-tree (measured 239ms -> 273ms on the mid bench set). The two map axes GROUP HERE:
+        their key lives inside a JSON column, so ``json_each`` multiplies every rollup row by its
+        key count -- a quarter-million tuples on the mid set -- which collapse to a dozen groups.
+        Grouping them in the arm keeps that collapse where it was before the union, and keeps
+        ``api_count`` what it always was: ``COUNT(DISTINCT api_id)`` over the WHOLE DAYS, carried
+        out as ``n`` and merged with MAX (an edge day contributes no api_count, as before)."""
         clauses, params = self._rollup_scope(q, interior)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         if q.group_by in _MAP_COLUMN:
             column = _MAP_COLUMN[q.group_by]
-            rows = self._tuples(
-                "SELECT je.key AS gkey, "
-                "SUM(json_extract(je.value, '$.count')), "
-                "SUM(json_extract(je.value, '$.fail')), "
-                "SUM(json_extract(je.value, '$.error')), "
-                "MAX(p95_duration_ms), COUNT(DISTINCT api_id) "
-                f"FROM rollup_day, json_each(rollup_day.{column}) je {where_sql} GROUP BY gkey",
-                params,
-            )
-            for key, count, fail, error, p95, api_count in rows:
-                count, fail, error = count or 0, fail or 0, error or 0
-                cell = acc.get(key)
-                if cell is None:
-                    # [count, passed, fail, error, transitions, p95, api_count] -- see _COUNT/_P95
-                    acc[key] = [count, count - fail - error, fail, error, 0, p95, api_count or 0]
-                    continue
-                cell[_COUNT] += count
-                cell[_PASSED] += count - fail - error
-                cell[_FAIL] += fail
-                cell[_ERROR] += error
-                cell[_P95] = _max_or_none(cell[_P95], p95)
-                cell[_API_COUNT] = max(cell[_API_COUNT] or 0, api_count or 0)
-            return
-        rows = self._tuples(
-            f"SELECT {_ROLLUP_KEY_SQL[q.group_by]} AS gkey, "
-            'SUM("count"), SUM("pass"), SUM(fail), SUM(error), SUM(transitions), MAX(p95_duration_ms) '
-            f"FROM rollup_day {where_sql} GROUP BY gkey",
-            params,
-        )
-        for key, count, passed, fail, error, transitions, p95 in rows:
-            cell = acc.get(key)
-            if cell is None:
-                acc[key] = [count or 0, passed or 0, fail or 0, error or 0, transitions or 0, p95, None]
-                continue
-            cell[_COUNT] += count or 0
-            cell[_PASSED] += passed or 0
-            cell[_FAIL] += fail or 0
-            cell[_ERROR] += error or 0
-            cell[_TRANSITIONS] += transitions or 0
-            cell[_P95] = _max_or_none(cell[_P95], p95)
+            count, fail, error = (f"json_extract(je.value, '$.{name}')" for name in ("count", "fail", "error"))
+            return (
+                f"SELECT je.key AS gkey, SUM({count}) AS c, SUM({count} - {fail} - {error}) AS p, "
+                f"SUM({fail}) AS f, SUM({error}) AS e, 0 AS t, MAX(p95_duration_ms) AS q95, "
+                "COUNT(DISTINCT api_id) AS n "
+                f"FROM rollup_day, json_each(rollup_day.{column}) je {where_sql} GROUP BY gkey"
+            ), params
+        return (
+            f'SELECT {_ROLLUP_KEY_SQL[q.group_by]} AS gkey, "count" AS c, "pass" AS p, fail AS f, '
+            f"error AS e, transitions AS t, p95_duration_ms AS q95 FROM rollup_day {where_sql}"
+        ), params
 
-    def _fold_edge_runs(self, acc: dict[str, list], q: AggregateQuery, lo: datetime, hi: datetime) -> None:
-        """The partial day(s) a window starts/ends inside, counted EXACTLY from ``runs`` with an
-        indexed range predicate -- one grouped SQL statement, no RunResult built. This is what
-        keeps a 09:00→09:00 briefing window from being rounded out to two whole local days."""
+    def _edge_arm(self, q: AggregateQuery, lo: datetime, hi: datetime) -> tuple[str, list]:
+        """One row per RUN of a partial day the window starts/ends inside, in the same column
+        shape -- counted exactly from ``runs`` with an indexed range predicate, no RunResult built.
+        This is what keeps a 09:00→09:00 briefing window from being rounded out to two whole local
+        days. Edge rows carry no transitions and no p95 (the rollup owns both).
+
+        ``failed_rule`` needs both halves of ``aggregation._keys`` -- one row per DISTINCT rule
+        name of a non-pass run, and the synthetic ``(error) HTTP …`` key for a non-pass run that
+        named no rule. ``LEFT JOIN json_each`` gives exactly that in one pass: a run with an empty
+        (or NULL) ``failed_rules`` produces a single NULL-padded row, which the COALESCE turns into
+        the synthetic key, and ``SELECT DISTINCT`` over ``(key, run_id)`` collapses a rule the run
+        listed twice.
+
+        Map-axis edges group in the arm, for the reason ``_rollup_arm`` gives, and report ``n``
+        (api_count) as 0: an edge day never contributed to that figure and still does not."""
         clauses, params = self._runs_predicates(
             since=lo, until=hi, api_ids=q.scope_api_ids,
             scope_operator=q.scope_operator, scope_since=q.since,
         )
         where_sql = " AND ".join(clauses)
-        counters = "COUNT(*) AS c, SUM(status = 'fail') AS f, SUM(status = 'error') AS e"
+        verdicts = "(status = 'pass') AS p, (status = 'fail') AS f, (status = 'error') AS e"
+        sums = "SUM(status = 'fail') AS f, SUM(status = 'error') AS e"
         if q.group_by == "failed_rule":
-            rows = self._conn.execute(
-                "SELECT je.value AS gkey, COUNT(DISTINCT runs.run_id) AS c, "
-                "COUNT(DISTINCT CASE WHEN status = 'fail' THEN runs.run_id END) AS f, "
-                "COUNT(DISTINCT CASE WHEN status = 'error' THEN runs.run_id END) AS e "
-                f"FROM runs, json_each(runs.failed_rules) je WHERE {where_sql} AND status != 'pass' GROUP BY gkey",
-                params,
-            ).fetchall()
-            rows = [*rows, *self._conn.execute(
-                "SELECT '(error) HTTP ' || COALESCE(CAST(http_status AS TEXT), '(none)') AS gkey, "
-                f"{counters} FROM runs WHERE {where_sql} AND status != 'pass' "
-                "AND json_array_length(COALESCE(failed_rules, '[]')) = 0 GROUP BY gkey",
-                params,
-            ).fetchall()]
-        elif q.group_by == "http_status":
-            rows = self._conn.execute(
-                "SELECT COALESCE(CAST(http_status AS TEXT), '(none)') AS gkey, "
-                f"{counters} FROM runs WHERE {where_sql} GROUP BY gkey", params,
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                f"SELECT {_RUNS_KEY_SQL[q.group_by]} AS gkey, {counters} "
-                f"FROM runs WHERE {where_sql} GROUP BY gkey", params,
-            ).fetchall()
+            return (
+                "SELECT gkey, COUNT(*) AS c, 0 AS p, SUM(st = 'fail') AS f, SUM(st = 'error') AS e, "
+                "0 AS t, NULL AS q95, 0 AS n "
+                "FROM (SELECT DISTINCT COALESCE(je.value, '(error) HTTP ' || "
+                "COALESCE(CAST(runs.http_status AS TEXT), '(none)')) AS gkey, runs.run_id AS rid, "
+                "runs.status AS st FROM runs "
+                f"LEFT JOIN json_each(runs.failed_rules) je WHERE {where_sql} AND status != 'pass') "
+                "GROUP BY gkey"
+            ), params
+        if q.group_by == "http_status":
+            return (
+                "SELECT COALESCE(CAST(http_status AS TEXT), '(none)') AS gkey, COUNT(*) AS c, "
+                f"SUM(status = 'pass') AS p, {sums}, 0 AS t, NULL AS q95, 0 AS n "
+                f"FROM runs WHERE {where_sql} GROUP BY gkey"
+            ), params
+        return (
+            f"SELECT {_RUNS_KEY_SQL[q.group_by]} AS gkey, 1 AS c, {verdicts}, 0 AS t, "
+            f"NULL AS q95 FROM runs WHERE {where_sql}"
+        ), params
+
+    def _top_groups(
+        self, q: AggregateQuery, arms: Sequence[tuple[str, list]], apis: Mapping[str, ApiSpec],
+        flaky_min: int,
+    ) -> list[RunGroup]:
+        """Fold every arm in ONE statement and let SQLite do the rank and the cut. Python sees
+        ``q.limit`` rows; the counters it reads out of them still go through ``_counts`` /
+        ``_group_from_acc``, so a status filter means the same thing here as everywhere else."""
+        is_map = q.group_by in _MAP_COLUMN
+        order_sql, count_sql = _rank_exprs(q)
+        columns = "SUM(c) AS c, SUM(p) AS p, SUM(f) AS f, SUM(e) AS e, SUM(t) AS t, MAX(q95) AS q95"
+        if is_map:
+            # api_count comes pre-counted per arm (COUNT(DISTINCT api_id) over the whole days,
+            # 0 on an edge) and merges with MAX -- exactly the pre-union fold's rule.
+            columns += ", MAX(n) AS n"
+        union = " UNION ALL ".join(sql for sql, _ in arms)
+        params = [value for _, arm_params in arms for value in arm_params]
+        rows = self._tuples(
+            f"SELECT gkey, {columns} FROM ({union}) GROUP BY gkey "
+            f"HAVING {count_sql} > 0 ORDER BY {order_sql} LIMIT ?",
+            [*params, q.limit],
+        )
+        groups: list[RunGroup] = []
         for row in rows:
-            cell = _acc_for(acc, row["gkey"])
-            count, fail, error = row["c"] or 0, row["f"] or 0, row["e"] or 0
-            cell[_COUNT] += count
-            cell[_FAIL] += fail
-            cell[_ERROR] += error
-            cell[_PASSED] += count - fail - error
+            key, count, passed, fail, error, transitions, p95 = row[:7]
+            # [count, passed, fail, error, transitions, p95, api_count] -- see _COUNT/_API_COUNT
+            acc = [count or 0, passed or 0, fail or 0, error or 0, transitions or 0, p95,
+                   (row[7] or 0) if is_map else None]
+            groups.append(_group_from_acc(key, acc, _counts(acc, q.status), q, apis, flaky_min))
+        return groups
 
     def _fill_run_ids(self, groups: list[RunGroup], q: AggregateQuery) -> None:
         """Newest-first run ids (<= MAX_RUN_IDS) for each returned group. The api/env/cell axes get

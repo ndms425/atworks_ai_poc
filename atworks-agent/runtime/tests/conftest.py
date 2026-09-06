@@ -115,7 +115,12 @@ class InMemoryBackend(AtworksBackend):
                 and (q.status is None or (q.status == "non_pass" and r.status.value != "pass")
                      or r.status.value == q.status)]
         groups = aggregate(rows, self.apis, q.group_by,
-                           flaky_min_transitions=self._config.flaky_min_transitions)[: q.limit]
+                           flaky_min_transitions=self._config.flaky_min_transitions)
+        if q.order_by == "transitions":
+            # `aggregate` returns the "failures" order; re-rank for the other one (Task 8 fix
+            # round 2). The cut is the ONLY thing order_by moves, so it happens before [:limit].
+            groups.sort(key=lambda g: (-g.transitions, -(g.fail + g.error), g.key))
+        groups = groups[: q.limit]
         if not q.include_run_ids:
             for g in groups:
                 g.run_ids = []
