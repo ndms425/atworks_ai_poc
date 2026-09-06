@@ -89,6 +89,49 @@ async def test_session_and_reads(client):
     assert (await client.get("/api/atworks/jobs", headers=h)).json()["jobs"] == []
 
 
+async def test_session_binds_operator_and_role(client):
+    r = await client.post("/api/atworks/session", json={"operator_id": "jihoon"})
+    body = r.json()
+    assert body["role"] == "qa"
+    assert body["operator"] == "jihoon"
+    assert body["operator_name"] == "박지훈"
+
+
+async def test_session_default_operator_and_unknown_400(client):
+    default = await client.post("/api/atworks/session", json={})
+    assert default.json()["operator"] == "minseong"
+    assert default.json()["role"] == "developer"
+    unknown = await client.post("/api/atworks/session", json={"operator_id": "nobody"})
+    assert unknown.status_code == 400
+
+
+async def test_session_with_no_body_defaults_to_minseong(client):
+    r = await client.post("/api/atworks/session")
+    assert r.json()["operator"] == "minseong"
+    assert r.json()["role"] == "developer"
+
+
+async def test_operators_route_lists_three(client):
+    r = await client.get("/api/atworks/operators")
+    assert r.status_code == 200
+    ids = {o["operator_id"] for o in r.json()["operators"]}
+    assert ids == {"minseong", "jihoon", "sora"}
+
+
+async def test_context_carries_role_and_scope(client):
+    from atworks_agent import AtworksSessionContext
+
+    started = await client.post("/api/atworks/session", json={"operator_id": "minseong"})
+    sid = started.json()["session_id"]
+    session = AtworksSessionContext(session_id=sid, project_id="mes-demo", operator="minseong", role="developer")
+    ctx = await client.backend.get_context(session)
+    assert ctx["operator"] == "minseong"
+    assert ctx["operator_role"] == "developer"
+    fixture_apis_minseong_ran = {"api-001", "api-003", "api-004", "api-005", "api-009"}
+    assert set(ctx["scope_api_ids"])
+    assert set(ctx["scope_api_ids"]) <= fixture_apis_minseong_ran
+
+
 async def test_chat_streams_sse_with_attachments(client):
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post("/api/atworks/chat", headers={"X-Session-Id": sid},

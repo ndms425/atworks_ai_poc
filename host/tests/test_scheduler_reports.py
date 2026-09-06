@@ -297,6 +297,9 @@ class RecordingBackend(AtworksBackend):
         self.calls.append("add_guardrail_note")
         return self.job
 
+    async def list_operators(self, session):
+        return []
+
 
 async def test_two_schedules_on_one_job_run_independently(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)

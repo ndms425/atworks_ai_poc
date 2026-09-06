@@ -48,6 +48,27 @@ def test_dynamic_context_without_attachments_has_no_block():
     assert "<attached-result-items>" not in build_dynamic_context(atworks_context=None, attached_items=[], now=None)
 
 
+def test_dynamic_context_renders_operator_line_only_when_present():
+    without = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[])
+    assert "operator_line" not in without and "APIs you ran" not in without
+
+    with_role = build_dynamic_context(
+        atworks_context={
+            "project": "p", "operator": "minseong", "operator_role": "developer",
+            "scope_api_ids": ["api-001", "api-002"],
+        },
+        attached_items=[],
+    )
+    assert "operator: minseong (developer)" in with_role
+    assert "scope: 2 APIs you ran" in with_role
+
+
+def test_dynamic_context_byte_stable_without_operator_role():
+    base = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[])
+    same = build_dynamic_context(atworks_context={"project": "p"}, attached_items=[])
+    assert base == same
+
+
 def test_static_prompt_states_the_matrix_contract():
     text = build_static_system(AtworksAgentConfig(model="m"), SKILLS)
     assert "several target environments, several schedules and several test-data sets" in text

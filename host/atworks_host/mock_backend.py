@@ -21,6 +21,7 @@ from atworks_agent import (
     JobDraft,
     JobLedger,
     JobSpec,
+    OperatorProfile,
     ProfileDraft,
     ProfileLedger,
     RuleDraft,
@@ -34,6 +35,7 @@ from atworks_agent import (
     ValidationRule,
     enforce_execution_matrix,
     evaluate,
+    operator_scope,
     resolve_select_where,
 )
 from atworks_agent.types import Binding
@@ -97,6 +99,16 @@ class MockAtworks(AtworksBackend):
             row["run_id"]: RunResult(**row) for row in json.loads((fixtures_dir / "runs.json").read_text(encoding="utf-8"))
         }
         self._run_seq = len(self.runs)
+        self.operators: dict[str, OperatorProfile] = {
+            row["operator_id"]: OperatorProfile(**row)
+            for row in json.loads((fixtures_dir / "operators.json").read_text(encoding="utf-8"))
+        }
+
+    def operator_profile(self, operator_id: str) -> OperatorProfile | None:
+        return self.operators.get(operator_id)
+
+    async def list_operators(self, session) -> list[OperatorProfile]:
+        return list(self.operators.values())
 
     async def search_apis(self, session, query="", updated_after=None, group=None, limit=20):
         q = (query or "").lower()
@@ -354,5 +366,9 @@ class MockAtworks(AtworksBackend):
     async def get_context(self, session):
         fails = len(self._filter_runs(None, "fail", None))
         errors = len(self._filter_runs(None, "error", None))
+        now = session.local_now() or datetime.now(UTC)
+        scope = operator_scope(list(self.runs.values()), session.operator, self._config.scope_window_days, now)
         return {"project": session.project_id, "allowed_targets": list(self._config.allowed_target_envs),
-                "recent_counts": {"fail": fails, "error": errors, "pending_jobs": len(self.ledger.pending())}}
+                "recent_counts": {"fail": fails, "error": errors, "pending_jobs": len(self.ledger.pending())},
+                "operator": session.operator, "operator_role": session.role,
+                "scope_api_ids": sorted(scope)[:20]}

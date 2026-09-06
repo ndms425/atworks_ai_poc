@@ -38,7 +38,7 @@ from .sessions import SessionRecord, SessionStore, session_dependency
 from .streaming import append_user_turn, build_app, stream_turn
 
 PROJECT_ID = "mes-demo"
-OPERATOR = "minseong"
+DEFAULT_OPERATOR_ID = "minseong"
 
 
 def _aware(value: str | None) -> datetime | None:
@@ -65,6 +65,10 @@ class ChatRequest(BaseModel):
     screen_state: ScreenState | None = None
 
 
+class SessionStart(BaseModel):
+    operator_id: str | None = None
+
+
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
                briefings: Briefings, on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
     backend.reports = reports  # lets Mock's apply_profile re-diff the target job's stored report
@@ -75,12 +79,23 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     Record = SessionRecord[AtworksSessionState]
 
     def context(record: Record) -> AtworksSessionContext:
-        return AtworksSessionContext(session_id=record.session_id, project_id=PROJECT_ID, operator=OPERATOR, now=datetime.now().astimezone())
+        profile = backend.operator_profile(record.user_id)
+        return AtworksSessionContext(session_id=record.session_id, project_id=PROJECT_ID, operator=record.user_id,
+                                     role=profile.role if profile is not None else None, now=datetime.now().astimezone())
 
     @router.post("/session")
-    async def start_session() -> dict:
-        record = sessions.start(PROJECT_ID)
-        return {"session_id": record.session_id, "project_id": PROJECT_ID, "operator": OPERATOR}
+    async def start_session(payload: SessionStart | None = None) -> dict:
+        operator_id = (payload.operator_id if payload is not None else None) or DEFAULT_OPERATOR_ID
+        profile = backend.operator_profile(operator_id)
+        if profile is None:
+            raise HTTPException(status_code=400, detail=f"unknown operator: {operator_id!r}")
+        record = sessions.start(profile.operator_id)
+        return {"session_id": record.session_id, "project_id": PROJECT_ID, "operator": profile.operator_id,
+                "operator_name": profile.name, "role": profile.role}
+
+    @router.get("/operators")
+    async def operators() -> dict:
+        return {"operators": [p.model_dump(mode="json") for p in await backend.list_operators(None)]}
 
     @router.post("/chat")
     async def chat(request: ChatRequest, record: CurrentSession) -> StreamingResponse:

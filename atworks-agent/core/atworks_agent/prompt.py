@@ -153,6 +153,12 @@ def build_dynamic_context(
     if atworks_context is not None:
         rendered = json.dumps(atworks_context, ensure_ascii=False, default=str)
         payload["project"] = atworks_context if len(rendered) <= context_max_chars else {"note": "context omitted (too large)"}
+        if atworks_context.get("operator_role"):
+            scope_count = len(atworks_context.get("scope_api_ids", []))
+            payload["operator_line"] = (
+                f"operator: {atworks_context['operator']} ({atworks_context['operator_role']}) "
+                f"· scope: {scope_count} APIs you ran"
+            )
     if now is not None:
         payload["local_time"] = context_clock(now)
     block = "# aTworks context\n\n" + ATWORKS_FENCE.fence_payload(payload, max_chars=max_chars)

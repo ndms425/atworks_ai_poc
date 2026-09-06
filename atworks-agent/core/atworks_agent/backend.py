@@ -17,6 +17,7 @@ from .types import (
     ComparisonProfile,
     FormatBatch,
     JobSpec,
+    OperatorProfile,
     RuleRecommendation,
     RunResult,
 )
@@ -248,6 +249,10 @@ class AtworksBackend(ABC):
         ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다."""
 
     # -- 선택 --------------------------------------------------------------------------
+    @abstractmethod
+    async def list_operators(self, session: AtworksSessionContext | None) -> list[OperatorProfile]:
+        """읽기: 한 배포가 자신의 인증 체계를 매핑하는 오퍼레이터 레지스트리 전체."""
+
     async def get_context(self, session: AtworksSessionContext) -> dict[str, Any] | None:
         """요청별 컨텍스트(프로젝트명, 허용 계, 최근 실행 요약 카운트). 동적 프롬프트 블록에 들어간다."""
         return None

@@ -175,6 +175,9 @@ class InMemoryBackend(AtworksBackend):
     async def get_context(self, session):
         return {"project": "MES", "allowed_targets": ["dev", "stg"]}
 
+    async def list_operators(self, session):
+        return []
+
 
 @pytest.fixture
 def config():

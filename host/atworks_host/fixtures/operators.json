@@ -1,0 +1,5 @@
+[
+  {"operator_id": "minseong", "name": "곽민성", "role": "developer"},
+  {"operator_id": "jihoon", "name": "박지훈", "role": "qa"},
+  {"operator_id": "sora", "name": "이소라", "role": "pm"}
+]
