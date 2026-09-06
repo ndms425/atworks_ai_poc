@@ -14,6 +14,7 @@ from atworks_agent.types import (
     JobSchedule,
     JobSpec,
     JobStatus,
+    OperatorProfile,
     RunResult,
     RunStatus,
     ScreenFilter,
@@ -205,3 +206,17 @@ def test_screen_filter_rejects_unknown_keys_and_bad_status():
         ScreenFilter(status="non_pass")
     with pytest.raises(ValidationError):
         ScreenFilter(group="payment")
+
+
+def test_run_result_executed_by_defaults_none_and_round_trips():
+    r = RunResult(run_id="r", api_id="a", executed_at=datetime(2026, 9, 1, tzinfo=UTC), target_env="dev", status="pass")
+    assert r.executed_by is None
+    r2 = RunResult(**{**r.model_dump(), "executed_by": "minseong"})
+    assert RunResult.model_validate(json.loads(r2.model_dump_json())).executed_by == "minseong"
+
+
+def test_operator_profile_rejects_bad_role_and_id():
+    with pytest.raises(ValueError):
+        OperatorProfile(operator_id="x", name="n", role="admin")
+    with pytest.raises(ValueError):
+        OperatorProfile(operator_id="../x", name="n", role="qa")

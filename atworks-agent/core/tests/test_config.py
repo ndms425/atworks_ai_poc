@@ -55,3 +55,9 @@ def test_screen_directive_tools_are_absent_when_disabled():
 def test_screen_directive_caps_have_defaults():
     cfg = AtworksAgentConfig(model="m")
     assert cfg.max_highlight_targets == 8 and cfg.max_screen_visible == 40 and cfg.stages_screen_directives
+
+
+def test_insight_panel_settings_have_defaults():
+    c = AtworksAgentConfig(model="m")
+    assert (c.enable_insight_panel, c.enable_insight_narration, c.scope_window_days, c.max_insight_candidates,
+            c.stale_pending_hours, c.insight_narration_timeout_s, c.insight_narration_model) == (True, True, 30, 5, 24, 20, None)

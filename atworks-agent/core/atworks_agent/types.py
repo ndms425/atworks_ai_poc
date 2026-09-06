@@ -44,6 +44,7 @@ class RunResult(BaseModel):
     duration_ms: int | None = None
     response_body: dict[str, Any] | None = None
     job_id: str | None = None
+    executed_by: str | None = None   # operator who approved the executing job; None = unattributed/legacy
 
 
 class FailedRank(BaseModel):
@@ -78,6 +79,48 @@ class RunGroup(BaseModel):
 class Insights(BaseModel):
     flaky: int = 0
     regression_suspect: int = 0
+
+
+# -- 인사이트 패널 (Home, per-operator) --------------------------------------------------
+
+InsightKind = Literal["regression_suspect", "flaky_cell", "top_failed_rule", "env_divergence", "stale_pending"]
+
+
+class InsightCandidate(BaseModel):
+    """host가 결정론적으로 뽑은 후보 1건. figures는 host가 계산한 숫자/문자열만 담고, narration은
+    이 값을 바꾸지 않는다."""
+    candidate_id: str = Field(max_length=120)
+    kind: InsightKind
+    label: str = Field(max_length=120)
+    figures: dict[str, int | str] = Field(default_factory=dict)
+    api_ids: list[str] = Field(default_factory=list, max_length=20)
+    ref_ids: list[str] = Field(default_factory=list, max_length=20)
+    priority: int = 0
+
+
+class InsightNarrative(BaseModel):
+    """모델이 candidate 위에 얹는 설명 텍스트뿐 — figures/priority 등은 여기서 만들지 않는다."""
+    candidate_id: str = Field(max_length=120)
+    headline: str = Field(max_length=80)
+    why_it_matters: str = Field(max_length=160)
+    prompt: str = Field(max_length=120)
+
+
+class InsightItem(BaseModel):
+    candidate: InsightCandidate
+    narrative: InsightNarrative | None = None
+
+
+class InsightPanel(BaseModel):
+    operator_id: str
+    name: str
+    role: OperatorRole
+    scope_api_ids: list[str] = Field(default_factory=list)
+    scope_fallback: bool = False
+    window_days: int
+    generated_at: datetime
+    generated_by: Literal["agent", "deterministic"]
+    items: list[InsightItem] = Field(default_factory=list)
 
 
 # -- 실행 계획(JobSpec) ---------------------------------------------------------------
@@ -386,10 +429,20 @@ class ScreenState(BaseModel):
 
 # -- 세션 ------------------------------------------------------------------------------
 
+OperatorRole = Literal["developer", "qa", "pm"]
+
+
+class OperatorProfile(BaseModel):
+    operator_id: str = Field(max_length=64, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    name: str = Field(max_length=80)
+    role: OperatorRole
+
+
 class AtworksSessionContext(ClockContext):
     session_id: str
     project_id: str
     operator: str
+    role: OperatorRole | None = None
 
 
 class AtworksSessionState(BaseModel):

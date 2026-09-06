@@ -69,6 +69,15 @@ class AtworksAgentConfig(BaseAgentConfig):
     max_highlight_targets: int = Field(default=8, ge=1)
     max_screen_visible: int = Field(default=40, ge=1)
 
+    # -- 인사이트 패널 (Home, per-operator) --------------------------------------------
+    enable_insight_panel: bool = True
+    enable_insight_narration: bool = True
+    scope_window_days: int = Field(default=30, ge=1)
+    max_insight_candidates: int = Field(default=5, ge=1)
+    stale_pending_hours: int = Field(default=24, ge=1)
+    insight_narration_timeout_s: int = Field(default=20, ge=1)
+    insight_narration_model: str | None = None
+
     # -- 값 동등성 비교 (ComparisonProfile ignore-spec) --------------------------------
     max_ignore_paths: int = Field(default=200, ge=1)
 

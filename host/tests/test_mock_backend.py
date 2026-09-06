@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,10 +17,11 @@ from atworks_host.mock_backend import MockAtworks, stub_response, stub_verdict
 
 KST = timezone(timedelta(hours=9))
 SESSION = AtworksSessionContext(session_id="s", project_id="mes", operator="minseong", now=datetime(2026, 9, 3, 14, tzinfo=KST))
+FIXTURES = Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures"
 
 
 def _backend():
-    return MockAtworks(AtworksAgentConfig(model="m"), Path(__file__).resolve().parents[1] / "atworks_host" / "fixtures")
+    return MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
 
 
 async def test_fixtures_load_and_search_by_updated_after():
@@ -305,3 +307,17 @@ async def test_recommend_rules_for_api_unknown_api_returns_nothing():
     b = _backend()
     recs = await b.recommend_rules_for_api(SESSION, "no-such-api")
     assert recs == []
+
+
+async def test_execute_job_once_stamps_executed_by_from_the_approver():
+    b = _backend()
+    approver_session = AtworksSessionContext(session_id="s2", project_id="mes", operator="jihoon", now=SESSION.now)
+    job = await b.stage_job(SESSION, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001", "api-003"], target_envs=["dev"]), ActorKind.AGENT)
+    await b.apply_job(approver_session, job.job_id)
+    runs = await b.execute_job_once(SESSION, job.job_id)
+    assert runs and all(r.executed_by == "jihoon" for r in runs)
+
+
+def test_fixture_runs_carry_operators():
+    rows = json.loads((FIXTURES / "runs.json").read_text(encoding="utf-8"))
+    assert {r.get("executed_by") for r in rows} >= {"minseong", "jihoon", "sora"}

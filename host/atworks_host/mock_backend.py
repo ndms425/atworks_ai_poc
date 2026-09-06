@@ -344,7 +344,8 @@ class MockAtworks(AtworksBackend):
                         target_env=env, test_data_label=data.label if data is not None else None,
                         status=status, failed_rules=rules, http_status=http,
                         duration_ms=100 + self._run_seq % 50,
-                        response_body=stub_response(api, env, data, self._run_seq), job_id=job_id)
+                        response_body=stub_response(api, env, data, self._run_seq), job_id=job_id,
+                        executed_by=job.applied_by)
                     self.runs[run.run_id] = run
                     produced.append(run)
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
