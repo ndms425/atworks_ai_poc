@@ -5,18 +5,27 @@ import pytest
 
 from atworks_agent.types import (
     ActorKind,
+    AggregateQuery,
     ApiSpec,
+    ApiWatermark,
     AtworksSessionState,
+    AuditEntry,
     Binding,
+    CellState,
     FormatBatch,
     FormatBatchEntry,
     JobKind,
     JobSchedule,
     JobSpec,
     JobStatus,
+    MaskingPolicy,
+    MaskingRule,
     OperatorProfile,
+    Page,
     RunResult,
+    RunsQuery,
     RunStatus,
+    ScopeSummary,
     ScreenFilter,
     ScreenState,
     ScreenTarget,
@@ -220,3 +229,122 @@ def test_operator_profile_rejects_bad_role_and_id():
         OperatorProfile(operator_id="x", name="n", role="admin")
     with pytest.raises(ValueError):
         OperatorProfile(operator_id="../x", name="n", role="qa")
+
+
+# -- scale architecture (spec 2026-09-06, Task 1) --------------------------------------
+
+def test_page_round_trips_generic_items_through_json():
+    run = RunResult(run_id="run-1", api_id="api-001", executed_at=datetime(2026, 9, 1, tzinfo=UTC),
+                    target_env="dev", status=RunStatus.PASS)
+    page = Page[RunResult](items=[run], next_cursor="cur-2", total=1)
+
+    dumped = page.model_dump_json()
+    restored = Page[RunResult].model_validate(json.loads(dumped))
+
+    assert restored.total == 1
+    assert restored.next_cursor == "cur-2"
+    assert isinstance(restored.items[0], RunResult)
+    assert restored.items[0].run_id == "run-1"
+
+
+def test_page_defaults_are_empty():
+    page = Page[RunResult]()
+    assert page.items == [] and page.next_cursor is None and page.total == 0
+
+
+def test_runs_query_rejects_limit_above_200_and_below_1():
+    with pytest.raises(ValueError):
+        RunsQuery(limit=201)
+    with pytest.raises(ValueError):
+        RunsQuery(limit=0)
+    RunsQuery(limit=200)
+
+
+def test_runs_query_rejects_unknown_keys():
+    with pytest.raises(ValueError):
+        RunsQuery(bogus=1)
+
+
+def test_runs_query_accepts_job_id():
+    q = RunsQuery(job_id="job-0001")
+    assert q.job_id == "job-0001"
+
+
+def test_runs_query_defaults():
+    q = RunsQuery()
+    assert q.limit == 50
+    assert (q.since, q.until, q.status, q.api_id, q.executed_by, q.job_id, q.cursor) == (None,) * 7
+
+
+def test_aggregate_query_rejects_unknown_group_by():
+    with pytest.raises(ValueError):
+        AggregateQuery(group_by="nope")
+
+
+def test_aggregate_query_rejects_unknown_keys_and_requires_group_by():
+    with pytest.raises(ValueError):
+        AggregateQuery(group_by="api", bogus=1)
+    with pytest.raises(ValueError):
+        AggregateQuery()
+
+
+def test_aggregate_query_limit_bounds():
+    AggregateQuery(group_by="api", limit=500)
+    with pytest.raises(ValueError):
+        AggregateQuery(group_by="api", limit=501)
+    with pytest.raises(ValueError):
+        AggregateQuery(group_by="api", limit=0)
+
+
+def test_cell_state_and_api_watermark_hold_the_expected_fields():
+    cell = CellState(api_id="api-001", target_env="dev", test_data_label=None, run_id="run-1",
+                     status=RunStatus.PASS, executed_at=datetime.now(UTC), transitions_total=0)
+    assert cell.status is RunStatus.PASS
+    watermark = ApiWatermark(api_id="api-001", last_pass_at=None, first_non_pass_at=None,
+                             last_non_pass_at=None, latest_status=None)
+    assert watermark.latest_status is None
+
+
+def test_scope_summary_caps_api_ids_sample():
+    with pytest.raises(ValueError):
+        ScopeSummary(api_ids=[f"api-{i}" for i in range(101)])
+    ScopeSummary(api_ids=[f"api-{i}" for i in range(100)], total=5000)
+
+
+def test_audit_entry_holds_expected_fields():
+    entry = AuditEntry(seq=1, at=datetime.now(UTC), operator="minseong", action="apply_job",
+                       target_kind="job", target_id="job-0001", session_id="sess-1")
+    assert entry.seq == 1
+
+
+def test_masking_policy_caps_rules_and_disabled_groups():
+    rule = MaskingRule(name="ssn", pattern=r"\d{6}-\d{7}")
+    assert rule.replacement == "***"
+    with pytest.raises(ValueError):
+        MaskingPolicy(rules=[rule] * 51)
+    with pytest.raises(ValueError):
+        MaskingPolicy(disabled_groups=[f"g{i}" for i in range(101)])
+    MaskingPolicy(rules=[rule] * 50, disabled_groups=[f"g{i}" for i in range(100)])
+
+
+def test_run_result_scale_fields_default_none():
+    r = RunResult(run_id="r", api_id="a", executed_at=datetime(2026, 9, 1, tzinfo=UTC),
+                  target_env="dev", status=RunStatus.PASS)
+    assert (r.day, r.api_method, r.api_path) == (None, None, None)
+    r2 = RunResult(**{**r.model_dump(), "day": "2026-09-01", "api_method": "GET", "api_path": "/v1/x"})
+    restored = RunResult.model_validate(json.loads(r2.model_dump_json()))
+    assert (restored.day, restored.api_method, restored.api_path) == ("2026-09-01", "GET", "/v1/x")
+
+
+def test_jobspec_scale_fields_default_and_cap():
+    job = JobSpec(job_id="job-0001", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"],
+                  target_envs=["dev"], created_at=datetime.now(UTC), created_by="op")
+    assert job.run_count == 0
+    assert job.recent_run_ids == []
+    with pytest.raises(ValueError):
+        JobSpec(job_id="job-0002", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"],
+               target_envs=["dev"], created_at=datetime.now(UTC), created_by="op",
+               recent_run_ids=[f"run-{i}" for i in range(51)])
+    JobSpec(job_id="job-0003", kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"],
+           target_envs=["dev"], created_at=datetime.now(UTC), created_by="op",
+           run_count=3, recent_run_ids=[f"run-{i}" for i in range(50)])

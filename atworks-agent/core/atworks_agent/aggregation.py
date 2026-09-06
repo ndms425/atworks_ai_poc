@@ -5,11 +5,14 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from typing import get_args
 
 from .config import AtworksAgentConfig
-from .types import ApiSpec, Insights, RunGroup, RunResult, RunStatus
+from .types import ApiSpec, GroupBy, Insights, RunGroup, RunResult, RunStatus
 
-GROUP_BY: tuple[str, ...] = ("api", "failed_rule", "http_status", "env", "api_env_data")
+# GroupBy (types.py) is the source of truth; this tuple is derived so the five values are
+# never hand-duplicated between the Literal and this module.
+GROUP_BY: tuple[str, ...] = get_args(GroupBy)
 MAX_RUN_IDS = 50
 
 

@@ -61,3 +61,49 @@ def test_insight_panel_settings_have_defaults():
     c = AtworksAgentConfig(model="m")
     assert (c.enable_insight_panel, c.enable_insight_narration, c.scope_window_days, c.max_insight_candidates,
             c.stale_pending_hours, c.insight_narration_timeout_s, c.insight_narration_model) == (True, True, 30, 5, 24, 20, None)
+
+
+# -- scale / retention / masking / SLO (spec 2026-09-06, Task 1) -----------------------
+
+def test_retention_defaults():
+    c = AtworksAgentConfig(model="m")
+    assert c.retention_hot_days == 180
+    assert c.retention_body_days == 90
+    assert c.retention_cold_until is None
+    assert c.insights_cache_days == 30
+    assert c.session_idle_hours == 24
+
+
+def test_masking_defaults():
+    c = AtworksAgentConfig(model="m")
+    assert c.masking_enabled is True
+    assert c.masking_disabled_groups == ()
+
+
+def test_scale_defaults():
+    c = AtworksAgentConfig(model="m")
+    assert c.scale_apis == 50_000
+    assert c.scale_runs == 2_000_000
+    assert c.scale_operators == 500
+
+
+def test_slo_defaults():
+    c = AtworksAgentConfig(model="m")
+    assert c.slo_get_context_ms == 50
+    assert c.slo_list_runs_ms == 200
+    assert c.slo_insights_ms == 500
+    assert c.slo_aggregate_ms == 300
+    assert c.slo_simulate_rule_ms == 1000
+    assert c.slo_briefing_ms == 5000
+    assert c.slo_sse_latency_ms == 100
+    assert c.slo_retention_ms == 30_000
+
+
+def test_max_concurrency_default_unchanged():
+    assert AtworksAgentConfig(model="m").max_concurrency == 4
+
+
+def test_retention_cold_until_accepts_a_date():
+    from datetime import date
+    c = AtworksAgentConfig(model="m", retention_cold_until=date(2026, 1, 1))
+    assert c.retention_cold_until == date(2026, 1, 1)

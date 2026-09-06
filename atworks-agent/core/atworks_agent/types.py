@@ -6,11 +6,51 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Generic, Literal, TypeVar
 from zoneinfo import ZoneInfo
 
 from commerce_common.types import ClockContext, remember
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# -- 페이지네이션/쿼리/집계 (scale, spec 2026-09-06) -------------------------------------
+# Page는 모든 목록형 백엔드 메서드가 공유하는 읽기 봉투다: 커서 기반, 총계는 host 계산.
+# RunsQuery/AggregateQuery는 extra="forbid" -- 모델이 낸 미지의 키는 조용히 묵살되지 않고 거부된다.
+
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    items: list[T] = Field(default_factory=list)
+    next_cursor: str | None = None
+    total: int = 0
+
+
+RunStatusFilter = Literal["all", "pass", "fail", "error", "non_pass"]
+# aggregation.GROUP_BY의 다섯 값을 그대로 미러한다 -- aggregation.py가 이 타입에서 값을 가져간다
+# (get_args), 그쪽 GROUP_BY 튜플을 손으로 다시 적지 않는다.
+GroupBy = Literal["api", "failed_rule", "http_status", "env", "api_env_data"]
+
+
+class RunsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    since: datetime | None = None
+    until: datetime | None = None
+    status: RunStatusFilter | None = None
+    api_id: str | None = None
+    executed_by: str | None = None
+    job_id: str | None = None   # controller ruling: later tasks read a job's runs through this
+    cursor: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class AggregateQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    since: datetime | None = None
+    until: datetime | None = None
+    group_by: GroupBy
+    scope_api_ids: list[str] | None = None
+    limit: int = Field(default=50, ge=1, le=500)
+
 
 # -- 레코드 ---------------------------------------------------------------------------
 
@@ -45,6 +85,9 @@ class RunResult(BaseModel):
     response_body: dict[str, Any] | None = None
     job_id: str | None = None
     executed_by: str | None = None   # operator who approved the executing job; None = unattributed/legacy
+    day: str | None = None           # local YYYY-MM-DD partition key; None = unpartitioned/legacy
+    api_method: str | None = None    # denormalized from ApiSpec at execution time
+    api_path: str | None = None      # denormalized from ApiSpec at execution time
 
 
 class FailedRank(BaseModel):
@@ -252,6 +295,11 @@ class JobSpec(BaseModel):
     discarded_by_kind: ActorKind | None = None
     run_ids: list[str] = Field(default_factory=list)
     executions: int = Field(default=0, ge=0)   # executions performed; run_now completes at 1
+    # scale (spec 2026-09-06): run_ids grows unbounded across a long-lived scheduled job's
+    # lifetime; run_count/recent_run_ids are the bounded read path Task 5 moves callers onto.
+    # run_ids stays untouched this task for compatibility.
+    run_count: int = 0
+    recent_run_ids: list[str] = Field(default_factory=list, max_length=50)
 
     # -- derived: pure functions of the stored fields, never persisted -------------------
 
@@ -383,6 +431,58 @@ class FormatBatch(BaseModel):
     @property
     def invalid_count(self) -> int:
         return sum(1 for e in self.entries if e.outcome == "invalid")
+
+
+# -- 물질화 상태 / 감사 / 마스킹 (scale, spec 2026-09-06) --------------------------------
+# 이 섹션의 모델들은 host-side 물질화 뷰(누적된 run 히스토리 위에서 빠르게 읽기 위한 캐시/집계
+# 상태)와 감사 로그, PII 마스킹 정책을 담는다. LLM은 이 값들을 계산하지 않는다 -- host가 채운다.
+
+class CellState(BaseModel):
+    """api_id × target_env × test_data_label 한 셀의 최신 상태 (물질화 뷰 1행)."""
+    api_id: str
+    target_env: str
+    test_data_label: str | None
+    run_id: str
+    status: RunStatus
+    executed_at: datetime
+    transitions_total: int
+
+
+class ApiWatermark(BaseModel):
+    """API 1개의 pass/non-pass 워터마크. flaky/regression 판정을 전체 히스토리 재스캔 없이 낸다."""
+    api_id: str
+    last_pass_at: datetime | None
+    first_non_pass_at: datetime | None
+    last_non_pass_at: datetime | None
+    latest_status: RunStatus | None
+
+
+class ScopeSummary(BaseModel):
+    """오퍼레이터/스코프 하나의 API 모집단 요약. api_ids는 표본(<=100), total이 실제 개수."""
+    api_ids: list[str] = Field(default_factory=list, max_length=100)
+    total: int = 0
+
+
+class AuditEntry(BaseModel):
+    """감사 로그 1행 -- append-only, seq가 전역 순서."""
+    seq: int
+    at: datetime
+    operator: str
+    action: str
+    target_kind: str
+    target_id: str
+    session_id: str
+
+
+class MaskingRule(BaseModel):
+    name: str = Field(max_length=40)
+    pattern: str = Field(max_length=200)
+    replacement: str = Field(default="***", max_length=20)
+
+
+class MaskingPolicy(BaseModel):
+    rules: list[MaskingRule] = Field(default_factory=list, max_length=50)
+    disabled_groups: list[str] = Field(default_factory=list, max_length=100)
 
 
 # -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------

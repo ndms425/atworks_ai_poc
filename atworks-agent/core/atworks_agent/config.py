@@ -2,6 +2,7 @@
 guardrail → 승인 → grounding 어휘. (prompt) 표시 필드는 정적 프롬프트/툴 바이트에 들어간다."""
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
 from commerce_common.config import BaseAgentConfig, ThinkingEffort
@@ -111,6 +112,26 @@ class AtworksAgentConfig(BaseAgentConfig):
     aggregate_grounding_gate: bool = True
     aggregate_intent_terms: tuple[str, ...] = ("원인별", "언제부터", "왔다갔다", "불안정", "since when", "flapping")
     aggregate_intent_cue_terms: tuple[str, ...] = ("묶어", "패턴", "cluster", "flaky")
+
+    # -- scale / retention (spec 2026-09-06) -------------------------------------------
+    retention_hot_days: int = 180
+    retention_body_days: int = 90
+    retention_cold_until: date | None = None
+    insights_cache_days: int = 30
+    session_idle_hours: int = 24
+    masking_enabled: bool = True
+    masking_disabled_groups: tuple[str, ...] = ()
+    scale_apis: int = 50_000
+    scale_runs: int = 2_000_000
+    scale_operators: int = 500
+    slo_get_context_ms: int = 50
+    slo_list_runs_ms: int = 200
+    slo_insights_ms: int = 500
+    slo_aggregate_ms: int = 300
+    slo_simulate_rule_ms: int = 1000
+    slo_briefing_ms: int = 5000
+    slo_sse_latency_ms: int = 100
+    slo_retention_ms: int = 30_000
 
     @property
     def stages_jobs(self) -> bool:
