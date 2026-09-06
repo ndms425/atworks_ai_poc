@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -447,12 +448,32 @@ class Store:
     def conn(self) -> sqlite3.Connection:
         return self._conn
 
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """EVERY writer that issues more than one statement runs inside this: commit on success,
+        ``ROLLBACK`` on **any** exception (``BaseException`` -- a ``KeyboardInterrupt`` or a
+        cancelled task must not leave half a batch pending either), then re-raise.
+
+        Without it a failure between two statements left the first one PENDING on the connection
+        rather than undone: sqlite3 opens the implicit transaction at the first DML and only ends
+        it at an explicit ``commit()``/``rollback()``, so the next unrelated writer's ``commit()``
+        silently persisted the abandoned rows -- runs in ``runs`` with nothing folded into
+        ``rollup_day``/``current_state``/``api_watermark``, which no later read can detect and no
+        re-ingest can repair (``ingest`` skips run_ids it already sees). Rolling back here is what
+        makes "one ingest = one all-or-nothing transaction" (spec §4) true rather than intended."""
+        try:
+            yield
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+
     def init_schema(self) -> None:
         """CREATE TABLE/INDEX IF NOT EXISTS throughout -- safe to call on an already-initialized
         connection (constructor calls it once; tests call it again to assert idempotency)."""
-        self._conn.executescript(_SCHEMA)
-        self._migrate_columns()
-        self._conn.commit()
+        with self._transaction():
+            self._conn.executescript(_SCHEMA)
+            self._migrate_columns()
 
     def _migrate_columns(self) -> None:
         """Columns added to a table that already exists on disk. ``CREATE TABLE IF NOT EXISTS``
@@ -489,23 +510,33 @@ class Store:
     def replace_all_apis(self, apis: Iterable[ApiSpec]) -> None:
         """Wholesale replacement -- backs ``MockAtworks.apis``'s property setter, so a test that
         does ``backend.apis = {...}`` from scratch leaves the mirrored ``apis`` table containing
-        exactly that new set, not the old rows plus the new ones."""
-        self._conn.execute("DELETE FROM apis")
-        self._conn.commit()
-        self.load_apis(apis)
+        exactly that new set, not the old rows plus the new ones. The DELETE and the reload share
+        ONE transaction: committing the DELETE on its own meant a failure in the reload left the
+        catalogue empty."""
+        rows = self._api_rows(apis)
+        with self._transaction():
+            self._conn.execute("DELETE FROM apis")
+            self._write_api_rows(rows)
 
-    def load_apis(self, apis: Iterable[ApiSpec]) -> None:
-        rows = [
+    @staticmethod
+    def _api_rows(apis: Iterable[ApiSpec]) -> list[tuple]:
+        return [
             (a.api_id, a.method, a.path, a.name, a.group, _iso(a.updated_at), int(a.has_rules), json.dumps(a.params))
             for a in apis
         ]
+
+    def _write_api_rows(self, rows: Sequence[tuple]) -> None:
+        """Rows in, no commit -- the caller owns the transaction."""
         self._conn.executemany(
             'INSERT OR REPLACE INTO apis (api_id, method, path, name, "group", updated_at, has_rules, params) '
             "VALUES (?,?,?,?,?,?,?,?)",
             rows,
         )
         self._refresh_api_updated_at([a[0] for a in rows])
-        self._conn.commit()
+
+    def load_apis(self, apis: Iterable[ApiSpec]) -> None:
+        with self._transaction():
+            self._write_api_rows(self._api_rows(apis))
 
     @staticmethod
     def _row_to_api(row: sqlite3.Row) -> ApiSpec:
@@ -599,7 +630,11 @@ class Store:
 
         Idempotent by construction: run_ids already present are filtered out up front (and the
         insert itself is ``INSERT OR IGNORE``), so re-ingesting a batch inserts nothing and adds
-        no delta anywhere -- a retried ``record_execution`` cannot double-count a rollup."""
+        no delta anywhere -- a retried ``record_execution`` cannot double-count a rollup.
+
+        ALL-OR-NOTHING: the run rows, their bodies and all four materialized folds share one
+        ``_transaction``. A failure anywhere inside rolls the whole batch back, so the store never
+        holds a run that no rollup counted."""
         batch: dict[str, RunResult] = {}
         for run in runs:
             batch.setdefault(run.run_id, run)
@@ -612,9 +647,9 @@ class Store:
         ]
         if not fresh:
             return 0
-        self._write_run_rows(fresh, briefing_tz, mask)
-        self._materialize(fresh)
-        self._conn.commit()
+        with self._transaction():
+            self._write_run_rows(fresh, briefing_tz, mask)
+            self._materialize(fresh)
         return len(fresh)
 
     def _existing_run_ids(self, run_ids: Sequence[str]) -> set[str]:
@@ -638,21 +673,21 @@ class Store:
         if run.run_id not in self._existing_run_ids([run.run_id]):
             self.ingest([run], briefing_tz)
             return
-        self._write_run_rows([run], briefing_tz, None, replace=True)
-        if run.response_body is None:
-            self._conn.execute("DELETE FROM bodies WHERE run_id = ?", (run.run_id,))
-        self.rebuild_materialized()
-        self._conn.commit()
+        with self._transaction():
+            self._write_run_rows([run], briefing_tz, None, replace=True)
+            if run.response_body is None:
+                self._conn.execute("DELETE FROM bodies WHERE run_id = ?", (run.run_id,))
+            self.rebuild_materialized()
 
     def replace_all_runs(self, runs: Mapping[str, RunResult] | Iterable[RunResult], briefing_tz: str = "Asia/Seoul") -> None:
         """Wholesale replacement -- backs ``backend.runs = {...}`` in tests that build a
         purpose-built run set from scratch, discarding the fixtures entirely. The four
         materialized tables are cleared with the runs, then rebuilt by the ``ingest`` below."""
         values = list(runs.values()) if isinstance(runs, Mapping) else list(runs)
-        self._conn.execute("DELETE FROM runs")
-        self._conn.execute("DELETE FROM bodies")
-        self._clear_materialized()
-        self._conn.commit()
+        with self._transaction():
+            self._conn.execute("DELETE FROM runs")
+            self._conn.execute("DELETE FROM bodies")
+            self._clear_materialized()
         self.ingest(values, briefing_tz)
 
     # -- ingest-time materialization (spec §4) ---------------------------------------------------
@@ -1031,15 +1066,18 @@ class Store:
         (spec §6)."""
         scope = "" if day is ALL_DAYS else " AND day IS ?"
         params: tuple[Any, ...] = () if day is ALL_DAYS else (day,)
-        self._conn.execute(
-            f"INSERT OR IGNORE INTO runs_archive ({self._RUN_COLUMNS}, archived_at) "
-            f"SELECT {self._RUN_COLUMNS}, ? FROM runs WHERE executed_at < ?{scope}",
-            (_iso(archived_at), _iso(cutoff), *params),
-        )
-        moved = self._conn.execute(
-            f"DELETE FROM runs WHERE executed_at < ?{scope}", (_iso(cutoff), *params)
-        ).rowcount
-        self._conn.commit()
+        # INSERT then DELETE inside one `_transaction`: a failure between them would otherwise
+        # leave the copy pending and the originals still in `runs`, and the next writer's commit
+        # would make that half-move permanent.
+        with self._transaction():
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO runs_archive ({self._RUN_COLUMNS}, archived_at) "
+                f"SELECT {self._RUN_COLUMNS}, ? FROM runs WHERE executed_at < ?{scope}",
+                (_iso(archived_at), _iso(cutoff), *params),
+            )
+            moved = self._conn.execute(
+                f"DELETE FROM runs WHERE executed_at < ?{scope}", (_iso(cutoff), *params)
+            ).rowcount
         return moved
 
     def delete_bodies_before(self, cutoff: datetime, limit: int | None = None) -> int:

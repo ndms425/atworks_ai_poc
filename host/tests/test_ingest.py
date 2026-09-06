@@ -16,6 +16,8 @@ import random
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from atworks_agent import (
     ActorKind,
     ApiSpec,
@@ -77,6 +79,46 @@ def _snapshot(store: Store) -> dict:
 
     return {t: rows(t) for t in
             ("runs", "bodies", "current_state", "rollup_day", "api_watermark", "operator_api")}
+
+
+# -- transactional safety (final review C1) ------------------------------------------------------
+
+
+def test_a_failure_inside_ingest_rolls_the_whole_batch_back(monkeypatch):
+    """C1. ``_write_run_rows`` has already issued its INSERTs by the time ``_materialize`` runs.
+    Without a rollback those rows stayed PENDING on the connection -- sqlite3 opens the implicit
+    transaction at the first DML and ends it only at an explicit commit/rollback -- so the next
+    unrelated writer's ``commit()`` made them permanent: runs sitting in ``runs`` that no rollup,
+    cell or watermark ever counted, invisible to every read and unrepairable by a re-ingest
+    (``ingest`` skips run_ids it can already see).
+
+    The earlier mid-chunk test stubbed ``store.ingest`` *wholesale*, so it never entered the
+    transaction at all and proved nothing about this. This one fails INSIDE it."""
+    store = Store(":memory:")
+    store.load_apis(APIS.values())
+    committed = _random_runs(seed=20260906, count=20)
+    store.ingest(committed, "Asia/Seoul")
+    before = _snapshot(store)
+
+    doomed = [r.model_copy(update={"run_id": f"doomed-{r.run_id}"})
+              for r in _random_runs(seed=7, count=6)]
+
+    def explode(self, fresh):
+        raise RuntimeError("materialize blew up")
+
+    monkeypatch.setattr(Store, "_materialize", explode)
+    with pytest.raises(RuntimeError):
+        store.ingest(doomed, "Asia/Seoul")
+
+    assert not store.conn().in_transaction              # nothing abandoned mid-transaction
+    assert store.run_count() == len(committed)          # the half-written run rows are GONE
+    assert _snapshot(store) == before                   # rollup_day/current_state/... untouched
+
+    monkeypatch.undo()                                  # ...and the store still works afterwards
+    assert store.ingest(doomed, "Asia/Seoul") == len(doomed)
+    assert store.run_count() == len(committed) + len(doomed)
+    rollup_total = store.conn().execute('SELECT SUM("count") FROM rollup_day').fetchone()[0]
+    assert rollup_total == len(committed) + len(doomed)
 
 
 # -- property: incremental ingest == recompute from scratch --------------------------------------
