@@ -18,9 +18,10 @@ from atworks_agent import (
     RunsQuery,
     RunStatus,
 )
+from atworks_host import retention as retention_module
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.reports import Reports
-from atworks_host.retention import Retention, TimestampedSessionStore
+from atworks_host.retention import STEPS, Retention, TimestampedSessionStore
 from atworks_host.scheduler import Scheduler
 from atworks_host.store import Store
 
@@ -59,7 +60,7 @@ def _rollup_totals(store: Store) -> list[tuple]:
 # -- 핫 -> 콜드 이관 -----------------------------------------------------------------------------
 
 
-def test_runs_past_the_hot_window_are_archived_not_deleted(tmp_path):
+async def test_runs_past_the_hot_window_are_archived_not_deleted(tmp_path):
     backend = _backend()
     store = backend.store
     old_ids = _seed(store, age_days=181, count=5, prefix="old")
@@ -67,7 +68,7 @@ def test_runs_past_the_hot_window_are_archived_not_deleted(tmp_path):
     total_before = store.run_count()
     rollups_before = _rollup_totals(store)
 
-    counts = Retention(store, backend._config, tmp_path).run(NOW)
+    counts = await Retention(store, backend._config, tmp_path).run(NOW)
 
     assert counts["runs_archived"] == 5
     archived = store.count_runs(archived=True)
@@ -86,37 +87,37 @@ def test_runs_past_the_hot_window_are_archived_not_deleted(tmp_path):
     assert _rollup_totals(store) == rollups_before
 
 
-def test_the_archive_is_only_purged_once_retention_cold_until_is_set_and_past(tmp_path):
+async def test_the_archive_is_only_purged_once_retention_cold_until_is_set_and_past(tmp_path):
     store = _backend().store
     _seed(store, age_days=181, count=4, prefix="old")
 
     # 1. no cutoff at all (the default) = 영구 보관.
     forever = _backend()
-    Retention(store, forever._config, tmp_path).run(NOW)
+    await Retention(store, forever._config, tmp_path).run(NOW)
     assert store.count_runs(archived=True) == 4
 
     # 2. a cutoff that has NOT passed yet still keeps everything.
     future = _backend(retention_cold_until=date(2027, 1, 1))
-    assert Retention(store, future._config, tmp_path).run(NOW)["archive_purged"] == 0
+    assert (await Retention(store, future._config, tmp_path).run(NOW))["archive_purged"] == 0
     assert store.count_runs(archived=True) == 4
 
     # 3. only a cutoff in the past deletes -- the one place a run record ever goes away.
     past = _backend(retention_cold_until=date(2026, 1, 1))
-    assert Retention(store, past._config, tmp_path).run(NOW)["archive_purged"] == 4
+    assert (await Retention(store, past._config, tmp_path).run(NOW))["archive_purged"] == 4
     assert store.count_runs(archived=True) == 0
 
 
 # -- 본문 삭제 ------------------------------------------------------------------------------------
 
 
-def test_bodies_past_the_body_window_are_deleted_and_fresh_ones_are_not(tmp_path):
+async def test_bodies_past_the_body_window_are_deleted_and_fresh_ones_are_not(tmp_path):
     backend = _backend()
     store = backend.store
     old_ids = _seed(store, age_days=91, count=3, prefix="oldbody")
     fresh_ids = _seed(store, age_days=5, count=2, prefix="newbody")
     assert all(store.get_body(run_id) is not None for run_id in old_ids + fresh_ids)
 
-    counts = Retention(store, backend._config, tmp_path).run(NOW)
+    counts = await Retention(store, backend._config, tmp_path).run(NOW)
 
     assert counts["bodies_deleted"] == 3
     assert all(store.get_body(run_id) is None for run_id in old_ids)
@@ -141,7 +142,7 @@ async def test_an_old_reports_parity_rediffs_to_status_only_after_the_bodies_exp
     # age every captured body past the window, then run retention for real.
     backend.store.conn().execute("UPDATE bodies SET captured_at = ?", ("2026-01-01T00:00:00.000000Z",))
     backend.store.conn().commit()
-    assert Retention(backend.store, backend._config, tmp_path).run(NOW)["bodies_deleted"] > 0
+    assert (await Retention(backend.store, backend._config, tmp_path).run(NOW))["bodies_deleted"] > 0
 
     async def body_loader(run_id):
         return await backend.get_body(SESSION, run_id)
@@ -156,7 +157,7 @@ async def test_an_old_reports_parity_rediffs_to_status_only_after_the_bodies_exp
 # -- 파생: 인사이트 서술 캐시 회전 ------------------------------------------------------------------
 
 
-def test_insight_cache_folders_older_than_the_window_are_rotated(tmp_path):
+async def test_insight_cache_folders_older_than_the_window_are_rotated(tmp_path):
     backend = _backend()
     insights_dir = tmp_path / "insights_out"
     local_today = NOW.astimezone(timezone(timedelta(hours=9))).date()
@@ -169,7 +170,7 @@ def test_insight_cache_folders_older_than_the_window_are_rotated(tmp_path):
             (folder / "narrative.json").write_text("{}", encoding="utf-8")
     (insights_dir / "minseong" / "not-a-date").mkdir()        # never touched: not identifiable
 
-    counts = Retention(backend.store, backend._config, insights_dir).run(NOW)
+    counts = await Retention(backend.store, backend._config, insights_dir).run(NOW)
 
     assert counts["insight_cache_rotated"] == 2
     for operator in ("minseong", "jihye"):
@@ -181,7 +182,7 @@ def test_insight_cache_folders_older_than_the_window_are_rotated(tmp_path):
 # -- 세션 TTL --------------------------------------------------------------------------------------
 
 
-def test_idle_sessions_are_swept_and_active_ones_are_kept(tmp_path):
+async def test_idle_sessions_are_swept_and_active_ones_are_kept(tmp_path):
     backend = _backend()
     clock = {"now": NOW - timedelta(hours=48)}
     sessions = TimestampedSessionStore(_State, clock=lambda: clock["now"])
@@ -189,14 +190,14 @@ def test_idle_sessions_are_swept_and_active_ones_are_kept(tmp_path):
     clock["now"] = NOW - timedelta(minutes=5)
     active = sessions.start("jihye")
 
-    counts = Retention(backend.store, backend._config, tmp_path, sessions).run(NOW)
+    counts = await Retention(backend.store, backend._config, tmp_path, sessions).run(NOW)
 
     assert counts["sessions_swept"] == 1
     assert sessions.read_state(active.session_id) is not None
     assert sessions.read_state(idle.session_id) is None
 
 
-def test_reading_a_session_keeps_it_alive(tmp_path):
+async def test_reading_a_session_keeps_it_alive(tmp_path):
     backend = _backend()
     clock = {"now": NOW - timedelta(hours=48)}
     sessions = TimestampedSessionStore(_State, clock=lambda: clock["now"])
@@ -204,26 +205,26 @@ def test_reading_a_session_keeps_it_alive(tmp_path):
     clock["now"] = NOW                                        # the operator comes back
     sessions.require(record.session_id)
 
-    assert Retention(backend.store, backend._config, tmp_path, sessions).run(NOW)["sessions_swept"] == 0
+    assert (await Retention(backend.store, backend._config, tmp_path, sessions).run(NOW))["sessions_swept"] == 0
     assert sessions.read_state(record.session_id) is not None
 
 
 # -- 하루 1회 가드 ----------------------------------------------------------------------------------
 
 
-def test_maybe_run_runs_once_per_local_day(tmp_path):
+async def test_maybe_run_runs_once_per_local_day(tmp_path):
     backend = _backend()
     store = backend.store
     retention = Retention(store, backend._config, tmp_path)
 
-    first = retention.maybe_run(NOW)
+    first = await retention.maybe_run(NOW)
     assert first is not None
     # NOW is 21:00 in briefing_tz (Asia/Seoul), so +1h/+2h are still the same LOCAL day --
     # which is the day the guard is keyed on, not the UTC one.
-    assert retention.maybe_run(NOW + timedelta(hours=1)) is None
-    assert retention.maybe_run(NOW + timedelta(hours=2)) is None
+    assert await retention.maybe_run(NOW + timedelta(hours=1)) is None
+    assert await retention.maybe_run(NOW + timedelta(hours=2)) is None
 
-    tomorrow = retention.maybe_run(NOW + timedelta(days=1))
+    tomorrow = await retention.maybe_run(NOW + timedelta(days=1))
     assert tomorrow is not None
 
     state = store.retention_state()
@@ -263,3 +264,90 @@ def test_retention_state_survives_the_pre_task9_table_shape(tmp_path):
     store.set_retention_state("daily:2026-09-06", NOW)
     assert store.get_retention_state("daily:2026-09-06") is not None
     assert json.dumps(sorted(store.retention_state())) == '["daily:2026-09-06"]'
+
+
+# -- 일 단위 이관(이벤트 루프) ------------------------------------------------------------------
+
+
+async def test_the_archive_steps_day_by_day_and_hands_the_loop_back_between_partitions(
+        tmp_path, monkeypatch):
+    """spec §6 "일 단위 이관": the daily job shares its event loop with chat SSE, so it archives ONE
+    `day` partition per transaction with a yield in between instead of holding the loop inside one
+    whole-dataset statement. Three old days = at least three yields, and every step still writes
+    its `retention_state` row."""
+    backend = _backend()
+    store = backend.store
+    for offset, prefix in enumerate(("d1", "d2", "d3")):
+        _seed(store, age_days=181 + offset, count=3, prefix=prefix)
+    _seed(store, age_days=5, count=2, prefix="fresh")
+    hot_before = store.run_count()
+    days = store.run_days_before(NOW - timedelta(days=backend._config.retention_hot_days))
+    assert len(days) == 3                                      # three distinct partitions to move
+
+    yields = {"n": 0}
+    real_sleep = retention_module.asyncio.sleep
+
+    async def counting_sleep(delay, *args, **kwargs):
+        if delay == 0:
+            yields["n"] += 1
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(retention_module.asyncio, "sleep", counting_sleep)
+    counts = await Retention(store, backend._config, tmp_path).run(NOW)
+
+    assert yields["n"] >= 3                                    # one per day partition, at least
+    assert counts["runs_archived"] == 9                        # 3 days × 3 runs, all of them
+    assert store.count_runs(archived=True) == 9
+    assert store.run_count() == hot_before - 9                 # the fresh days stayed hot
+    day = Retention(store, backend._config, tmp_path).local_date(NOW).isoformat()
+    state = store.retention_state()
+    assert all(f"{step}:{day}" in state for step in STEPS)      # every step's row, still written
+
+
+async def test_archive_runs_before_reports_the_rows_it_actually_moved_on_a_re_run(tmp_path):
+    """Minor 4: the INSERT's rowcount under-reports once `INSERT OR IGNORE` meets a run_id already
+    in the archive. The DELETE from `runs` is the honest count -- and a second pass over an
+    already-empty hot partition correctly reports 0, not a phantom re-move."""
+    backend = _backend()
+    store = backend.store
+    _seed(store, age_days=181, count=4, prefix="old")
+    cutoff = NOW - timedelta(days=backend._config.retention_hot_days)
+
+    assert store.archive_runs_before(cutoff, NOW) == 4
+    assert store.archive_runs_before(cutoff, NOW) == 0         # nothing left in `runs` to move
+    assert store.count_runs(archived=True) == 4                # ...and nothing duplicated
+
+
+async def test_bodies_are_deleted_in_bounded_slices(tmp_path, monkeypatch):
+    """A single `DELETE FROM bodies WHERE captured_at < ?` over hundreds of thousands of rows is
+    seconds of held event loop. The step slices it and yields between statements."""
+    backend = _backend()
+    store = backend.store
+    _seed(store, age_days=181, count=12, prefix="old")
+    store.conn().execute("UPDATE bodies SET captured_at = ?", ("2026-01-01T00:00:00.000000Z",))
+    store.conn().commit()
+    monkeypatch.setattr(retention_module, "BODY_DELETE_SLICE", 5)
+
+    statements: list[int] = []
+    original = store.delete_bodies_before
+
+    def counting(cutoff, limit=None):
+        statements.append(limit)
+        return original(cutoff, limit)
+
+    monkeypatch.setattr(store, "delete_bodies_before", counting)
+    counts = await Retention(store, backend._config, tmp_path).run(NOW)
+
+    assert counts["bodies_deleted"] == 12
+    assert statements == [5, 5, 5]                             # 5 + 5 + 2, the last short slice stops
+    assert store.conn().execute("SELECT COUNT(*) FROM bodies").fetchone()[0] == 0
+
+
+async def test_newest_run_at_is_public_and_none_on_an_empty_store(tmp_path):
+    """The bench ages a whole dataset out in one pass off this value; it used to reach through
+    `store.conn()` into the private `_parse_iso`."""
+    store = Store(":memory:")
+    assert store.newest_run_at() is None
+    _seed(store, age_days=3, count=1, prefix="a")
+    _seed(store, age_days=1, count=1, prefix="b")
+    assert store.newest_run_at() == NOW - timedelta(days=1)

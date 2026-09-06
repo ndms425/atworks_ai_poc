@@ -3,6 +3,7 @@ rows -- the attempt, then its outcome -- and every ledger state change writes on
 "AI가 무엇을 바꿨나 → 아무것도; 사람이 이 시각에 승인했다" is evidence, not a claim. A chat turn
 whose ``apply_*`` is HELD (no host approval mark) writes nothing at all."""
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from commerce_common.testing import FakeClient, text_message
@@ -16,6 +17,7 @@ from atworks_agent import (
     FormatBatchDraft,
     JobDraft,
     JobKind,
+    JobStatus,
     ProfileDraft,
     RuleDraft,
 )
@@ -50,6 +52,7 @@ async def client(tmp_path):
                      scheduler=Scheduler(backend, reports, None, briefings=briefings), insights=insights)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         c.backend = backend
+        c.agent = agent
         yield c
 
 
@@ -173,3 +176,64 @@ async def test_the_audit_route_pages_newest_first_and_reports_the_total(client):
 
 async def test_the_audit_route_needs_a_session(client):
     assert (await client.get("/api/atworks/audit")).status_code in (401, 422)
+
+
+# -- 승인 마크는 어떤 경로에서도 남지 않는다 (Task 9 리뷰 Minor 6) --------------------------------
+
+
+class _Boom:
+    """An executor that dies inside the route, between the mark going on and coming off."""
+
+    def __init__(self, **kwargs):
+        _Boom.state = kwargs["state"]
+
+    async def execute(self, action, args):
+        raise RuntimeError("executor exploded")
+
+
+class _Errored:
+    """An executor whose turn ends in an error result rather than an exception."""
+
+    def __init__(self, **kwargs):
+        self.state = kwargs["state"]
+
+    async def execute(self, action, args):
+        return SimpleNamespace(is_error=True, blocked=None, result_text="tool failed", events=[])
+
+
+async def test_an_exploding_executor_leaves_no_approval_mark_and_both_audit_rows(client):
+    """CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다." Without the
+    try/finally an executor that raised left `approved_job_ids` set on the session state -- a host
+    approval nobody clicked, waiting for the next chat turn to spend."""
+    backend = client.backend
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    job = await backend.stage_job(STAGING, JobDraft(
+        kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"], target_envs=["dev"]), ActorKind.AGENT)
+    before = len(await _rows(client, sid))
+    client.agent.executor_class = _Boom
+
+    with pytest.raises(RuntimeError, match="executor exploded"):
+        await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers={"X-Session-Id": sid})
+
+    assert _Boom.state.approved_job_ids == set()               # the mark came off anyway
+    assert _Boom.state.host_action_job_ids == set()
+    rows = (await _rows(client, sid))[before:]
+    assert [row["action"] for row in rows] == ["apply_job", "apply_job:error"]
+    assert backend.ledger.get(job.job_id).status is JobStatus.STAGED    # nothing was applied
+
+
+async def test_an_error_result_writes_the_error_row_and_still_clears_the_mark(client):
+    """Minor 5: the `:error` outcome row had no test. It precedes the 400 the route raises."""
+    backend = client.backend
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    rule = await backend.stage_rule(STAGING, RuleDraft(
+        api_id="api-001", param="amount", kind="compare", op=">=", value="0"), ActorKind.AGENT)
+    before = len(await _rows(client, sid))
+    client.agent.executor_class = _Errored
+
+    r = await client.post(f"/api/atworks/rules/{rule.rule_id}/apply", headers={"X-Session-Id": sid})
+
+    assert r.status_code == 400 and r.json()["detail"] == "tool failed"
+    rows = (await _rows(client, sid))[before:]
+    assert [row["action"] for row in rows] == ["apply_rule", "apply_rule:error"]
+    assert rows[-1]["target_kind"] == "rule" and rows[-1]["target_id"] == rule.rule_id

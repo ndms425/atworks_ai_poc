@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from collections.abc import Callable
@@ -42,6 +43,9 @@ logger = logging.getLogger(__name__)
 #: The `retention_state.partition_key` prefixes, one per step, plus the once-a-day guard.
 STEPS = ("runs_archived", "bodies_deleted", "archive_purged", "insight_cache_rotated", "sessions_swept")
 DAILY_GUARD = "daily"
+#: Rows per body-DELETE statement. Small enough that no single statement holds the loop for
+#: seconds at 450k rows, large enough that the loop is a few dozen statements, not thousands.
+BODY_DELETE_SLICE = 5_000
 
 
 class TimestampedSessionStore(SessionStore[StateT]):
@@ -103,21 +107,26 @@ class Retention:
     def local_date(self, now: datetime) -> date:
         return now.astimezone(ZoneInfo(self.config.briefing_tz)).date()
 
-    def run(self, now: datetime) -> dict[str, int]:
+    async def run(self, now: datetime) -> dict[str, int]:
         """One pass over every tier. Returns ``{step: rows affected}`` and writes one
         ``retention_state`` row per step (`<step>:<YYYY-MM-DD>`), so what ran on which day is
-        itself evidence — the same reason the audit log exists."""
+        itself evidence — the same reason the audit log exists.
+
+        ``async`` because it runs at the scheduler's tick tail, inside the same event loop that
+        serves chat SSE: the two big steps are broken into bounded statements with a yield
+        between them (spec §6 "일 단위 이관"), so a day's housekeeping can never park the loop the
+        way one whole-dataset statement did. It stays on the loop's own thread deliberately —
+        the SQLite connection is shared with every read and every ingest, and handing a statement
+        on it to ``asyncio.to_thread`` would put two threads on one connection."""
         day = self.local_date(now).isoformat()
         counts: dict[str, int] = {}
 
         # 핫 -> 콜드. Moves, never deletes; rollups/watermarks/current_state are permanent and
         # are deliberately not touched, so every aggregate read answers identically afterwards.
-        counts["runs_archived"] = self.store.archive_runs_before(
-            now - timedelta(days=self.config.retention_hot_days), now)
+        counts["runs_archived"] = await self._archive_runs(now)
 
         # 본문 삭제 -- the one tier that really goes away (spec §6).
-        counts["bodies_deleted"] = self.store.delete_bodies_before(
-            now - timedelta(days=self.config.retention_body_days))
+        counts["bodies_deleted"] = await self._delete_bodies(now)
 
         # 콜드 삭제: ONLY when a cutoff date is configured AND has passed. None = 영구 보관.
         cold_until = self.config.retention_cold_until
@@ -135,16 +144,40 @@ class Retention:
             self.store.set_retention_state(f"{step}:{day}", now)
         return counts
 
-    def maybe_run(self, now: datetime) -> dict[str, int] | None:
+    async def maybe_run(self, now: datetime) -> dict[str, int] | None:
         """Once per local day (``briefing_tz``), guarded by the ``daily:<YYYY-MM-DD>`` row —
         the same shape as the briefing's file-existence guard, and idempotent for the same
         reason: a tick every 60s must not re-archive all day. Returns None when already done."""
         key = f"{DAILY_GUARD}:{self.local_date(now).isoformat()}"
         if self.store.get_retention_state(key) is not None:
             return None
-        counts = self.run(now)
+        counts = await self.run(now)
         self.store.set_retention_state(key, now)
         return counts
+
+    async def _archive_runs(self, now: datetime) -> int:
+        """One ``day`` partition per transaction, oldest first, with the loop handed back between
+        days. Each partition is independently correct and the whole step is idempotent, so a
+        crash (or a cancelled tick) mid-way leaves committed days moved and the rest for
+        tomorrow — the same "committed slices are correct" property the chunked ingest has."""
+        cutoff = now - timedelta(days=self.config.retention_hot_days)
+        moved = 0
+        for day in self.store.run_days_before(cutoff):
+            moved += self.store.archive_runs_before(cutoff, now, day)
+            await asyncio.sleep(0)
+        return moved
+
+    async def _delete_bodies(self, now: datetime) -> int:
+        """Bounded slices, a yield between each. No day partition here — ``bodies`` has no ``day``
+        column; ``captured_at`` plus a row cap is the same bound by a different key."""
+        cutoff = now - timedelta(days=self.config.retention_body_days)
+        deleted = 0
+        while True:
+            slice_deleted = self.store.delete_bodies_before(cutoff, BODY_DELETE_SLICE)
+            deleted += slice_deleted
+            await asyncio.sleep(0)
+            if slice_deleted < BODY_DELETE_SLICE:
+                return deleted
 
     def _rotate_insight_cache(self, now: datetime) -> int:
         """``insights_out/<operator>/<YYYY-MM-DD>/`` older than ``insights_cache_days`` — a

@@ -31,6 +31,7 @@ import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from atworks_agent import (
@@ -104,12 +105,20 @@ CREATE TABLE IF NOT EXISTS runs_archive (
     day TEXT,
     archived_at TEXT NOT NULL
 );
+-- The archive is READ through the same `list_runs`/`count_runs` code path as the hot partition
+-- (`FROM runs_archive AS runs`), so it needs the same two access shapes, or a cold page degrades
+-- into a full scan + temp sort exactly where the hot one is a seek.
+CREATE INDEX IF NOT EXISTS idx_runs_archive_executed ON runs_archive(executed_at DESC, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_archive_api_executed ON runs_archive(api_id, executed_at DESC);
 
 CREATE TABLE IF NOT EXISTS bodies (
     run_id TEXT PRIMARY KEY,
     body JSON,
     captured_at TEXT
 );
+-- Retention deletes bodies in bounded slices (`delete_bodies_before(limit=...)`); without this
+-- index every slice re-scans the whole table to find the next N expired rows.
+CREATE INDEX IF NOT EXISTS idx_bodies_captured_at ON bodies(captured_at);
 
 CREATE TABLE IF NOT EXISTS current_state (
     api_id TEXT NOT NULL,
@@ -200,6 +209,15 @@ CREATE TABLE IF NOT EXISTS retention_state (
     archived_at TEXT NOT NULL
 );
 """
+
+
+class _AllDays:
+    """Sentinel type for ``archive_runs_before(day=...)``. A plain ``None`` default is taken: a
+    ``day`` column CAN be NULL, and "the partition whose day is NULL" has to stay expressible."""
+
+
+#: ``archive_runs_before``'s default -- "every day partition, one statement".
+ALL_DAYS = _AllDays()
 
 
 def _iso(dt: datetime) -> str:
@@ -949,26 +967,69 @@ class Store:
         "executed_at, executed_by, failed_rules, day"
     )
 
-    def archive_runs_before(self, cutoff: datetime, archived_at: datetime) -> int:
-        """Move (never delete) every run older than ``cutoff`` from the hot partition into
-        ``runs_archive``, in ONE transaction. Returns how many rows moved. Rollups, watermarks,
-        cell state and the report artifacts are permanent and are deliberately untouched: the
-        aggregate reads keep answering identically after a cold move (spec §6)."""
-        moved = self._conn.execute(
+    def newest_run_at(self) -> datetime | None:
+        """The newest ``executed_at`` in the hot partition, or None when it is empty. Public
+        because the bench needs it to age a whole dataset out in one retention pass without
+        reaching into the connection or a private parser."""
+        newest = self._conn.execute("SELECT MAX(executed_at) FROM runs").fetchone()[0]
+        return _parse_iso(newest) if newest is not None else None
+
+    def run_days_before(self, cutoff: datetime) -> list[str | None]:
+        """The distinct ``day`` partitions holding runs older than ``cutoff``, oldest first —
+        the unit retention archives in (spec §6 "일 단위 이관"). One day per transaction is what
+        lets the daily job hand the event loop back between partitions instead of holding it for
+        the length of one whole-dataset statement."""
+        return [
+            row[0] for row in self._conn.execute(
+                "SELECT DISTINCT day FROM runs WHERE executed_at < ? ORDER BY day", (_iso(cutoff),)
+            ).fetchall()
+        ]
+
+    def archive_runs_before(self, cutoff: datetime, archived_at: datetime,
+                            day: str | None | _AllDays = ALL_DAYS) -> int:
+        """Move (never delete) runs older than ``cutoff`` from the hot partition into
+        ``runs_archive``, in ONE transaction. ``day`` scopes the move to a single ``day``
+        partition (``ALL_DAYS``, the default, moves every one of them at once); ``day IS ?`` is
+        null-safe, so a row whose partition was never stamped is still reachable.
+
+        Returns how many rows were **deleted from ``runs``** — the true moved count. The INSERT's
+        rowcount would under-report a re-run over rows already sitting in the archive
+        (``INSERT OR IGNORE``), and the archive is exactly the place where a re-run is expected.
+        Rollups, watermarks, cell state and the report artifacts are permanent and are
+        deliberately untouched: the aggregate reads keep answering identically after a cold move
+        (spec §6)."""
+        scope = "" if day is ALL_DAYS else " AND day IS ?"
+        params: tuple[Any, ...] = () if day is ALL_DAYS else (day,)
+        self._conn.execute(
             f"INSERT OR IGNORE INTO runs_archive ({self._RUN_COLUMNS}, archived_at) "
-            f"SELECT {self._RUN_COLUMNS}, ? FROM runs WHERE executed_at < ?",
-            (_iso(archived_at), _iso(cutoff)),
+            f"SELECT {self._RUN_COLUMNS}, ? FROM runs WHERE executed_at < ?{scope}",
+            (_iso(archived_at), _iso(cutoff), *params),
+        )
+        moved = self._conn.execute(
+            f"DELETE FROM runs WHERE executed_at < ?{scope}", (_iso(cutoff), *params)
         ).rowcount
-        self._conn.execute("DELETE FROM runs WHERE executed_at < ?", (_iso(cutoff),))
         self._conn.commit()
         return moved
 
-    def delete_bodies_before(self, cutoff: datetime) -> int:
+    def delete_bodies_before(self, cutoff: datetime, limit: int | None = None) -> int:
         """The ONE tier that is actually deleted (spec §6): a captured response body is the only
         data that can carry personal or financial values, so it is dropped at
         ``retention_body_days`` and a parity re-diff outside that window falls back to a
-        status-only verdict with a "본문 만료" note."""
-        deleted = self._conn.execute("DELETE FROM bodies WHERE captured_at < ?", (_iso(cutoff),)).rowcount
+        status-only verdict with a "본문 만료" note.
+
+        ``limit`` bounds ONE statement to that many rows (the caller loops until it returns 0), so
+        the daily job never holds the event loop inside a single multi-hundred-thousand-row
+        DELETE. ``DELETE ... LIMIT`` is a compile-time SQLite option, hence the ``run_id IN
+        (SELECT ... LIMIT ?)`` shape, which every build has."""
+        if limit is None:
+            deleted = self._conn.execute(
+                "DELETE FROM bodies WHERE captured_at < ?", (_iso(cutoff),)).rowcount
+        else:
+            deleted = self._conn.execute(
+                "DELETE FROM bodies WHERE run_id IN "
+                "(SELECT run_id FROM bodies WHERE captured_at < ? LIMIT ?)",
+                (_iso(cutoff), limit),
+            ).rowcount
         self._conn.commit()
         return deleted
 

@@ -211,9 +211,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         await audit_action(record, action, "job", job_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
-        execution = await executor.execute(action, {"job_id": job_id})
-        record.state.approved_job_ids.discard(job_id)
-        record.state.host_action_job_ids.discard(job_id)
+        # try/finally: the approval mark comes off on EVERY path, including an executor that
+        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
+        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
+        # writes the `:error` row before re-raising, so an exploding executor still leaves the
+        # audit pair rather than a bare attempt.
+        try:
+            execution = await executor.execute(action, {"job_id": job_id})
+        except Exception:
+            await audit_action(record, action, "job", job_id, "error")
+            raise
+        finally:
+            record.state.approved_job_ids.discard(job_id)
+            record.state.host_action_job_ids.discard(job_id)
         if execution.is_error:
             await audit_action(record, action, "job", job_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
@@ -259,9 +269,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         await audit_action(record, action, "rule", rule_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
-        execution = await executor.execute(action, {"rule_id": rule_id})
-        record.state.approved_rule_ids.discard(rule_id)
-        record.state.host_action_rule_ids.discard(rule_id)
+        # try/finally: the approval mark comes off on EVERY path, including an executor that
+        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
+        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
+        # writes the `:error` row before re-raising, so an exploding executor still leaves the
+        # audit pair rather than a bare attempt.
+        try:
+            execution = await executor.execute(action, {"rule_id": rule_id})
+        except Exception:
+            await audit_action(record, action, "rule", rule_id, "error")
+            raise
+        finally:
+            record.state.approved_rule_ids.discard(rule_id)
+            record.state.host_action_rule_ids.discard(rule_id)
         if execution.is_error:
             await audit_action(record, action, "rule", rule_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
@@ -309,9 +329,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         await audit_action(record, action, "profile", profile_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
-        execution = await executor.execute(action, {"profile_id": profile_id})
-        record.state.approved_profile_ids.discard(profile_id)
-        record.state.host_action_profile_ids.discard(profile_id)
+        # try/finally: the approval mark comes off on EVERY path, including an executor that
+        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
+        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
+        # writes the `:error` row before re-raising, so an exploding executor still leaves the
+        # audit pair rather than a bare attempt.
+        try:
+            execution = await executor.execute(action, {"profile_id": profile_id})
+        except Exception:
+            await audit_action(record, action, "profile", profile_id, "error")
+            raise
+        finally:
+            record.state.approved_profile_ids.discard(profile_id)
+            record.state.host_action_profile_ids.discard(profile_id)
         if execution.is_error:
             await audit_action(record, action, "profile", profile_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
@@ -357,9 +387,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         await audit_action(record, action, "format_batch", batch_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
-        execution = await executor.execute(action, {"batch_id": batch_id})
-        record.state.approved_format_batch_ids.discard(batch_id)
-        record.state.host_action_format_batch_ids.discard(batch_id)
+        # try/finally: the approval mark comes off on EVERY path, including an executor that
+        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
+        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
+        # writes the `:error` row before re-raising, so an exploding executor still leaves the
+        # audit pair rather than a bare attempt.
+        try:
+            execution = await executor.execute(action, {"batch_id": batch_id})
+        except Exception:
+            await audit_action(record, action, "format_batch", batch_id, "error")
+            raise
+        finally:
+            record.state.approved_format_batch_ids.discard(batch_id)
+            record.state.host_action_format_batch_ids.discard(batch_id)
         if execution.is_error:
             await audit_action(record, action, "format_batch", batch_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)

@@ -89,7 +89,9 @@ class Scheduler:
                 try:
                     # Once per local day, guarded inside maybe_run (spec §6). Same seat as the
                     # briefing and the same rule: housekeeping never stalls or fails a tick.
-                    self.retention.maybe_run(now)
+                    # `await`: the job steps day by day and yields between partitions, so the
+                    # chat SSE turn sharing this loop is never parked behind it.
+                    await self.retention.maybe_run(now)
                 except Exception:
                     logger.exception("retention job failed")
             return executed

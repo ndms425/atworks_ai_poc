@@ -213,13 +213,15 @@ class AtworksBackend(ABC):
         self, session: AtworksSessionContext, job_id: str, run_ids: list[str], schedule_index: int | None
     ) -> JobSpec:
         """job의 실행 1회를 기록한다: run_ids가 이번 실행이 낸 결과(비어 있을 수 있다 — 실행이
-        실패했거나 LATE 재평가가 상한을 넘겨 건너뛴 경우), ``executions``를 정확히 1 늘린다.
+        실패했거나 LATE 재평가가 상한을 넘겨 건너뛴 경우, 인입이 중간에 실패했다면 **커밋된 청크의
+        run_id만** 실린다), ``executions``를 정확히 1 늘린다.
         ``schedule_index``는 이번 실행이 소비한 스케줄의 인덱스다(run_now면 ``None``) — 여러
         스케줄이 각자의 ``done``을 따로 세기 때문에 이 값 없이는 어느 회차가 소비됐는지 알 수 없다.
         REST 어댑터 의무(물질화, spec §4): 한 실행이 낸 run들은 인입 시 ``current_state``/``rollup_day``/
         ``api_watermark``/``operator_api``로 접혀 들어가며 전환(transitions) 카운터는 인입 순서를 기준으로
         증가한다 — run은 **실행 순서대로** 인입되어야 하고, 이미 물질화된 시점보다 오래된 run을 뒤늦게
-        인입하면 전환 수가 왜곡된다(재시도는 run_id 중복 무시로 안전). ``job.run_ids``는 더 자라지 않는다;
+        인입하면 전환 수가 왜곡된다(재시도가 안전한 것은 run_id가 **실행에서 유도**되어 중복 무시가
+        먹힐 때뿐이다 — ``execute_job_once`` 참고). ``job.run_ids``는 더 자라지 않는다;
         ``run_count``/``recent_run_ids``(최근 50)가 그 자리를 대신하고, 리포트는
         ``list_runs(RunsQuery(job_id=...))``로 실행 이력을 읽는다."""
 
@@ -405,10 +407,23 @@ class AtworksBackend(ABC):
         ``add_guardrail_note``로 이유를 남기고, 그 시도 역시 슬롯을 소비한다.
 
         REST 구현 의무(이벤트 루프, spec §9): 400셀짜리 매트릭스 하나가 채팅 SSE 턴을 굶기면 안 된다
-        — 실행 자체도, **인입(쓰기)도** ``max_concurrency`` 크기의 배치로 나누고 배치 사이에 제어를
-        돌려줘야 한다(끊기지 않는 400건 트랜잭션 하나가 정확히 이 SLO를 깨뜨렸다). 배치마다 트랜잭션
-        하나이고, 인입은 ``run_id`` 기준 멱등이라 중간에 끊겨도 커밋된 배치는 정확하며 재인입해도
-        어떤 집계도 이중 계산되지 않는다. ``record_execution``은 그래도 실행당 정확히 한 번이다."""
+        — 실행 자체는 ``max_concurrency`` 크기의 배치로, **인입(쓰기)은** ``ingest_chunk_size`` 크기의
+        배치로 나누고 배치 사이에 제어를 돌려줘야 한다(끊기지 않는 400건 트랜잭션 하나가 정확히 이
+        SLO를 깨뜨렸다). 두 손잡이는 서로 다른 것을 잰다: 앞은 동시에 때리는 셀 수, 뒤는 한 트랜잭션에
+        커밋하는 run 수다. 배치마다 트랜잭션 하나이고, 인입은 ``run_id`` 기준 멱등이라 중간에 끊겨도
+        커밋된 배치는 정확하며 재인입해도 어떤 집계도 이중 계산되지 않는다.
+
+        REST 구현 의무(중간 실패): 인입이 k번째 청크에서 실패하면 **예외를 밖으로 던지지 말 것**.
+        스케줄러의 예외 경로가 ``record_execution``을 한 번 더 불러 한 회차에 슬롯 두 개가 소비된다.
+        대신 실패를 여기서 소유한다 — 커밋된 청크의 run_id들로 ``record_execution``을 **정확히 한 번**
+        부르고(그래야 ``run_count``가 실제로 쓰인 run 수와 맞는다), ``add_guardrail_note``로 이유를
+        남기고, 커밋된 run들을 돌려준다.
+
+        REST 구현 의무(멱등 재인입): 위의 "재인입해도 안전하다"는 run_id가 **실행에서 유도**될 때만
+        참이다 — 같은 (job_id, schedule_index, 셀) 조합은 재시도해도 같은 run_id를 내야 하고, 그래야
+        ``INSERT OR IGNORE``가 중복을 지운다. 호출마다 새 id를 발급하는 구현에서는 재시도가 중복 run을
+        만든다. MockAtworks는 프로세스 카운터(``run-NNNN``)를 쓰므로 이 보증이 없다 — 데모 백엔드라
+        허용하지만, REST 어댑터는 반드시 실행 유도 id를 써야 한다."""
 
     # -- 선택 --------------------------------------------------------------------------
     @abstractmethod

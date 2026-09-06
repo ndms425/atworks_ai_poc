@@ -40,6 +40,11 @@ class AtworksAgentConfig(BaseAgentConfig):
     max_matrix_size: int = Field(default=400, ge=1)            # apis × envs × data 곱의 상한
     max_schedule_count: int = Field(default=14, ge=1)          # 전체 스케줄의 회차 합
     max_concurrency: int = Field(default=4, ge=1, le=32)
+    # 실행(생성) 배치와 인입(쓰기) 배치는 서로 다른 것을 재는 손잡이다: max_concurrency는 대상
+    # 서버로 동시에 몇 셀을 보내느냐이고, ingest_chunk_size는 한 트랜잭션에 몇 run을 커밋하느냐다.
+    # 둘을 같은 값으로 묶으면 400셀 실행이 트랜잭션 100개가 된다(Task 9 리뷰) — 이벤트 루프는
+    # 이미 배치 사이에서 양보하므로, 쓰기 쪽은 더 크게 잡아 커밋 비용을 줄이는 편이 옳다.
+    ingest_chunk_size: int = Field(default=50, ge=1, le=1000)
 
     # -- 승인 --------------------------------------------------------------------------
     require_host_approval: bool = True

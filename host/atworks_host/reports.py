@@ -18,12 +18,15 @@ Task 9 (scale spec §9 "리포트") splits what used to be one growing ``data.js
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from atworks_agent import JobSpec, RunResult, cluster_diffs, compare_bodies
+
+logger = logging.getLogger(__name__)
 
 TEMPLATE = Path(__file__).with_name("report_template.html")
 
@@ -200,7 +203,17 @@ async def _load_bodies(pairs: Sequence[dict], body_loader: BodyLoader) -> dict[s
         for run_id in (pair["a_run_id"], pair["b_run_id"]):
             if run_id in bodies:
                 continue
-            bodies[run_id] = await body_loader(run_id)
+            try:
+                bodies[run_id] = await body_loader(run_id)
+            except Exception:
+                # A body is the ONE tier retention really deletes, and the loader reaches a
+                # store that can be mid-retention, out of disk, or simply gone. That is exactly
+                # the case the status_only row exists for -- one unreadable body degrades ONE
+                # parity row to "본문 만료", never the whole report. Logged, because a loader
+                # raising is not normal even though it is survivable.
+                logger.warning("parity body load failed for run %s; row degrades to status_only",
+                               run_id, exc_info=True)
+                bodies[run_id] = None
     return bodies
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,8 @@ from atworks_agent.types import Binding
 
 from .reports import Reports
 from .store import Store
+
+logger = logging.getLogger(__name__)
 
 
 def _page(rows: list, cursor: str | None, limit: int, *, key) -> Page:
@@ -571,20 +574,43 @@ class MockAtworks(AtworksBackend):
                     executed_by=job.applied_by)
                 produced.append(run)
             await asyncio.sleep(0)
-        # The WRITE is chunked the same way the matrix loop is (Task 9, spec §9): one
-        # `max_concurrency`-sized slice per transaction with a yield between, so a 400-cell job
-        # can no longer park the event loop inside one unbroken ingest -- that single call was
-        # the whole SSE-latency breach the Task 7 bench measured. Each slice is its own
-        # transaction (runs + bodies + the four materialized tables move together, spec §4), and
-        # `ingest` is idempotent per run_id, so a crash mid-execution leaves committed slices
-        # correct and re-ingesting them adds no delta anywhere. `record_execution` still happens
-        # exactly ONCE at the end, whatever the outcome -- the slot contract is unchanged.
+        # The WRITE is chunked (Task 9, spec §9) so a 400-cell job can no longer park the event
+        # loop inside one unbroken ingest -- that single call was the whole SSE-latency breach the
+        # Task 7 bench measured. The chunk is `ingest_chunk_size`, NOT `max_concurrency`: the
+        # generation loop above batches how many cells are computed before yielding, this one
+        # batches how many runs share a transaction, and tying them together made a 400-cell job
+        # 100 commits (Task 9 review). Each slice is its own transaction (runs + bodies + the four
+        # materialized tables move together, spec §4), and `ingest` is idempotent per run_id.
         # `mask` rewrites each body on its way into `bodies` -- store-boundary masking only,
         # per Task 5's `ingest(mask=...)` hook.
-        for start in range(0, len(produced), self._config.max_concurrency):
-            self.store.ingest(produced[start:start + self._config.max_concurrency],
-                              self._config.briefing_tz, mask=lambda b: mask_body(b, policy))
+        chunk = self._config.ingest_chunk_size
+        slices = [produced[start:start + chunk] for start in range(0, len(produced), chunk)]
+        committed: list[RunResult] = []
+        for batch in slices:
+            try:
+                self.store.ingest(batch, self._config.briefing_tz,
+                                  mask=lambda b: mask_body(b, policy))
+            except Exception as error:
+                # A mid-chunk failure is OWNED here, not re-raised: the scheduler's exception
+                # path would call `record_execution` a SECOND time and spend two slots for one
+                # occurrence. The committed chunks are real runs sitting in the store, so the
+                # slot is recorded with exactly those run_ids -- `run_count` then matches what
+                # was actually written -- the reason is left as a guardrail note, and the
+                # committed runs are returned so the report is built over what exists.
+                logger.exception("job %s: ingest failed after %d/%d chunks",
+                                 job_id, len(committed) // chunk, len(slices))
+                self.ledger.record_execution(job_id, [r.run_id for r in committed], schedule_index)
+                self.ledger.add_guardrail_note(
+                    job_id,
+                    f"ingest failed after {len(committed) // chunk}/{len(slices)} chunks: "
+                    f"{type(error).__name__}",
+                )
+                return committed
+            committed.extend(batch)
             await asyncio.sleep(0)
+        # `record_execution` happens exactly ONCE per call whatever the outcome -- on the happy
+        # path here, on the failure path above, and with an empty list on the guardrail path
+        # earlier. The slot contract is unchanged.
         self.ledger.record_execution(job_id, [r.run_id for r in produced], schedule_index)
         return produced
 

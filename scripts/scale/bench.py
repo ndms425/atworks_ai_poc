@@ -46,7 +46,7 @@ from atworks_host.briefing import Briefings
 from atworks_host.insights import InsightPanels
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.retention import Retention
-from atworks_host.store import Store, _parse_iso
+from atworks_host.store import Store
 
 DEFAULT_DB = Path(__file__).resolve().parent / "out"
 
@@ -189,7 +189,7 @@ async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
     # -- retention day job (Task 9) -------------------------------------------------------
     #    `now` is pushed past the newest run by the whole hot window, so the ENTIRE dataset ages
     #    out in this one pass -- an upper bound on any real day's work, not a typical one.
-    rows.append(_retention_probe(store, config, work_dir))
+    rows.append(await _retention_probe(store, config, work_dir))
 
     # -- SSE latency while a 400-cell job executes. Writes 400 runs -- keep it last. Its runs
     #    are stamped "now", so the retention pass above (which archived everything older) left
@@ -198,15 +198,15 @@ async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
     return rows
 
 
-def _retention_probe(store: Store, config: AtworksAgentConfig, work_dir: Path | None) -> Row:
-    newest = store.conn().execute("SELECT MAX(executed_at) FROM runs").fetchone()[0]
+async def _retention_probe(store: Store, config: AtworksAgentConfig, work_dir: Path | None) -> Row:
+    newest = store.newest_run_at()
     if newest is None:
         return Row("retention day job", config.slo_retention_ms, note="empty dataset")
-    when = _parse_iso(newest) + timedelta(days=config.retention_hot_days + 1)
+    when = newest + timedelta(days=config.retention_hot_days + 1)
     with tempfile.TemporaryDirectory(dir=work_dir) as tmp:
         retention = Retention(store, config, Path(tmp) / "insights")
         start = time.perf_counter()
-        counts = retention.run(when)
+        counts = await retention.run(when)
         ms = (time.perf_counter() - start) * 1000
     return Row("retention day job", config.slo_retention_ms, ms,
                note=f"archived {counts['runs_archived']:,}, bodies {counts['bodies_deleted']:,} "

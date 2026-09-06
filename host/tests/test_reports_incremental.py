@@ -1,7 +1,9 @@
 """Task 9 (scale spec §9): the report is three incremental files instead of one growing
 ``data.json``, the scheduler iterates ``active_jobs`` and hands the report only THIS
 occurrence's runs, and ``execute_job_once`` chunks its write as well as its matrix loop."""
+import asyncio
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from atworks_agent import (
     RunStatus,
     TestDataSet,
 )
+from atworks_host import mock_backend
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.reports import TEMPLATE, Reports
 from atworks_host.scheduler import Scheduler
@@ -185,7 +188,7 @@ async def test_tick_runs_retention_at_the_tail_after_the_briefing(tmp_path):
             order.append("briefing")
 
     class RecordingRetention:
-        def maybe_run(self, now):
+        async def maybe_run(self, now):
             order.append("retention")
             return {}
 
@@ -200,7 +203,7 @@ async def test_a_failing_retention_job_never_breaks_the_tick(tmp_path):
     backend = MockAtworks(AtworksAgentConfig(model="m"), FIXTURES)
 
     class BoomRetention:
-        def maybe_run(self, now):
+        async def maybe_run(self, now):
             raise RuntimeError("disk full")
 
     sched = Scheduler(backend, Reports(tmp_path), SESSION, retention=BoomRetention())
@@ -211,9 +214,11 @@ async def test_a_failing_retention_job_never_breaks_the_tick(tmp_path):
     assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
 
 
-async def test_a_400_cell_execution_writes_in_chunks_not_one_transaction():
+async def test_a_400_cell_execution_writes_in_chunks_not_one_transaction(monkeypatch):
     """The SSE breach the Task 7 bench measured was the unbroken 400-run ``store.ingest`` at the
-    end of ``execute_job_once`` -- the matrix loop already yielded, the WRITE did not."""
+    end of ``execute_job_once`` -- the matrix loop already yielded, the WRITE did not. The two
+    batch sizes are DIFFERENT knobs (Task 9 review): `max_concurrency` spaces the generation
+    yields, `ingest_chunk_size` sizes the write transactions."""
     config = AtworksAgentConfig(model="m")
     backend = MockAtworks(config, FIXTURES)
     template = backend.apis["api-001"]
@@ -235,10 +240,115 @@ async def test_a_400_cell_execution_writes_in_chunks_not_one_transaction():
         return original(rows, *args, **kwargs)
 
     backend.store.ingest = counting_ingest
+
+    yields = {"n": 0}
+    real_sleep = asyncio.sleep
+
+    async def counting_sleep(delay, *args, **kwargs):
+        if delay == 0:
+            yields["n"] += 1
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(mock_backend.asyncio, "sleep", counting_sleep)
     produced = await backend.execute_job_once(SESSION, job.job_id)
 
+    generation_yields = -(-400 // config.max_concurrency)      # ceil: one per matrix batch
+    ingest_chunks = -(-400 // config.ingest_chunk_size)        # ceil: one transaction per chunk
     assert len(produced) == 400
-    assert len(sizes) == -(-400 // config.max_concurrency)     # ceil: one transaction per slice
-    assert max(sizes) <= config.max_concurrency
+    assert len(sizes) == ingest_chunks                         # 8, not 100 (max_concurrency=4)
+    assert max(sizes) <= config.ingest_chunk_size
     assert sum(sizes) == 400
+    # the generation loop still hands the loop back on `max_concurrency`, independently of the
+    # (much larger) write chunk: the two yield counts add up, they don't replace each other.
+    assert yields["n"] >= generation_yields
+    assert yields["n"] == generation_yields + ingest_chunks
     assert backend.ledger.get(job.job_id).run_count == 400     # exactly one record_execution
+
+
+# -- 인입 중간 실패 (Task 9 리뷰 Important 2) -----------------------------------------------------
+
+
+def _failing_ingest(backend, fail_on: int):
+    """Wrap ``store.ingest`` so the ``fail_on``-th call (1-based) raises. Returns the wrapper."""
+    original = backend.store.ingest
+    calls = {"n": 0}
+
+    def ingest(runs, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == fail_on:
+            raise sqlite3.OperationalError("database is locked")
+        return original(list(runs), *args, **kwargs)
+
+    backend.store.ingest = ingest
+    return calls
+
+
+async def _four_cell_job(chunk: int = 2):
+    config = AtworksAgentConfig(model="m", ingest_chunk_size=chunk)
+    backend = MockAtworks(config, FIXTURES)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.RUN_NOW, summary="4 cells",
+        api_ids=["api-001", "api-002", "api-003", "api-004"], target_envs=["dev"]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    return config, backend, job
+
+
+async def test_a_mid_chunk_ingest_failure_records_the_slot_once_and_never_re_raises():
+    """The ruling: ``execute_job_once`` OWNS the failure. Re-raising would send the scheduler down
+    its exception path, which calls ``record_execution`` a second time -- two slots spent on one
+    occurrence. Instead the committed chunks are recorded, the reason becomes a guardrail note,
+    and the committed runs come back so the report is built over what actually exists."""
+    config, backend, job = await _four_cell_job()
+    before = backend.store.run_count()
+    _failing_ingest(backend, fail_on=2)
+
+    produced = await backend.execute_job_once(SESSION, job.job_id)      # no exception escapes
+
+    assert len(produced) == config.ingest_chunk_size                    # only the committed chunk
+    assert backend.store.run_count() == before + config.ingest_chunk_size
+    assert all(run.run_id in backend.runs for run in produced)          # ...and they are really there
+    current = backend.ledger.get(job.job_id)
+    assert current.executions == 1                                     # exactly one slot spent
+    assert current.run_count == config.ingest_chunk_size                # ledger matches the store
+    assert any("ingest failed after 1/2 chunks: OperationalError" in note
+               for note in current.guardrail_notes)
+
+
+async def test_the_scheduler_spends_exactly_one_slot_when_ingest_fails_mid_execution(tmp_path):
+    config = AtworksAgentConfig(model="m", ingest_chunk_size=2)
+    backend = MockAtworks(config, FIXTURES)
+    job = await backend.stage_job(SESSION, JobDraft(
+        kind=JobKind.SCHEDULED_RUN, summary="4 cells",
+        api_ids=["api-001", "api-002", "api-003", "api-004"], target_envs=["dev"],
+        schedules=[JobSchedule(kind="daily", at="09:00", tz="Asia/Seoul", from_date="2026-09-05",
+                               count=2)]), ActorKind.AGENT)
+    await backend.apply_job(SESSION, job.job_id)
+    _failing_ingest(backend, fail_on=2)
+    sched = Scheduler(backend, Reports(tmp_path), SESSION)
+
+    await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST))
+
+    current = backend.ledger.get(job.job_id)
+    assert current.executions == 1                                     # NOT 2 -- one occurrence
+    assert current.schedules[0].done == 1
+    assert current.run_count == 2
+
+
+async def test_a_body_loader_that_raises_degrades_one_row_not_the_whole_report(tmp_path):
+    """Important 1: ``_load_bodies`` documented an exception fallback it did not implement -- a
+    loader raising took the whole report down with it."""
+    backend, reports, sched, job = await _scheduled_two_env_job(tmp_path, count=1)
+    assert await sched.tick(datetime(2026, 9, 5, 9, 0, tzinfo=KST)) == [job.job_id]
+    doomed = reports.parity(job.job_id)["rows"][0]["a_run_id"]
+
+    async def flaky_loader(run_id: str):
+        if run_id == doomed:
+            raise sqlite3.OperationalError("no such table: bodies")
+        return await backend.get_body(SESSION, run_id)
+
+    await reports.rediff(job.job_id, [], body_loader=flaky_loader)      # does not raise
+
+    rows = {r["a_run_id"]: r for r in reports.parity(job.job_id)["rows"]}
+    assert rows[doomed]["basis"] == "status_only" and rows[doomed]["note"] == "본문 만료"
+    others = [r for a_run_id, r in rows.items() if a_run_id != doomed]
+    assert others and all(r["basis"] == "body" for r in others)        # every other row survived
