@@ -13,12 +13,18 @@ from .types import ApiSpec, MaskingPolicy, MaskingRule
 if TYPE_CHECKING:
     from .config import AtworksAgentConfig
 
+def unanchored(pattern: str) -> str:
+    """A format-library pattern validates a WHOLE value (`^...$`); a masking rule must find the
+    same shape EMBEDDED in prose ("문의: hong@example.com 으로"). Reuse the asset, drop the anchors."""
+    return pattern.removeprefix("^").removesuffix("$")
+
+
 DEFAULT_MASKING_RULES: list[MaskingRule] = [
     MaskingRule(name="krn-resident-id", pattern=r"\b\d{6}-?[1-4]\d{6}\b"),
     MaskingRule(name="card-number", pattern=r"\b(?:\d[ -]?){15,16}\b"),
     MaskingRule(name="account-number", pattern=r"\b\d{3}-?\d{2,6}-?\d{4,8}\b"),
     MaskingRule(name="phone", pattern=r"\b01[016789]-?\d{3,4}-?\d{4}\b"),
-    MaskingRule(name="email", pattern=NAMED_FORMATS["email"]),
+    MaskingRule(name="email", pattern=unanchored(NAMED_FORMATS["email"])),
 ]
 
 

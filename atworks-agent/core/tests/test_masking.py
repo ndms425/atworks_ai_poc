@@ -71,10 +71,19 @@ def test_phone_rule_masks_a_mobile_number_and_leaves_a_landline():
 def test_email_rule_masks_a_bare_email_and_leaves_plain_text():
     rule = _rule("email")
     from atworks_agent.rules import NAMED_FORMATS
-    assert rule.pattern == NAMED_FORMATS["email"]
+    # the format-library asset is reused minus its whole-value anchors: a validation rule must
+    # match the whole value, a masking rule must find the shape inside prose
+    assert rule.pattern == NAMED_FORMATS["email"][1:-1]
+    assert not rule.pattern.startswith("^") and not rule.pattern.endswith("$")
     policy = _only("email")
     assert mask_body("hong@example.com", policy) == "***"
     assert mask_body("not an email", policy) == "not an email"
+
+
+def test_email_rule_masks_an_email_embedded_in_prose():
+    policy = _only("email")
+    assert mask_body("문의: hong@example.com 으로 연락주세요", policy) == "문의: *** 으로 연락주세요"
+    assert mask_body({"note": "cc a@b.co and c@d.org"}, policy) == {"note": "cc *** and ***"}
 
 
 # -- recursion: nested dict/array leaves masked, keys untouched, non-strings untouched -----------
