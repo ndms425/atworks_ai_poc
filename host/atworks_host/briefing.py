@@ -137,11 +137,24 @@ class Briefings:
         # window — now two SQL counts with no limit, not a count over the top _GROUP_LIMIT groups
         insights = await backend.summarize_insights(
             session, since=now - timedelta(days=cfg.max_aggregate_window_days))
+        # The two job lists come from the two reads that are already bounded by what they mean
+        # (final review I6). `all_jobs(limit=1000)` was neither: the ledger's newest 1,000 jobs
+        # are not the jobs that RAN last night, so an active project would silently drop
+        # executed jobs off the page AND miss staged ones older than it -- and it paged a
+        # thousand JobSpecs to keep a handful.
+        #
+        # `count_runs_by_job` already IS the executed set (one indexed GROUP BY over the window),
+        # so its keys drive one `get_job` each -- at most one per job that actually ran. A job id
+        # with runs but no ledger row (a purged job) is skipped rather than guessed at. Sorted by
+        # run count, then id: the dict's SQL order is not a contract.
         runs_per_job = await backend.count_runs_by_job(session, since=start, until=end)
-        jobs = (await backend.all_jobs(session, limit=1000)).items
-        executed = [{"job_id": j.job_id, "summary": j.summary, "runs": runs_per_job[j.job_id]}
-                    for j in jobs if j.job_id in runs_per_job]
-        pending = [j for j in jobs if j.status is JobStatus.STAGED]
+        executed = []
+        for job_id, count in sorted(runs_per_job.items(), key=lambda kv: (-kv[1], kv[0])):
+            job = await backend.get_job(session, job_id)
+            if job is not None:
+                executed.append({"job_id": job.job_id, "summary": job.summary, "runs": count})
+        # ...and the approval queue is its own read, exact by construction.
+        pending = await backend.get_pending_jobs(session)
         data = _briefing_document(now, counts, groups, insights, executed, pending,
                                   window=(start, end), portal_origin=self.portal_origin)
         folder = self._folder(data["date"])

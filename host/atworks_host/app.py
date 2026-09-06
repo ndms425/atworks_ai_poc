@@ -6,6 +6,7 @@ annotations``) — FastAPI resolves string annotations against a function's glob
 names are local to ``create_app``."""
 
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar
 
@@ -56,6 +57,35 @@ T = TypeVar("T")
 #: What a paged route says when the cursor it was handed cannot be decoded (or no longer points
 #: anywhere). It is the CLIENT's input, so it is a 400, not a 500, and the message says what to do.
 BAD_CURSOR = "stale or malformed cursor; start from the first page"
+
+
+@dataclass(frozen=True)
+class _Surface:
+    """Everything that differs between the four host approval surfaces (job / rule / profile /
+    format batch). They were four copies of the same forty lines, identical down to the comments,
+    differing only in these names -- and the lines they shared are the approval contract itself
+    (mark on, audit pair, try/finally, mark off). `host_action` is now the single copy; this is
+    the table it reads."""
+    kind: str           # audit `target_kind`
+    arg: str            # the executor tool argument this id is passed as
+    noun: str           # how the pending_app_events line names it
+    seen: str           # AtworksSessionState: the provenance dict
+    approved: str       # ...the host-approval mark set
+    host_marks: str     # ...the host-action (discard) mark set
+    remember: str       # ...the method that records a freshly looked-up object
+    lookup: str         # AtworksBackend: the by-id read (never a list page -- see get_rule)
+
+
+JOB_SURFACE = _Surface("job", "job_id", "job", "seen_jobs", "approved_job_ids",
+                       "host_action_job_ids", "remember_job", "get_job")
+RULE_SURFACE = _Surface("rule", "rule_id", "rule", "seen_rules", "approved_rule_ids",
+                        "host_action_rule_ids", "remember_rule", "get_rule")
+PROFILE_SURFACE = _Surface("profile", "profile_id", "comparison profile", "seen_profiles",
+                           "approved_profile_ids", "host_action_profile_ids", "remember_profile",
+                           "get_profile")
+FORMAT_BATCH_SURFACE = _Surface("format_batch", "batch_id", "format batch", "seen_format_batches",
+                                "approved_format_batch_ids", "host_action_format_batch_ids",
+                                "remember_format_batch", "get_format_batch")
 
 
 async def _paged(call: Coroutine[Any, Any, T]) -> T:
@@ -229,19 +259,26 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         del record, ref
         return {"ok": True}
 
-    async def job_action(job_id: str, action: str, record: Record) -> dict:
-        # 카드의 버튼 클릭 = 호스트 자신의 승인. 마크는 클릭 한 번에 소비되고 남지 않는다.
-        # provenance는 모델을 지키는 게이트지 버튼을 지키는 게 아니다: 이 세션이 아직 모르는
-        # job이라도, 호스트가 그 job을 실제로 소유(ledger)하고 있으면 클릭 전에 기억시킨다.
-        if job_id not in record.state.seen_jobs:
-            known = await backend.get_job(context(record), job_id)
+    async def host_action(record: Record, *, action: str, target_id: str, surface: _Surface) -> dict:
+        """The ONE host approval surface, in one place (final review I8). The four routes below
+        were four 40-line copies that differed only in the four names `_Surface` carries; a rule
+        as load-bearing as "the approval mark comes off on every path" must not live in four
+        places, because three of them will eventually be almost right.
+
+        카드의 버튼 클릭 = 호스트 자신의 승인. 마크는 클릭 한 번에 소비되고 남지 않는다.
+        provenance는 모델을 지키는 게이트지 버튼을 지키는 게 아니다: 이 세션이 아직 모르는
+        대상이라도, 호스트가 그것을 실제로 소유(ledger)하고 있으면 클릭 전에 기억시킨다 --
+        상태와 무관한 단건 조회로(`get_job`/`get_rule`/`get_profile`/`get_format_batch`), 목록
+        페이지를 크게 떠서 그 안에서 찾는 식이 아니라.
+        """
+        state = record.state
+        if target_id not in getattr(state, surface.seen):
+            known = await getattr(backend, surface.lookup)(context(record), target_id)
             if known is not None:
-                record.state.remember_job(known)
-        if action == "apply_job":
-            record.state.approved_job_ids.add(job_id)
-        else:
-            record.state.host_action_job_ids.add(job_id)
-        await audit_action(record, action, "job", job_id)
+                getattr(state, surface.remember)(known)
+        approving = action.startswith("apply_")
+        getattr(state, surface.approved if approving else surface.host_marks).add(target_id)
+        await audit_action(record, action, surface.kind, target_id)
         executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
                                         session=context(record), state=record.state, memory=agent.memory)
         # try/finally: the approval mark comes off on EVERY path, including an executor that
@@ -250,23 +287,28 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # writes the `:error` row before re-raising, so an exploding executor still leaves the
         # audit pair rather than a bare attempt.
         try:
-            execution = await executor.execute(action, {"job_id": job_id})
+            execution = await executor.execute(action, {surface.arg: target_id})
         except Exception:
-            await audit_action(record, action, "job", job_id, "error")
+            await audit_action(record, action, surface.kind, target_id, "error")
             raise
         finally:
-            record.state.approved_job_ids.discard(job_id)
-            record.state.host_action_job_ids.discard(job_id)
+            getattr(state, surface.approved).discard(target_id)
+            getattr(state, surface.host_marks).discard(target_id)
         if execution.is_error:
-            await audit_action(record, action, "job", job_id, "error")
+            await audit_action(record, action, surface.kind, target_id, "error")
             raise HTTPException(status_code=400, detail=execution.result_text)
         if execution.blocked is not None:
-            await audit_action(record, action, "job", job_id, "blocked")
+            await audit_action(record, action, surface.kind, target_id, "blocked")
             return {"ok": False, "change": None, "reason": execution.result_text}
-        await audit_action(record, action, "job", job_id, "ok")
-        record.pending_app_events.append(f"Operator {'approved' if action == 'apply_job' else 'dismissed'} job {job_id} from the card.")
+        await audit_action(record, action, surface.kind, target_id, "ok")
+        record.pending_app_events.append(
+            f"Operator {'approved' if approving else 'dismissed'} {surface.noun} {target_id} from the card."
+        )
         change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
         return {"ok": True, "change": change}
+
+    async def job_action(job_id: str, action: str, record: Record) -> dict:
+        return await host_action(record, action=action, target_id=job_id, surface=JOB_SURFACE)
 
     # web-shared의 useMerchantChat.actOnChange가 치는 경로 — 이름을 바꾸지 않는다.
     @router.post("/changes/{job_id:path}/apply")
@@ -290,50 +332,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
                 "total": page.total}
 
     async def rule_action(rule_id: str, action: str, record: Record) -> dict:
-        # rule_action은 job_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
-        # 클릭 한 번에 소비되고 남지 않는다. provenance는 모델을 지키는 게이트지 버튼을 지키는
-        # 게 아니다: 이 세션이 아직 모르는 rule이라도, 호스트가 그 rule을 실제로 소유(ledger)
-        # 하고 있으면 클릭 전에 기억시킨다.
-        if rule_id not in record.state.seen_rules:
-            # A single indexed read by id (ABC `get_rule`). The earlier shape — scan the newest
-            # `list_rules(limit=1000)` for a match — silently stopped working for any rule older
-            # than that page, and the click then failed the provenance gate instead of approving
-            # the rule the operator was looking at.
-            known = await backend.get_rule(context(record), rule_id)
-            if known is not None:
-                record.state.remember_rule(known)
-        if action == "apply_rule":
-            record.state.approved_rule_ids.add(rule_id)
-        else:
-            record.state.host_action_rule_ids.add(rule_id)
-        await audit_action(record, action, "rule", rule_id)
-        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
-                                        session=context(record), state=record.state, memory=agent.memory)
-        # try/finally: the approval mark comes off on EVERY path, including an executor that
-        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
-        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
-        # writes the `:error` row before re-raising, so an exploding executor still leaves the
-        # audit pair rather than a bare attempt.
-        try:
-            execution = await executor.execute(action, {"rule_id": rule_id})
-        except Exception:
-            await audit_action(record, action, "rule", rule_id, "error")
-            raise
-        finally:
-            record.state.approved_rule_ids.discard(rule_id)
-            record.state.host_action_rule_ids.discard(rule_id)
-        if execution.is_error:
-            await audit_action(record, action, "rule", rule_id, "error")
-            raise HTTPException(status_code=400, detail=execution.result_text)
-        if execution.blocked is not None:
-            await audit_action(record, action, "rule", rule_id, "blocked")
-            return {"ok": False, "change": None, "reason": execution.result_text}
-        await audit_action(record, action, "rule", rule_id, "ok")
-        record.pending_app_events.append(
-            f"Operator {'approved' if action == 'apply_rule' else 'dismissed'} rule {rule_id} from the card."
-        )
-        change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
-        return {"ok": True, "change": change}
+        return await host_action(record, action=action, target_id=rule_id, surface=RULE_SURFACE)
 
     @router.post("/rules/{rule_id}/apply")
     async def approve_rule(rule_id: str, record: CurrentSession) -> dict:
@@ -352,47 +351,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
                 "total": page.total}
 
     async def profile_action(profile_id: str, action: str, record: Record) -> dict:
-        # profile_action은 rule_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
-        # 클릭 한 번에 소비되고 남지 않는다. provenance는 모델을 지키는 게이트지 버튼을 지키는
-        # 게 아니다: 이 세션이 아직 모르는 profile이라도, 호스트가 그 profile을 실제로 소유(ledger)
-        # 하고 있으면 클릭 전에 기억시킨다.
-        if profile_id not in record.state.seen_profiles:
-            # A single indexed read by id (ABC `get_profile`) — see rule_action above.
-            known = await backend.get_profile(context(record), profile_id)
-            if known is not None:
-                record.state.remember_profile(known)
-        if action == "apply_profile":
-            record.state.approved_profile_ids.add(profile_id)
-        else:
-            record.state.host_action_profile_ids.add(profile_id)
-        await audit_action(record, action, "profile", profile_id)
-        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
-                                        session=context(record), state=record.state, memory=agent.memory)
-        # try/finally: the approval mark comes off on EVERY path, including an executor that
-        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
-        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
-        # writes the `:error` row before re-raising, so an exploding executor still leaves the
-        # audit pair rather than a bare attempt.
-        try:
-            execution = await executor.execute(action, {"profile_id": profile_id})
-        except Exception:
-            await audit_action(record, action, "profile", profile_id, "error")
-            raise
-        finally:
-            record.state.approved_profile_ids.discard(profile_id)
-            record.state.host_action_profile_ids.discard(profile_id)
-        if execution.is_error:
-            await audit_action(record, action, "profile", profile_id, "error")
-            raise HTTPException(status_code=400, detail=execution.result_text)
-        if execution.blocked is not None:
-            await audit_action(record, action, "profile", profile_id, "blocked")
-            return {"ok": False, "change": None, "reason": execution.result_text}
-        await audit_action(record, action, "profile", profile_id, "ok")
-        record.pending_app_events.append(
-            f"Operator {'approved' if action == 'apply_profile' else 'dismissed'} comparison profile {profile_id} from the card."
-        )
-        change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
-        return {"ok": True, "change": change}
+        return await host_action(record, action=action, target_id=profile_id, surface=PROFILE_SURFACE)
 
     @router.post("/profiles/{profile_id}/apply")
     async def approve_profile(profile_id: str, record: CurrentSession) -> dict:
@@ -411,46 +370,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return {"format_batches": [format_batch_record(b) for b in await backend.get_pending_format_batches(context(record))]}
 
     async def format_batch_action(batch_id: str, action: str, record: Record) -> dict:
-        # format_batch_action은 rule_action의 미러: 카드의 버튼 클릭이 호스트 자신의 승인이다. 마크는
-        # 클릭 한 번에 소비되고 남지 않는다. provenance는 모델을 지키는 게이트지 버튼을 지키는
-        # 게 아니다: 이 세션이 아직 모르는 batch라도, 호스트가 그 batch를 실제로 소유(ledger)
-        # 하고 있으면 클릭 전에 기억시킨다.
-        if batch_id not in record.state.seen_format_batches:
-            known = next((b for b in await backend.get_pending_format_batches(context(record)) if b.batch_id == batch_id), None)
-            if known is not None:
-                record.state.remember_format_batch(known)
-        if action == "apply_format_batch":
-            record.state.approved_format_batch_ids.add(batch_id)
-        else:
-            record.state.host_action_format_batch_ids.add(batch_id)
-        await audit_action(record, action, "format_batch", batch_id)
-        executor = agent.executor_class(backend=backend, config=agent.config, skills=agent.skills,
-                                        session=context(record), state=record.state, memory=agent.memory)
-        # try/finally: the approval mark comes off on EVERY path, including an executor that
-        # raises (CLAUDE.md: "마크는 클릭 직전에 붙고, 결과와 무관하게 직후에 떨어진다"). A mark left
-        # behind would let the NEXT chat turn spend a host approval nobody clicked. The `except`
-        # writes the `:error` row before re-raising, so an exploding executor still leaves the
-        # audit pair rather than a bare attempt.
-        try:
-            execution = await executor.execute(action, {"batch_id": batch_id})
-        except Exception:
-            await audit_action(record, action, "format_batch", batch_id, "error")
-            raise
-        finally:
-            record.state.approved_format_batch_ids.discard(batch_id)
-            record.state.host_action_format_batch_ids.discard(batch_id)
-        if execution.is_error:
-            await audit_action(record, action, "format_batch", batch_id, "error")
-            raise HTTPException(status_code=400, detail=execution.result_text)
-        if execution.blocked is not None:
-            await audit_action(record, action, "format_batch", batch_id, "blocked")
-            return {"ok": False, "change": None, "reason": execution.result_text}
-        await audit_action(record, action, "format_batch", batch_id, "ok")
-        record.pending_app_events.append(
-            f"Operator {'approved' if action == 'apply_format_batch' else 'dismissed'} format batch {batch_id} from the card."
-        )
-        change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
-        return {"ok": True, "change": change}
+        return await host_action(record, action=action, target_id=batch_id, surface=FORMAT_BATCH_SURFACE)
 
     @router.post("/format-batches/{batch_id}/apply")
     async def approve_format_batch(batch_id: str, record: CurrentSession) -> dict:

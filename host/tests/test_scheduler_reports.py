@@ -318,6 +318,9 @@ class RecordingBackend(AtworksBackend):
     async def get_pending_format_batches(self, session):
         raise NotImplementedError
 
+    async def get_format_batch(self, session, batch_id):
+        raise NotImplementedError
+
     async def apply_format_batch(self, session, batch_id):
         raise NotImplementedError
 

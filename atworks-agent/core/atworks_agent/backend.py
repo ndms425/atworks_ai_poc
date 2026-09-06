@@ -345,6 +345,13 @@ class AtworksBackend(ABC):
     async def get_pending_format_batches(self, session: AtworksSessionContext) -> list[FormatBatch]: ...
 
     @abstractmethod
+    async def get_format_batch(self, session: AtworksSessionContext, batch_id: str) -> FormatBatch | None:
+        """batch_id 하나를 그대로 읽는다 — 없으면 None. ``get_rule``/``get_profile``과 같은 이유의
+        단건 조회다. 호스트의 승인 라우트가 **대기 목록만** 훑어 찾는 방식은 이미 적용/폐기된
+        배치를 못 찾았고, 그러면 클릭이 provenance 게이트에서 막혔다 — 상태와 무관한 단건 조회여야
+        한다. REST 구현 의무: 인덱스된 단건 조회이며 목록의 정렬/커서와 무관하다."""
+
+    @abstractmethod
     async def apply_format_batch(self, session: AtworksSessionContext, batch_id: str) -> FormatBatch:
         """승인된 배치를 적용한다: outcome이 new인 항목만 라이브러리에 더하고 duplicate/invalid는
         건드리지 않는다. new가 0건이어도 적용은 되고(라이브러리는 안 바뀐다) — 그 결과를 보고한다."""

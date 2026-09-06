@@ -320,6 +320,9 @@ class InMemoryBackend(AtworksBackend):
     async def get_pending_format_batches(self, session):
         return self.format_batch_ledger.pending()
 
+    async def get_format_batch(self, session, batch_id):
+        return self.format_batch_ledger.get(batch_id)
+
     async def apply_format_batch(self, session, batch_id):
         return self.format_batch_ledger.apply(batch_id, actor=session.operator)
 

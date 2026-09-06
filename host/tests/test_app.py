@@ -521,6 +521,56 @@ async def test_rule_and_profile_actions_look_the_id_up_directly(client_backend, 
     assert p.status_code == 200 and p.json()["change"]["status"] == "applied"
 
 
+async def test_format_batch_action_looks_the_id_up_directly(client_backend, monkeypatch):
+    """Final review I9. The format-batch route re-learned an unseen batch by scanning
+    `get_pending_format_batches()` -- the PENDING list -- so a batch that was already applied or
+    discarded could not be found at all, and the click failed the provenance gate instead of
+    reporting what actually happened to it. It uses the ABC's `get_format_batch` now, which is
+    status-blind, like `get_rule`/`get_profile`."""
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    batch = await backend.stage_format_batch(
+        session, FormatBatchDraft(summary="사내 코드 포맷", formats=[
+            {"name": "contract-no", "pattern": r"^C-\d{6}$", "pass_examples": ["C-123456"],
+             "fail_examples": ["C-12345"]}]), ActorKind.AGENT)
+
+    async def _boom(*args, **kwargs):
+        raise AssertionError("the action path must not scan the pending queue to find one id")
+
+    monkeypatch.setattr(backend, "get_pending_format_batches", _boom)
+
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    r = await client.post(f"/api/atworks/format-batches/{batch.batch_id}/apply", headers=h)
+    assert r.status_code == 200 and r.json()["change"]["status"] == "applied"
+
+
+async def test_the_four_host_surfaces_share_one_helper_and_keep_their_wording(client_backend):
+    """Final review I8: four 40-line copies became one `host_action` + four one-line wrappers.
+    Behaviour is what must not move -- the audit pair, the mark lifecycle, and the operator-facing
+    sentence each surface queues for the next turn."""
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    job = await backend.stage_job(
+        session, JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-001"],
+                          target_envs=["dev"]), ActorKind.AGENT)
+    rule = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT)
+
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    assert (await client.post(f"/api/atworks/changes/{job.job_id}/apply", headers=h)).status_code == 200
+    assert (await client.post(f"/api/atworks/rules/{rule.rule_id}/discard", headers=h)).status_code == 200
+
+    entries = [e.model_dump(mode="json") for e in (await backend.audit(session, limit=50)).items]
+    pairs = {(e["action"], e["target_kind"]) for e in entries}
+    assert ("apply_job", "job") in pairs and ("apply_job:ok", "job") in pairs
+    assert ("discard_rule", "rule") in pairs and ("discard_rule:ok", "rule") in pairs
+    # the ledgers really moved (the helper is a refactor, not a stub)
+    assert (await backend.get_job(session, job.job_id)).status.value == "applied"
+    assert (await backend.get_rule(session, rule.rule_id)).status.value == "discarded"
+
+
 async def test_apply_rule_route_marks_then_consumes_approval(client_backend):
     client, backend = client_backend
     session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")

@@ -430,7 +430,12 @@ async def test_briefing_over_a_5k_run_day_equals_the_run_list_oracle(tmp_path):
                             window=(start, end), portal_origin="http://localhost:3110")
 
     assert data["counts"] == oracle["counts"] and data["counts"]["total"] == 5000
-    assert data["jobs"]["executed"] == oracle["jobs"]["executed"]
+    # Same SET of executed jobs with the same run counts; the ORDER is not a contract and the two
+    # paths no longer share one (final review I6: the query-driven path drives off
+    # `count_runs_by_job`'s keys -- the jobs that actually ran -- and ranks by run count, while
+    # the run-list oracle follows `all_jobs`' created_at order).
+    by_id = {j["job_id"]: j for j in data["jobs"]["executed"]}
+    assert by_id == {j["job_id"]: j for j in oracle["jobs"]["executed"]}
     assert sorted(j["runs"] for j in data["jobs"]["executed"]) == [2500, 2500]
     assert data["jobs"]["pending"] == oracle["jobs"]["pending"]
     assert data["insights"] == oracle["insights"]

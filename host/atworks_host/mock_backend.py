@@ -503,6 +503,10 @@ class MockAtworks(AtworksBackend):
     async def get_pending_format_batches(self, session):
         return self.format_batch_ledger.pending()
 
+    async def get_format_batch(self, session, batch_id: str) -> FormatBatch | None:
+        del session
+        return self.format_batch_ledger.get(batch_id)
+
     async def apply_format_batch(self, session, batch_id):
         applied = self.format_batch_ledger.apply(batch_id, actor=session.operator)
         self._audit(session, "applied", "format_batch", batch_id)
