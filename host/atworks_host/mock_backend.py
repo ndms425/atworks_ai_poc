@@ -44,7 +44,6 @@ from atworks_agent import (
     encode_cursor,
     enforce_execution_matrix,
     evaluate,
-    operator_scope,
     resolve_select_where,
 )
 from atworks_agent.aggregation import aggregate
@@ -504,7 +503,7 @@ class MockAtworks(AtworksBackend):
         fails = self.store.count_runs(status="fail")
         errors = self.store.count_runs(status="error")
         now = session.local_now() or datetime.now(UTC)
-        scope = operator_scope(list(self.runs.values()), session.operator, self._config.scope_window_days, now)
+        scope = self.store.operator_scope_ids(session.operator, self._config.scope_window_days, now)
         return {"project": session.project_id, "allowed_targets": list(self._config.allowed_target_envs),
                 "recent_counts": {"fail": fails, "error": errors, "pending_jobs": len(self.ledger.pending())},
                 "operator": session.operator, "operator_role": session.role,
