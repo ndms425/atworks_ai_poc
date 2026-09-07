@@ -145,6 +145,24 @@ class AtworksAgentConfig(BaseAgentConfig):
     slo_sse_latency_ms: int = 100
     slo_retention_ms: int = 30_000
 
+    # -- 자가발전 질의 엔진 (self-growth, spec 2026-09-07) -----------------------------
+    enable_query_runs: bool = True       # query_runs/present_query_table/note_unmet_ask/propose_alias
+    enable_growth: bool = True           # Growth 뷰/summary 노출
+    memory_extract_facts: bool = False   # 턴 후 자유 사실 추출은 켜지 않는다 -- 저장되는 건 어휘뿐
+    # QuerySpec.dimensions/limit 자체의 고정 상한(각각 max_length=2, le=50)과 짝을 이루는 config
+    # 값 -- 도구 스키마의 maxItems/maximum이 여기서 나오므로(캐시 안정 순함수) 모델의 고정 상한을
+    # 넘길 수 없다.
+    max_query_dimensions: int = Field(default=2, ge=1, le=2)
+    max_query_limit: int = Field(default=50, ge=1, le=50)
+    slo_query_ms: int = Field(default=300, ge=1)
+    ask_log_retention_days: int = Field(default=365, ge=1)
+    promote_window_days: int = Field(default=7, ge=1)
+    promote_min_users: int = Field(default=3, ge=1)
+    promote_min_asks: int = Field(default=5, ge=1)
+    vocabulary_max_inject: int = Field(default=8, ge=1)
+    vocabulary_cooldown_days: int = Field(default=30, ge=1)
+    vocabulary_auto_demote_rejections: int = Field(default=3, ge=1)
+
     @property
     def stages_jobs(self) -> bool:
         return self.enable_jobs
@@ -184,4 +202,8 @@ class AtworksAgentConfig(BaseAgentConfig):
             }
         if not self.enable_screen_directives:
             names |= {"navigate_screen", "highlight_screen"}
+        if not self.enable_query_runs:
+            # These tool names do not exist in the registry yet (Task 3 adds them) -- the gate is
+            # data now so later tasks only have to add the tools, never touch this method.
+            names |= {"query_runs", "present_query_table", "note_unmet_ask", "propose_alias"}
         return frozenset(names)

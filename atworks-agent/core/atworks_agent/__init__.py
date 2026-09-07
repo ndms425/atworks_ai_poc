@@ -1,5 +1,14 @@
 # ruff: noqa: F401 -- this module's job is to re-export; __all__ is computed from dir().
 from .backend import AtworksBackend
+from .catalog import (
+    DIMENSIONS,
+    MEASURES,
+    DimInfo,
+    MeasureInfo,
+    catalog_hint,
+    cluster_key_for_spec,
+    title_for_spec,
+)
 from .config import AtworksAgentConfig
 from .cursor import decode_cursor, encode_cursor
 from .executor import AtworksToolExecutor, build_memory
@@ -68,6 +77,8 @@ from .types import (
     AggregateQuery,
     ApiSpec,
     ApiWatermark,
+    AskEntry,
+    AskOutcome,
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
@@ -75,10 +86,13 @@ from .types import (
     Binding,
     CellState,
     ComparisonProfile,
+    Dimension,
     FailedRank,
     FormatBatch,
     FormatBatchEntry,
     GroupBy,
+    GrowthSummary,
+    HttpMethod,
     InsightCandidate,
     InsightItem,
     InsightKind,
@@ -91,10 +105,15 @@ from .types import (
     JobStatus,
     MaskingPolicy,
     MaskingRule,
+    Measure,
     OperatorProfile,
     OperatorRole,
     Page,
     ProfileStatus,
+    QueryFilters,
+    QueryResult,
+    QueryRow,
+    QuerySpec,
     RuleRecommendation,
     RuleStatus,
     RunGroup,
@@ -102,12 +121,15 @@ from .types import (
     RunsQuery,
     RunStatus,
     RunStatusFilter,
+    SavedQuestion,
     ScopeSummary,
     ScreenFilter,
     ScreenState,
     ScreenTarget,
     ScreenTargetKind,
     TestDataSet,
+    UnmetReason,
+    VocabularyEntry,
 )
 
 __all__ = [n for n in dir() if not n.startswith("_")]

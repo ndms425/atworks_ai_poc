@@ -532,6 +532,163 @@ class MaskingPolicy(BaseModel):
     disabled_groups: list[str] = Field(default_factory=list, max_length=100)
 
 
+# -- 자가발전 질의 엔진 (self-growth, spec 2026-09-07) -----------------------------------
+# QuerySpec은 모델이 직접 채우는 도구 입력이다(query_runs) -- extra="forbid"로 미지의 키를 거부하고,
+# 카탈로그(catalog.py)의 고정 enum만 실을 수 있다(캐시 안정 툴 바이트). 실제 SQL 컴파일은 host의
+# Store.query()가 한다 -- 여기 있는 건 형태와 의미 규칙뿐, 숫자는 하나도 없다.
+
+HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+Dimension = Literal[
+    "api", "path_segment_1", "path_segment_2", "path_prefix_2", "method", "api_group",
+    "target_env", "test_data_label", "failed_rule", "http_status", "executed_by", "day", "week",
+]
+Measure = Literal["runs", "pass", "fail", "error", "non_pass", "fail_rate", "apis", "transitions", "p95_duration_ms"]
+
+
+class QueryFilters(BaseModel):
+    """query_runs 한 번의 모집단을 좁히는 조건. window_days와 since/until은 서로 대신하는 관계라
+    함께 못 쓴다 -- 아래 검증기가 막는다."""
+    model_config = ConfigDict(extra="forbid")
+    status: RunStatusFilter | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    window_days: int | None = Field(default=None, ge=1, le=180)   # since/until 대신
+    api_ids: list[str] | None = Field(default=None, max_length=100)
+    path_contains: list[str] | None = Field(default=None, max_length=5)   # 소문자 부분일치, OR
+    path_prefix: str | None = Field(default=None, max_length=120)
+    method: list[HttpMethod] | None = None
+    api_group: list[str] | None = Field(default=None, max_length=10)
+    target_env: list[str] | None = None
+    test_data_label: list[str] | None = None
+    executed_by: list[str] | None = Field(default=None, max_length=10)     # 오퍼레이터 id
+    scope_operator: str | None = None                # "내가 실행한 API" 범위 (operator_api JOIN)
+    failed_rule: list[str] | None = Field(default=None, max_length=10)
+    http_status: list[int] | None = Field(default=None, max_length=10)
+
+    @model_validator(mode="after")
+    def _window_days_excludes_since_until(self) -> QueryFilters:
+        if self.window_days is not None and (self.since is not None or self.until is not None):
+            raise ValueError("window_days cannot be combined with since/until -- pick one way to bound the window")
+        return self
+
+
+class QuerySpec(BaseModel):
+    """모델이 고르는 구조화 질의. 차원 최대 2개, 측정값 1~5개 -- 카탈로그(catalog.py) 밖의 값은
+    pydantic이 거부한다. 정렬·상한·비교는 전부 host가 그대로 SQL로 옮긴다(spec §3)."""
+    model_config = ConfigDict(extra="forbid")
+    filters: QueryFilters = Field(default_factory=QueryFilters)
+    dimensions: list[Dimension] = Field(default_factory=list, min_length=0, max_length=2)   # 0 = 전체 합계 1행
+    measures: list[Measure] = Field(min_length=1, max_length=5)
+    order_by: Measure | Literal["key"] = "non_pass"
+    descending: bool = True
+    limit: int = Field(default=20, ge=1, le=50)
+    compare_previous_window: bool = False
+    include_samples: bool = True
+
+    @model_validator(mode="after")
+    def _dimensions_are_unique(self) -> QuerySpec:
+        if len(set(self.dimensions)) != len(self.dimensions):
+            raise ValueError(f"dimensions must be unique, got {self.dimensions!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _order_by_is_key_or_a_requested_measure(self) -> QuerySpec:
+        if self.order_by != "key" and self.order_by not in self.measures:
+            raise ValueError(f"order_by must be 'key' or one of measures {self.measures!r}, got {self.order_by!r}")
+        return self
+
+
+class QueryRow(BaseModel):
+    """QueryResult 한 행. keys는 이번 질의의 dimensions에 대응하는 그룹 키(라벨 없음 sentinel은
+    None), measures는 요청한 측정값(비교 시 `_prev`/`_delta`도 같은 딕트에 붙는다)."""
+    keys: dict[str, str | None] = Field(default_factory=dict)
+    measures: dict[str, float | int | None] = Field(default_factory=dict)
+    api_ids: list[str] = Field(default_factory=list, max_length=20)
+    run_ids: list[str] = Field(default_factory=list, max_length=5)
+
+
+class QueryResult(BaseModel):
+    """query_runs 실행 1회의 전체 결과. population/total_groups/rows 전부 host 계산 -- 모델은
+    어느 행을 카드에 보여줄지만 고른다."""
+    spec: QuerySpec
+    rows: list[QueryRow] = Field(default_factory=list)
+    total_groups: int = 0
+    population: int = 0
+    window: tuple[datetime, datetime]
+    source: Literal["rollup_day", "rollup_key_day", "rollup_operator_day", "runs"]
+    turn_id: str | None = None
+
+
+AskOutcome = Literal["answered", "partial", "unmet", "action"]
+UnmetReason = Literal["no_dimension", "no_evidence", "out_of_scope", "refused"]
+
+
+class AskEntry(BaseModel):
+    """ask_log 한 행 -- 한 턴에 하나. outcome/cluster_key는 결정론 규칙(asklog.py)이 낸다, 모델이
+    스스로를 채점하지 않는다."""
+    seq: int | None = None
+    at: datetime
+    session_id: str
+    operator: str
+    role: str | None = None
+    question: str = Field(max_length=300)   # mask_body 적용 후 저장
+    intent: str
+    spec: QuerySpec | None = None
+    outcome: AskOutcome
+    unmet_reason: UnmetReason | None = None
+    wanted: str | None = Field(default=None, max_length=200)
+    tool_calls: int = 0
+    cards: int = 0
+    feedback: Literal["up", "down"] | None = None
+    cluster_key: str
+    turn_id: str
+
+
+class VocabularyEntry(BaseModel):
+    """조직 공유 어휘 한 항목 -- commerce_common.memory 사이드카(vocabulary 테이블)를 미러한다.
+    fragment는 QueryFilters의 부분 조각이라 confirmed 상태에서만 컨텍스트에 주입된다."""
+    term: str = Field(max_length=40)
+    fragment: QueryFilters
+    status: Literal["pending", "confirmed", "rejected"] = "pending"
+    proposed_by: str
+    proposed_at: datetime
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    confirmations: int = 0
+    uses: int = 0
+    rejections: int = 0
+    cooldown_until: datetime | None = None
+
+
+class SavedQuestion(BaseModel):
+    """승격된 저장 질문 1건 -- Promoter가 만들고, title은 catalog.title_for_spec()의 결정론
+    산출물이다(모델이 쓴 문장이 아니다)."""
+    id: str
+    cluster_key: str
+    spec: QuerySpec
+    title: str = Field(max_length=120)
+    created_at: datetime
+    status: Literal["active", "hidden"] = "active"
+    uses: int = 0
+    last_used_at: datetime | None = None
+    source_users: int = 0
+    source_asks: int = 0
+
+
+class GrowthSummary(BaseModel):
+    """Growth 뷰 '이번 주' 타일이 쓰는 COUNT 전부. unmet_clusters의 각 원소는
+    {cluster_key, reason, count, last_at, example} 모양(마스킹된 예시 1건)."""
+    asks_total: int = 0
+    answered: int = 0
+    partial: int = 0
+    unmet: int = 0
+    up: int = 0
+    down: int = 0
+    new_terms: int = 0
+    new_saved: int = 0
+    unmet_clusters: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------
 
 class AttachedItem(BaseModel):
