@@ -594,6 +594,12 @@ class QuerySpec(BaseModel):
     @model_validator(mode="after")
     def _order_by_is_key_or_a_requested_measure(self) -> QuerySpec:
         if self.order_by != "key" and self.order_by not in self.measures:
+            # The DEFAULT ("non_pass") must never reject a spec whose measures simply omit it --
+            # a model that asks for measures=["apis"] and says nothing about order gets the first
+            # measure. Only an EXPLICIT order_by outside the requested measures is an error.
+            if "order_by" not in self.model_fields_set:
+                object.__setattr__(self, "order_by", self.measures[0])
+                return self
             raise ValueError(f"order_by must be 'key' or one of measures {self.measures!r}, got {self.order_by!r}")
         return self
 

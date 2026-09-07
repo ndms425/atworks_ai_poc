@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
+from pydantic import ValidationError
 
 from atworks_agent.catalog import (
     DIMENSIONS,
@@ -153,8 +154,6 @@ def test_self_growth_config_defaults():
     assert c.enable_query_runs is True
     assert c.enable_growth is True
     assert c.memory_extract_facts is False
-    assert c.max_query_dimensions == 2
-    assert c.max_query_limit == 50
     assert c.slo_query_ms == 300
     assert c.ask_log_retention_days == 365
     assert c.promote_window_days == 7
@@ -163,3 +162,11 @@ def test_self_growth_config_defaults():
     assert c.vocabulary_max_inject == 8
     assert c.vocabulary_cooldown_days == 30
     assert c.vocabulary_auto_demote_rejections == 3
+
+
+def test_default_order_by_falls_back_to_the_first_measure_when_non_pass_is_absent():
+    spec = QuerySpec(measures=["runs", "apis"])
+    assert spec.order_by == "runs"
+    # an EXPLICIT order_by outside the requested measures is still an error
+    with pytest.raises(ValidationError):
+        QuerySpec(measures=["runs"], order_by="fail")

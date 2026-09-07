@@ -149,11 +149,6 @@ class AtworksAgentConfig(BaseAgentConfig):
     enable_query_runs: bool = True       # query_runs/present_query_table/note_unmet_ask/propose_alias
     enable_growth: bool = True           # Growth 뷰/summary 노출
     memory_extract_facts: bool = False   # 턴 후 자유 사실 추출은 켜지 않는다 -- 저장되는 건 어휘뿐
-    # QuerySpec.dimensions/limit 자체의 고정 상한(각각 max_length=2, le=50)과 짝을 이루는 config
-    # 값 -- 도구 스키마의 maxItems/maximum이 여기서 나오므로(캐시 안정 순함수) 모델의 고정 상한을
-    # 넘길 수 없다.
-    max_query_dimensions: int = Field(default=2, ge=1, le=2)
-    max_query_limit: int = Field(default=50, ge=1, le=50)
     slo_query_ms: int = Field(default=300, ge=1)
     ask_log_retention_days: int = Field(default=365, ge=1)
     promote_window_days: int = Field(default=7, ge=1)
