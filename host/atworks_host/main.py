@@ -56,7 +56,11 @@ def build() -> tuple:
     # bodies, rollups and the audit log survive a restart -- which is also what makes the
     # retention job's cold partition mean anything.
     store = Store(os.environ.get("ATWORKS_STORE_PATH", ":memory:"))
-    backend = MockAtworks(config, HERE / "fixtures", store=store)
+    # ATWORKS_FIXTURES_DIR points the API-spec/operator catalogue at a dataset dir; pair it with
+    # ATWORKS_STORE_PATH pointing at that dataset's scale.sqlite to boot the host on a generated
+    # large dataset (scripts/scale/generate.py writes both in one out dir). Unset = demo fixtures.
+    fixtures_dir = Path(os.environ.get("ATWORKS_FIXTURES_DIR", HERE / "fixtures"))
+    backend = MockAtworks(config, fixtures_dir, store=store)
     agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
     portal_origin = os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110")
     # `capture_disabled` is wired by create_app (one place, so the test client gets it too).
