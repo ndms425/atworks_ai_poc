@@ -9,6 +9,7 @@ import AssistantPanel from "@/components/AssistantPanel";
 import OperatorPicker, { OPERATOR_STORAGE_KEY, readStoredOperatorId } from "@/components/OperatorPicker";
 import ScreenHighlightOverlay from "@/components/ScreenHighlightOverlay";
 import ApisView from "@/components/views/ApisView";
+import GrowthView from "@/components/views/GrowthView";
 import HomeView from "@/components/views/HomeView";
 import JobsView from "@/components/views/JobsView";
 import RulesView from "@/components/views/RulesView";
@@ -21,6 +22,7 @@ import type {
   JobSpec,
   OperatorProfile,
   OperatorRole,
+  PortalViewId,
   ScreenDirective,
   ScreenFilter,
   ScreenHighlightPayload,
@@ -34,7 +36,9 @@ import { ROLE_KO } from "@/lib/types";
 
 const DEFAULT_OPERATOR_ID = "minseong";
 
-type PortalView = "home" | "apis" | "runs" | "jobs" | "rules";
+// `PortalViewId`와 같은 집합이어야 한다 — `onScreen`이 여기 값을 그대로 `api.screenState.view`로
+// 싣고, 호스트의 `ScreenState.view`가 그걸 검증한다(Growth는 그 Literal에 함께 들어갔다).
+type PortalView = PortalViewId;
 
 function StoreMark() {
   return (
@@ -243,6 +247,8 @@ export default function PortalPage() {
       { id: "runs", label: "Runs", icon: "chart" },
       { id: "jobs", label: "Jobs", icon: "calendar" },
       { id: "rules", label: "Rules", icon: "check" },
+      // 6번째 — 자가발전 spec §10. 시스템이 배운 어휘/저장 질문과 아직 답하지 못한 질문이 여기 있다.
+      { id: "growth", label: "Growth", icon: "message" },
     ],
     [],
   );
@@ -311,6 +317,9 @@ export default function PortalPage() {
               <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} onAttach={onAttach} intent={screenIntent} onScreen={onScreen} />
             ) : null}
             {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} intent={screenIntent} onScreen={onScreen} /> : null}
+            {/* Growth는 화면 지시어의 목적지가 아니다(kind를 넓히지 않는 라운드) — `intent`를 받지
+                않고 `onScreen`으로 `visible: []`만 보고한다. */}
+            {view === "growth" ? <GrowthView refreshKey={refreshKey} onScreen={onScreen} /> : null}
           </>
         ) : staleOperatorNotice ? (
           <div className="p-6">

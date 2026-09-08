@@ -777,7 +777,12 @@ class ScreenFilter(BaseModel):
 
 
 class ScreenState(BaseModel):
-    view: Literal["home", "apis", "runs", "jobs", "rules"]
+    #: 포털이 **보고하는** 뷰라서 `navigate_screen`의 목적지 목록(tools/presentation.py의
+    #: NavigateScreen.view, registry.py의 스키마 enum)보다 하나 넓다: Growth 뷰(자가발전 §10)에
+    #: 서서 채팅을 보내도 요청이 422로 죽지 않아야 하지만, 모델이 그리로 화면을 옮길 수 있어야
+    #: 하는 것은 아니다 -- 지시어 kind는 이번 라운드에 넓히지 않는다. Growth는 `visible: []`만
+    #: 보고하므로 여기 들어와도 grounding에 새 대상이 생기지 않는다.
+    view: Literal["home", "apis", "runs", "jobs", "rules", "growth"]
     focus: ScreenTarget | None = None
     filter: ScreenFilter | None = None
     visible: list[ScreenTarget] = Field(default_factory=list, max_length=40)

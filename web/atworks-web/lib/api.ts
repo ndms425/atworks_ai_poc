@@ -4,6 +4,7 @@
 import { AgentApi } from "web-shared";
 import type {
   ApiSpec,
+  AskEntry,
   Briefing,
   ComparisonProfile,
   FormatBatch,
@@ -64,6 +65,12 @@ export const actOnVocabulary = (term: string, action: "confirm" | "reject" | "de
   api.post<{ ok: boolean; entry: VocabularyEntry }>(`/vocabulary/${encodeURIComponent(term)}/${action}`, {});
 export const fetchVocabulary = (status?: string, cursor: string | null = null) =>
   api.getPage<VocabularyEntry>("/vocabulary", { status, cursor, limit: PAGE_SIZE });
+
+// 질문 기록 (spec §6). 읽기 전용이고 `question`은 저장 시점에 이미 마스킹된 요약이라 화면은 그대로
+// 보여 준다. `outcome`은 서버 필터라 세그먼트를 바꾸면 첫 페이지부터 다시 묻는다(/rules?status=와
+// 같은 규칙) — 한 페이지를 클라이언트에서 쪼개면 3페이지의 unmet 한 줄이 그냥 안 보인다.
+export const fetchAskLog = (outcome?: string, cursor: string | null = null) =>
+  api.getPage<AskEntry>("/ask-log", { outcome, cursor, limit: PAGE_SIZE });
 
 // 카드 푸터의 👍/👎 (spec §9). 같은 턴을 다시 투표하면 마지막 표만 남고, 감사 로그는 움직이지
 // 않는다 — 표는 공유 상태의 변경이 아니다. 👍가 회귀 eval 케이스를 만드는 것은 서버 쪽 일이다.

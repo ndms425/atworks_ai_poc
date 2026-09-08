@@ -4,7 +4,18 @@
 /** How each kind of aTworks record shows: its label, icon, and tone. */
 
 import type { KindStyle, Tone } from "web-shared";
-import type { GroupBy, PopulationFilter, QueryDimension, QueryMeasure, QuerySource, RunStatus } from "./types";
+import type {
+  AskOutcome,
+  GroupBy,
+  PopulationFilter,
+  QueryDimension,
+  QueryMeasure,
+  QuerySource,
+  RunStatus,
+  SavedQuestion,
+  UnmetReason,
+  VocabularyEntry,
+} from "./types";
 
 export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {
   pass: { label: "pass", tone: "ok" },
@@ -70,6 +81,38 @@ export const QUERY_MEASURE_LABEL: Record<QueryMeasure, string> = {
   apis: "API 수",
   transitions: "전환 수",
   p95_duration_ms: "p95 응답시간(ms)",
+};
+
+/**
+ * Growth 뷰(자가발전 §10)의 상태·사유 라벨. 어휘 항목의 **의미** 한 줄은 여기 없다 — 그건
+ * 서버가 카탈로그 라벨로 만든 `fragment_summary`이고, 포털이 필터 이름을 저 나름으로 번역하면
+ * 카드 푸터·컨텍스트 블록·Growth 뷰가 서로 다른 문장을 읽게 된다.
+ */
+export const VOCABULARY_STATUS: Record<VocabularyEntry["status"], { label: string; tone: Tone }> = {
+  pending: { label: "제안됨", tone: "warn" },
+  confirmed: { label: "확정", tone: "ok" },
+  rejected: { label: "거부됨", tone: "muted" },
+};
+
+export const SAVED_QUESTION_STATUS: Record<SavedQuestion["status"], { label: string; tone: Tone }> = {
+  active: { label: "표시 중", tone: "ok" },
+  hidden: { label: "숨김", tone: "muted" },
+};
+
+/** 한 턴의 결정론 채점 결과(`asklog.py`). */
+export const ASK_OUTCOME_LABEL: Record<AskOutcome, { label: string; tone: Tone }> = {
+  answered: { label: "답변", tone: "ok" },
+  partial: { label: "부분", tone: "warn" },
+  unmet: { label: "미충족", tone: "danger" },
+  action: { label: "실행", tone: "violet" },
+};
+
+/** 답하지 못한 이유 — 서버가 낸 `unmet_reason` 그대로를 사람 말로 옮긴 것뿐이다. */
+export const UNMET_REASON_LABEL: Record<UnmetReason, string> = {
+  no_dimension: "축 없음",
+  no_evidence: "근거 데이터 없음",
+  out_of_scope: "범위 밖",
+  refused: "거절",
 };
 
 /** 어느 물질화 소스에서 읽었는지 — 카드 헤더의 출처 표시. */

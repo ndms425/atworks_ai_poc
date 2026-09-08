@@ -22,7 +22,12 @@ export interface ScreenFilter {
   query?: string;
 }
 
-export type PortalViewId = "home" | "apis" | "runs" | "jobs" | "rules";
+/**
+ * `ScreenTargetKind`보다 하나 넓다: Growth 뷰(자가발전 §10)는 `screen_state`로 자기를 보고하지만
+ * (`{view: "growth", visible: []}`), `navigate_screen`의 목적지도 지시어 대상 kind도 아니다 —
+ * 어휘·저장 질문 행은 `data-ref`를 달아 두되 이번 라운드에는 kind를 넓히지 않는다.
+ */
+export type PortalViewId = "home" | "apis" | "runs" | "jobs" | "rules" | "growth";
 
 /** The screen description sent as `screen_state` with every chat turn. */
 export interface ScreenState {
@@ -341,6 +346,46 @@ export interface SavedQuestion {
   source_asks: number;
 }
 
+/** 한 턴의 채점 결과 — `asklog.py`의 결정론 규칙이 낸다, 모델이 스스로를 채점하지 않는다. */
+export type AskOutcome = "answered" | "partial" | "unmet" | "action";
+
+/** 답하지 못한 이유. 라벨은 lib/kinds.ts의 `UNMET_REASON_LABEL`. */
+export type UnmetReason = "no_dimension" | "no_evidence" | "out_of_scope" | "refused";
+
+/**
+ * `GET /ask-log` 한 행 (`AskEntry`). `question`은 **저장 시점에 이미 마스킹된** 요약이라 화면이
+ * 다시 손대지 않는다 — 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽히면 기록이 아니다.
+ */
+export interface AskEntry {
+  seq?: number | null;
+  at: string;
+  session_id: string;
+  operator: string;
+  role?: string | null;
+  question: string;
+  intent: string;
+  outcome: AskOutcome;
+  unmet_reason?: UnmetReason | null;
+  wanted?: string | null;
+  tool_calls: number;
+  cards: number;
+  feedback?: "up" | "down" | null;
+  vocabulary_terms: string[];
+  cluster_key: string;
+  turn_id: string;
+}
+
+/** `GrowthSummary.unmet_clusters`의 한 원소 (`Store.unmet_clusters`). `example`은 이 군집의 가장
+ *  최근 질문이고, 그것도 저장된 마스킹 요약 그대로다. */
+export interface UnmetCluster {
+  cluster_key: string;
+  reason?: UnmetReason | null;
+  count: number;
+  last_at: string;
+  example: string;
+  wanted?: string | null;
+}
+
 /** `GET /growth/summary` — 전부 COUNT다. `thresholds`는 호스트 config의 승격 문턱이라, 빈 상태
  *  문구가 "3명·5회"를 상수로 박지 않고 실제 설정을 읽는다. */
 export interface GrowthSummary {
@@ -352,7 +397,7 @@ export interface GrowthSummary {
   down: number;
   new_terms: number;
   new_saved: number;
-  unmet_clusters: Record<string, unknown>[];
+  unmet_clusters: UnmetCluster[];
   thresholds: { min_users?: number; min_asks?: number; window_days?: number };
   window_days?: number;
 }
