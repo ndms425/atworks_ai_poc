@@ -136,6 +136,9 @@ class InMemoryBackend(AtworksBackend):
         self.executed: list[str] = []
         self.asks: list[AskEntry] = []
         self.vocabulary: dict[str, VocabularyEntry] = {}
+        # 거부는 사람 단위다 (ABC 계약): term -> 👎를 낸 operator 집합. 같은 사람의
+        # 반복은 집합이 흡수하므로, Store의 `(term, operator_id)` 기본키와 같은 규칙.
+        self.vocabulary_rejections: dict[str, set[str]] = {}
         self.saved_questions: dict[str, SavedQuestion] = {}
 
     async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
@@ -445,7 +448,9 @@ class InMemoryBackend(AtworksBackend):
         )
 
     async def delete_alias(self, session, term):
-        return self.vocabulary.pop(normalize_term(term), None)
+        normalized = normalize_term(term)
+        self.vocabulary_rejections.pop(normalized, None)   # 삭제는 표까지 잊는다 (Store와 같은 규칙)
+        return self.vocabulary.pop(normalized, None)
 
     async def confirmed_vocabulary(self, session):
         return [e for e in self.vocabulary.values() if e.status == "confirmed"]
@@ -457,7 +462,9 @@ class InMemoryBackend(AtworksBackend):
             if entry is None:
                 continue
             if rejected:
-                entry = entry.model_copy(update={"rejections": entry.rejections + 1})
+                voters = self.vocabulary_rejections.setdefault(entry.term, set())
+                voters.add(session.operator)
+                entry = entry.model_copy(update={"rejections": max(entry.rejections, len(voters))})
                 if entry.status == "confirmed" and entry.rejections >= 3 and entry.rejections > entry.confirmations:
                     entry = entry.model_copy(update={"status": "pending"})
                     demoted.append(entry.term)

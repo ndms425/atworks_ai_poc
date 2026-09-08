@@ -313,9 +313,10 @@ async def test_an_upvote_never_counts_a_rejection(tmp_path):
     assert entry.rejections == 0 and entry.status == "confirmed"
 
 
-async def _seeded_downvote_app(tmp_path, config):
-    """확정된 어휘 하나 + 그 어휘를 실은 턴 하나. 돌려주는 것은 (app, backend, turn_id, headers)."""
-    app, backend, _dir = _app(tmp_path, config, [text_message("네.")])
+async def _seeded_downvote_app(tmp_path, config, turns: int = 1):
+    """확정된 어휘 하나(제안·확정 모두 minseong -- confirmations = 1)와, `turns`번의 채팅 턴을
+    받아 줄 스크립트. 돌려주는 것은 `(app, backend)` 두 개다."""
+    app, backend, _dir = _app(tmp_path, config, [text_message("네.")] * turns)
     session = AtworksSessionContext(session_id="s-seed", project_id="mes-demo",
                                     operator="minseong", now=T0)
     await backend.propose_alias(session, "결제 계열", QueryFilters(path_prefix="/v1/payment"))
@@ -323,8 +324,20 @@ async def _seeded_downvote_app(tmp_path, config):
     return app, backend
 
 
+async def _downvoting_turn(c, operator: str) -> dict:
+    """`operator`가 그 어휘를 실은 턴을 하나 만들고 그 턴에 👎를 누른다. 자기 턴에만 투표할 수
+    있으므로(403) 사람마다 자기 턴이 있어야 한다. 돌려주는 것은 헤더다."""
+    headers = {"X-Session-Id": await _sid(c, operator)}
+    await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
+    row = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]
+    assert row["operator"] == operator and row["vocabulary_terms"] == ["결제 계열"]
+    assert (await c.post("/api/atworks/feedback", headers=headers,
+                         json={"turn_id": row["turn_id"], "vote": "down"})).status_code == 200
+    return headers
+
+
 async def test_three_downvotes_on_one_turn_count_one_rejection(tmp_path):
-    """거부는 **요청**이 아니라 **전이**를 센다. 요청마다 세면 한 사람이 같은 카드에서 👎를 세 번
+    """거부는 **요청**이 아니라 **사람**을 센다. 요청마다 세면 한 사람이 같은 카드에서 👎를 세 번
     눌러 팀 전체가 확정한 용어를 혼자 강등시킨다 -- 세 사람이 각자 한 번씩 누른 것과 구분이 안 된다."""
     config = AtworksAgentConfig(model="m")
     app, backend = await _seeded_downvote_app(tmp_path, config)
@@ -339,21 +352,50 @@ async def test_three_downvotes_on_one_turn_count_one_rejection(tmp_path):
     assert entry.rejections == 1 and entry.status == "confirmed"
 
 
-async def test_flipping_down_up_down_counts_one_rejection(tmp_path):
-    """`down → up → down`은 전이가 한 번 더 있으니 2가 아니라... 1이다: 표는 이 사람의 **현재**
-    의견이고, 마음을 바꿨다 다시 돌아온 것을 두 사람의 거부로 셀 수는 없다. 전이 규칙은
-    `!= down → down`이고, 되돌아온 표는 이미 이 사람이 낸 거부를 되살릴 뿐이다."""
+async def test_one_person_flipping_the_vote_is_still_one_rejection(tmp_path):
+    """한 사람이 자기 턴에서 👎👍👎👍👎를 눌러도 거부는 **1**이다. 웹의 토글은 뒤집을 때마다
+    `"up"`을 보내므로 `!= "down"` → `"down"` 전이는 세 번 일어난다 -- 전이를 세던 규칙에서는
+    이 한 사람이 문턱(3)을 혼자 넘어 팀 전체가 확정한 용어를 강등시키고 fact까지 지웠다.
+    이제 세는 것은 `(term, operator)` 행이라, 마음을 몇 번 바꾸든 표는 하나다."""
     config = AtworksAgentConfig(model="m")
     app, backend = await _seeded_downvote_app(tmp_path, config)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         headers = {"X-Session-Id": await _sid(c, "jihoon")}
         await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
         turn_id = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]["turn_id"]
-        for vote in ("down", "up", "down"):
-            await c.post("/api/atworks/feedback", headers=headers,
-                         json={"turn_id": turn_id, "vote": vote})
-    # 마지막 표는 down이지만 거부는 두 번 세지 않는다.
-    assert backend.store.get_vocabulary("결제 계열").rejections == 2
+        for vote in ("down", "up", "down", "up", "down"):
+            assert (await c.post("/api/atworks/feedback", headers=headers,
+                                 json={"turn_id": turn_id, "vote": vote})).status_code == 200
+        audit = (await c.get("/api/atworks/audit", headers=headers)).json()["items"]
+    entry = backend.store.get_vocabulary("결제 계열")
+    assert entry.rejections == 1 and entry.status == "confirmed"
+    assert await backend.memory_store.get_facts("mes-demo") != []      # fact도 그대로다
+    assert [r for r in audit if r["action"].startswith("vocabulary_auto_demote")] == []
+
+
+async def test_three_different_operators_demote_the_term_and_a_fourth_changes_nothing(tmp_path):
+    """문서가 말하는 그대로: 확정된 용어의 강등에는 **서로 다른** 운영자 3명이 필요하다. 각자
+    자기 턴에서 누르고(남의 turn_id는 403), 세 번째에서 강등되며 감사는 딱 2행이다. 강등 뒤의
+    네 번째 사람은 표를 하나 더 남기지만 이미 pending인 용어를 두 번 강등시키지는 않는다."""
+    config = AtworksAgentConfig(model="m")
+    app, backend = await _seeded_downvote_app(tmp_path, config, turns=3)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        for operator in ("minseong", "jihoon"):
+            await _downvoting_turn(c, operator)
+            assert backend.store.get_vocabulary("결제 계열").status == "confirmed"
+        headers = await _downvoting_turn(c, "sora")
+        audit = (await c.get("/api/atworks/audit", headers=headers)).json()["items"]
+    entry = backend.store.get_vocabulary("결제 계열")
+    assert entry.status == "pending" and entry.rejections == 3 and entry.confirmations == 1
+    assert await backend.memory_store.get_facts("mes-demo") == []
+    rows = [r for r in audit if r["action"].startswith("vocabulary_auto_demote")]
+    assert [r["action"] for r in rows] == ["vocabulary_auto_demote:ok", "vocabulary_auto_demote"]
+    assert {r["operator"] for r in rows} == {"sora"}
+    # 네 번째 사람(오퍼레이터 픽스처에 없어 세션을 못 여는 이름이므로 저장소에서 바로) -- 표는
+    # 하나 늘지만 강등은 다시 일어나지 않는다.
+    assert backend.store.note_vocabulary_rejection(
+        ["결제 계열"], operator_id="dahye", now=T0, auto_demote_rejections=3) == []
+    assert backend.store.get_vocabulary("결제 계열").status == "pending"
 
 
 async def test_a_null_vote_clears_the_row(client):
@@ -391,14 +433,16 @@ async def test_a_downvote_that_demotes_a_term_writes_exactly_one_audit_pair(tmp_
     config = AtworksAgentConfig(model="m", vocabulary_auto_demote_rejections=2)
     app, backend = await _seeded_downvote_app(tmp_path, config)
     # 이미 한 번 거부된 상태에서 시작한다: 다음 👎가 문턱(2)을 넘고 확인 수(1)보다 많아진다.
-    backend.store.note_vocabulary_rejection(["결제 계열"], auto_demote_rejections=99)
+    backend.store.note_vocabulary_rejection(["결제 계열"], operator_id="minseong", now=T0,
+                                            auto_demote_rejections=99)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         headers = {"X-Session-Id": await _sid(c, "jihoon")}
         await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
         turn_id = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]["turn_id"]
         await c.post("/api/atworks/feedback", headers=headers,
                      json={"turn_id": turn_id, "vote": "down"})
-        # 두 번째·세 번째 👎는 전이가 아니므로 아무 행도 더 쓰지 않는다.
+        # 두 번째 👎는 같은 사람의 같은 표라 행을 더 남기지 않고, 이미 pending인 용어는 두 번
+        # 강등되지 않는다 -- 감사 2행의 조건이 `demoted`뿐이라 조건문 없이 그렇게 된다.
         await c.post("/api/atworks/feedback", headers=headers,
                      json={"turn_id": turn_id, "vote": "down"})
         audit = (await c.get("/api/atworks/audit", headers=headers)).json()["items"]

@@ -616,10 +616,16 @@ class AtworksBackend(ABC):
         self, session: AtworksSessionContext, terms: list[str], rejected: bool = False
     ) -> list[str]:
         """이번 턴 컨텍스트가 실제로 실은 term들의 집계. 기본은 ``uses + 1``이고,
-        ``rejected=True``(그 턴에 👎, §9)면 ``rejections + 1``에 자동 강등 규칙까지 — 거부가
-        ``vocabulary_auto_demote_rejections`` 이상이고 확인 수보다 많으면 상태가 pending으로
-        내려가 아무의 컨텍스트에도 들어가지 않는다(그때 그 term의 fact도 지운다 — 의무 4).
-        순수 집계라 어떤 경우에도 턴을 실패시키지 않는다.
+        ``rejected=True``(그 턴에 👎, §9)면 ``session.operator``의 거부 한 표에 자동 강등 규칙까지
+        — **서로 다른 운영자** 수가 ``vocabulary_auto_demote_rejections`` 이상이고 확인 수보다
+        많으면 상태가 pending으로 내려가 아무의 컨텍스트에도 들어가지 않는다(그때 그 term의
+        fact도 지운다 — 의무 4). 순수 집계라 어떤 경우에도 턴을 실패시키지 않는다.
+
+        **거부는 요청이 아니라 사람 단위로 센다** (REST 구현 의무): 저장은 ``(term, operator)``가
+        유일해야 하고, 같은 사람의 두 번째 👎는 조용히 아무것도 더하지 않는다. 그래야 한 사람이
+        같은 카드에서 표를 뒤집으며(웹 토글은 뒤집을 때마다 새로 보낸다) 팀 전체가 확정한 용어를
+        혼자 강등시키지 못한다. 멱등성이 호출자의 조건문이 아니라 저장소의 성질이므로, 라우트는
+        직전 표를 읽지 않고도 이 메서드를 매번 부를 수 있다.
 
         ``uses + 1``은 confirmed 집합을 바꾸지 않으므로 프로세스 캐시를 무효화하지 **않는다**;
         강등이 실제로 일어난 호출만 무효화한다.

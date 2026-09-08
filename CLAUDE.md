@@ -262,8 +262,13 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   confirmed term reaches EVERYONE, so an operator id frozen into one would silently narrow other
   people's questions to that person). `POST /vocabulary/{term}/confirm` is the only thing that
   confirms; `reject` stamps `cooldown_until = now + vocabulary_cooldown_days` (30) so the model
-  cannot re-ask, and `rejections >= vocabulary_auto_demote_rejections` (3) with
-  `rejections > confirmations` demotes a confirmed term back to pending. Injection is
+  cannot re-ask, and a term voted down by `>= vocabulary_auto_demote_rejections` (3) **distinct
+  operators** with `rejections > confirmations` demotes a confirmed term back to pending. The
+  count is `vocabulary_rejection(term, operator_id, at)`, PK `(term, operator_id)`, written
+  `INSERT OR IGNORE` — idempotence is a property of the key, not of a caller's transition check,
+  so one person flipping 👎👍👎 leaves one row; `vocabulary.rejections` is a cached mirror of that
+  COUNT and doubles as the legacy floor (`MAX(column, COUNT(rows))`, so an old store's rejection
+  count is never reset to 0 by the new table). Injection is
   `vocabulary.match_terms` — the CONFIRMED terms that literally appear in this turn's message,
   longest first (so "결제 계열" wins over "결제"), <= `vocabulary_max_inject` (8) — rendered into
   the per-request dynamic context, never the cache-stable prefix. See the Memory bullet for the
@@ -282,9 +287,9 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   whole team sees, so the route writes the pair `vocabulary_auto_demote` / `:ok` per demoted term
   with the voter as operator (`note_vocabulary_use` returns the terms it demoted, so the row names
   what really happened, not what might have). A vote is **one person's current opinion**, not a
-  counter: it is idempotent (a rejection is counted only on the transition `!= "down"` → `"down"`,
-  so three 👎 on one card are one rejection, and a delegated demotion needs three different
-  operators), it is **owned** (a turn is votable only by the operator whose turn it was — another
+  counter: it is idempotent (a rejection is one row per `(term, operator)`, so three 👎 — or a
+  👎👍👎👍👎 flip, which the web toggle sends as three fresh `"down"`s — are one rejection, and a
+  demotion needs three different operators, each voting on their own turn), it is **owned** (a turn is votable only by the operator whose turn it was — another
   operator's `turn_id` is a 403), and `vote: null` clears it (what the web's toggle sends). A 👎
   counts a rejection against the vocabulary the turn actually used; a 👍 on an `answered` turn
   with a stored spec writes one regression case to `evals/cases/` (`ATWORKS_EVALS_DIR` overrides

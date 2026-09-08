@@ -394,6 +394,18 @@ CREATE TABLE IF NOT EXISTS vocabulary (
 );
 CREATE INDEX IF NOT EXISTS idx_vocabulary_status_at ON vocabulary(status, proposed_at DESC);
 
+-- 한 사람의 한 표 (self-growth §7). 자동 강등은 **서로 다른 운영자**의 수로 결정되고, 그 수는
+-- 이 테이블의 행 수다. 기본키가 `(term, operator_id)`라 멱등성이 라우트의 조건문이 아니라 **키의
+-- 성질**이다: 한 사람이 같은 카드에서 👎👍👎👍👎를 눌러도(웹 토글은 뒤집을 때마다 새 전이를
+-- 보낸다) `INSERT OR IGNORE`가 남기는 행은 하나뿐이라, 세는 쪽은 직전 표를 읽을 필요조차 없다.
+-- 행은 강등 뒤에도 남는다 -- 강등은 거부를 지우는 일이 아니라 상태를 내리는 일이다.
+CREATE TABLE IF NOT EXISTS vocabulary_rejection (
+    term TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (term, operator_id)
+);
+
 -- 승격된 저장 질문 (self-growth spec §8). One row per RECURRING question cluster: the promoter
 -- folds a week of `ask_log` by `cluster_key` and writes the ones enough different people asked
 -- often enough. `cluster_key` is UNIQUE, which is the whole re-promotion rule -- the daily job is
@@ -817,6 +829,12 @@ class Store:
             self._conn.execute(
                 "CREATE TABLE retention_state (partition_key TEXT PRIMARY KEY, archived_at TEXT NOT NULL)"
             )
+        # `vocabulary_rejection` is a NEW TABLE and deliberately gets NO backfill: a store written
+        # before it has a legacy `vocabulary.rejections` INTEGER and zero rows here, and synthesising
+        # N rows for N unknown voters would invent operator ids. `note_vocabulary_rejection` instead
+        # reads the effective count as MAX(legacy column, COUNT(rows)) -- so a term the team already
+        # rejected three times cannot be silently un-demoted to 0 by this migration, and the first
+        # vote written through the new table simply adds to that floor.
         self._backfill_key_rollup(rebuild=("rollup_key_day", "p95_duration_ms") in added)
         self._backfill_operator_rollup()
 
@@ -2889,6 +2907,10 @@ class Store:
             return None
         with self._transaction():
             self._conn.execute("DELETE FROM vocabulary WHERE term = ?", (term,))
+            # 표도 함께 간다. `reject`는 행을 남기므로(쿨다운이 곧 거부의 기억) 표도 남지만,
+            # 삭제는 용어를 통째로 잊는 일이라 표만 남으면 같은 이름의 새 제안이 아무도 낸 적
+            # 없는 거부를 물려받는다.
+            self._conn.execute("DELETE FROM vocabulary_rejection WHERE term = ?", (term,))
         return entry
 
     def bump_vocabulary_uses(self, terms: Sequence[str]) -> None:
@@ -2901,21 +2923,50 @@ class Store:
             self._conn.executemany(
                 "UPDATE vocabulary SET uses = uses + 1 WHERE term = ?", [(t,) for t in terms])
 
-    def note_vocabulary_rejection(self, terms: Sequence[str], auto_demote_rejections: int = 3) -> list[str]:
-        """A 👎 on a turn whose context carried these terms (spec §7 step 4 / §9). Each gets
-        ``rejections + 1``, and one that has now been voted down at least ``auto_demote_rejections``
-        times AND more often than it was confirmed drops back to **pending** -- it stops reaching
-        anyone's context until a person confirms it again. Returns the demoted terms.
+    def note_vocabulary_rejection(self, terms: Sequence[str], operator_id: str, now: datetime,
+                                  auto_demote_rejections: int = 3) -> list[str]:
+        """A 👎 by ONE person on a turn whose context carried these terms (spec §7 step 4 / §9).
+        A term voted down by at least ``auto_demote_rejections`` **distinct operators** AND more
+        often than it was confirmed drops back to **pending** -- it stops reaching anyone's context
+        until a person confirms it again. Returns the terms this call actually demoted.
 
-        Demotion is deliberately not a rejection: the term keeps its row, its counters and its
-        history, so the Growth view can show that the team once agreed and then stopped."""
+        **The source of truth for the count is `vocabulary_rejection`, one row per (term,
+        operator).** ``vocabulary.rejections`` is kept as a cached mirror -- the Growth view and
+        `VocabularyEntry` read it, and it is also the LEGACY FLOOR (below) -- but the rule is
+        decided on the row count, never on a running increment. That is the whole fix: an increment
+        counted a person's every mind-change (the web toggle sends "up" when flipping, so
+        👎👍👎👍👎 was three "transitions"), and one operator alone could demote a term the team had
+        confirmed. With the primary key, a repeat costs nothing and needs no prior-vote read.
+
+        **Migration.** A store written before this table has a non-zero ``rejections`` INTEGER and
+        no rows here; reading the count as ``COUNT(*)`` alone would reset it to 0 and un-demote a
+        term people had already rejected. So the effective count is
+        ``MAX(rejections, COUNT(*))`` -- the legacy integer is a floor that new votes add onto,
+        and the mirror is written back with that same MAX so it never goes backwards.
+
+        Demotion is deliberately not a rejection: the term keeps its row, its counters, its votes
+        and its history, so the Growth view can show that the team once agreed and then stopped."""
         if not terms:
             return []
         demoted: list[str] = []
         with self._transaction():
             for term in terms:
+                if not self._conn.execute(
+                        "SELECT EXISTS(SELECT 1 FROM vocabulary WHERE term = ?)", (term,)).fetchone()[0]:
+                    # 사이드카에 없는 용어에는 표를 남기지 않는다 -- 남기면 나중에 같은 이름이
+                    # 제안됐을 때 아무도 낸 적 없는 거부를 물려받는다.
+                    continue
+                # 멱등성은 기본키의 성질이다 -- 같은 사람이 몇 번을 눌러도 행은 하나.
                 self._conn.execute(
-                    "UPDATE vocabulary SET rejections = rejections + 1 WHERE term = ?", (term,))
+                    "INSERT OR IGNORE INTO vocabulary_rejection (term, operator_id, at) VALUES (?,?,?)",
+                    (term, operator_id, _iso(now)),
+                )
+                self._conn.execute(
+                    "UPDATE vocabulary SET rejections = MAX(rejections, "
+                    "  (SELECT COUNT(*) FROM vocabulary_rejection WHERE term = vocabulary.term)) "
+                    "WHERE term = ?",
+                    (term,),
+                )
                 row = self._conn.execute(
                     "SELECT status, confirmations, rejections FROM vocabulary WHERE term = ?", (term,)
                 ).fetchone()

@@ -108,17 +108,50 @@ def test_list_vocabulary_pages_newest_first_and_filters_by_status():
     assert confirmed.total == 1 and confirmed.items[0].term == "term0"
 
 
-def test_auto_demotion_needs_three_rejections_and_more_than_the_confirmations():
+def _reject(store: Store, term: str, operator: str, *, threshold: int = 3) -> list[str]:
+    return store.note_vocabulary_rejection([term], operator_id=operator, now=T0,
+                                           auto_demote_rejections=threshold)
+
+
+def test_auto_demotion_needs_three_distinct_operators_and_more_than_the_confirmations():
     store = Store(":memory:")
     store.propose_vocabulary(_entry())
     store.set_vocabulary_status("결제 계열", "confirmed", by="m", now=T0)   # confirmations = 1
-    assert store.note_vocabulary_rejection(["결제 계열"] * 2, auto_demote_rejections=3) == []
+    for operator in ("a", "b"):
+        assert _reject(store, "결제 계열", operator) == []
     assert store.get_vocabulary("결제 계열").status == "confirmed"
-    # 세 번째 거부에서 rejections(3) >= 3 이고 confirmations(1)보다 크다 → pending으로 강등.
-    assert store.note_vocabulary_rejection(["결제 계열"], auto_demote_rejections=3) == ["결제 계열"]
+    # 세 번째 **다른** 운영자에서 rejections(3) >= 3 이고 confirmations(1)보다 크다 → 강등.
+    assert _reject(store, "결제 계열", "c") == ["결제 계열"]
     demoted = store.get_vocabulary("결제 계열")
     assert demoted.status == "pending" and demoted.rejections == 3 and demoted.confirmations == 1
     assert store.confirmed_vocabulary() == []
+
+
+def test_one_operator_voting_again_and_again_never_reaches_the_threshold():
+    """멱등성이 호출자의 조건문이 아니라 `(term, operator_id)` 기본키의 성질이다: 한 사람이 몇
+    번을 눌러도 행은 하나라, 팀이 확정한 용어를 혼자 강등시킬 방법이 없다."""
+    store = Store(":memory:")
+    store.propose_vocabulary(_entry())
+    store.set_vocabulary_status("결제 계열", "confirmed", by="m", now=T0)
+    for _ in range(9):
+        assert _reject(store, "결제 계열", "a") == []
+    entry = store.get_vocabulary("결제 계열")
+    assert entry.status == "confirmed" and entry.rejections == 1
+
+
+def test_a_legacy_rejection_count_is_a_floor_the_new_table_cannot_undo():
+    """새 테이블이 생기기 전에 쓰인 저장소: `vocabulary.rejections`는 3인데 표 행은 0이다.
+    COUNT만 읽으면 이미 강등된 용어가 조용히 0으로 되살아난다 -- 유효 개수는
+    MAX(레거시 컬럼, 행 수)이고, 새 표는 그 바닥 위에 쌓인다."""
+    store = Store(":memory:")
+    store.propose_vocabulary(_entry())
+    store.set_vocabulary_status("결제 계열", "confirmed", by="m", now=T0)
+    store._conn.execute("UPDATE vocabulary SET rejections = 3 WHERE term = '결제 계열'")
+    assert store.get_vocabulary("결제 계열").rejections == 3
+    # 새 표 한 장으로도 유효 개수는 3(레거시 바닥) -- 0으로 내려가지 않고, 그래서 강등된다.
+    assert _reject(store, "결제 계열", "a") == ["결제 계열"]
+    entry = store.get_vocabulary("결제 계열")
+    assert entry.status == "pending" and entry.rejections == 3
 
 
 def test_a_widely_confirmed_term_is_not_demoted_by_a_few_rejections():
@@ -126,8 +159,31 @@ def test_a_widely_confirmed_term_is_not_demoted_by_a_few_rejections():
     store.propose_vocabulary(_entry())
     for operator in ("a", "b", "c", "d"):
         store.set_vocabulary_status("결제 계열", "confirmed", by=operator, now=T0)
-    assert store.note_vocabulary_rejection(["결제 계열"] * 3, auto_demote_rejections=3) == []
+    for operator in ("a", "b", "c"):
+        assert _reject(store, "결제 계열", operator) == []
     assert store.get_vocabulary("결제 계열").status == "confirmed"
+
+
+def test_deleting_a_term_forgets_the_votes_too():
+    """`reject`는 행을 남기지만(쿨다운이 곧 거부의 기억) `delete`는 용어를 통째로 잊는다. 표가
+    남으면 같은 이름의 새 제안이 아무도 낸 적 없는 거부를 물려받는다."""
+    store = Store(":memory:")
+    store.propose_vocabulary(_entry())
+    store.set_vocabulary_status("결제 계열", "confirmed", by="m", now=T0)
+    for operator in ("a", "b"):
+        _reject(store, "결제 계열", operator)
+    store.delete_vocabulary("결제 계열")
+    store.propose_vocabulary(_entry())
+    store.set_vocabulary_status("결제 계열", "confirmed", by="m", now=T0)
+    assert store.get_vocabulary("결제 계열").rejections == 0
+    assert _reject(store, "결제 계열", "c") == []
+
+
+def test_a_vote_on_a_term_the_sidecar_does_not_have_leaves_nothing_behind():
+    store = Store(":memory:")
+    assert _reject(store, "없는 용어", "a") == []
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM vocabulary_rejection").fetchone()[0] == 0
 
 
 def test_uses_are_counted_and_new_terms_are_a_count_not_a_list():
@@ -249,10 +305,10 @@ async def test_counting_a_use_keeps_the_cache_and_a_demotion_drops_it():
     await backend.confirmed_vocabulary(session)                   # 캐시를 채운다
     await backend.note_vocabulary_use(session, ["결제 계열"])
     assert backend._confirmed_cache is not None
-    for _ in range(2):
-        await backend.note_vocabulary_use(session, ["결제 계열"], rejected=True)
+    for operator in ("a", "b"):
+        await backend.note_vocabulary_use(_session(operator), ["결제 계열"], rejected=True)
     assert backend._confirmed_cache is not None                   # 강등이 없었던 👎는 그대로
-    await backend.note_vocabulary_use(session, ["결제 계열"], rejected=True)
+    await backend.note_vocabulary_use(_session("c"), ["결제 계열"], rejected=True)
     assert backend._confirmed_cache is None
 
 
@@ -266,15 +322,20 @@ async def test_delete_removes_the_fact_as_well_as_the_row():
     assert await backend.delete_alias(session, "결제 계열") is None
 
 
-async def test_note_vocabulary_use_counts_uses_and_demotes_on_repeated_thumbs_down():
+async def test_note_vocabulary_use_counts_uses_and_demotes_on_three_operators_thumbs_down():
     backend = _backend()
     session = _session()
     await backend.propose_alias(session, "결제 계열", QueryFilters(path_prefix="/v1/payment"))
     await backend.confirm_alias(session, "결제 계열")
     await backend.note_vocabulary_use(session, ["결제 계열"])
     assert backend.store.get_vocabulary("결제 계열").uses == 1
+    # 한 사람이 세 번 눌러도 표는 하나다 -- 세션의 operator가 곧 표의 주인이다.
     for _ in range(3):
         await backend.note_vocabulary_use(session, ["결제 계열"], rejected=True)
+    assert backend.store.get_vocabulary("결제 계열").status == "confirmed"
+    assert await backend.memory_store.get_facts("mes-demo") != []
+    for operator in ("jihoon", "sora"):
+        await backend.note_vocabulary_use(_session(operator), ["결제 계열"], rejected=True)
     assert backend.store.get_vocabulary("결제 계열").status == "pending"
     # 강등도 확정을 푸는 일이라 fact가 남지 않는다 -- 아래 속성 테스트의 불변식과 같은 규칙.
     assert await backend.memory_store.get_facts("mes-demo") == []
@@ -287,13 +348,20 @@ async def test_memory_facts_are_exactly_the_confirmed_terms():
     rng = random.Random(20260908)
     backend = _backend()
     session = _session()
-    terms = [f"용어 {i}" for i in range(6)]
-    for step in range(120):
+    terms = [f"용어 {i}" for i in range(4)]
+    demotions = 0
+    for step in range(240):
         term = rng.choice(terms)
-        action = rng.choice(["propose", "confirm", "reject", "delete", "demote"])
+        # 균등 확률이 아니다: 강등은 확정과 삭제 사이에서 **서로 다른 세 사람**의 👎가 몰려야
+        # 일어나므로, 다섯 갈래를 고르게 뽑으면 몇백 스텝을 돌려도 그 갈래가 한 번도 끝까지 가지
+        # 않고 불변식의 절반이 검사되지 않은 채 통과한다(아래 `demotions > 0`이 그걸 잡는다).
+        action = rng.choices(["propose", "confirm", "reject", "delete", "demote"],
+                             weights=[3, 2, 1, 1, 4])[0]
         now = T0 + timedelta(days=40 * step)      # 쿨다운이 지나는 시간축(재제안도 일어난다)
+        # 셋이다: 강등은 서로 다른 운영자 3명을 요구하므로, 둘만 흔들면 `demote` 갈래가 한 번도
+        # 실제 강등에 이르지 못하고 불변식의 절반이 검사되지 않는다.
         sess = AtworksSessionContext(session_id="s", project_id="mes-demo",
-                                     operator=rng.choice(["minseong", "jihoon"]), now=now)
+                                     operator=rng.choice(["minseong", "jihoon", "sora"]), now=now)
         if action == "propose":
             await backend.propose_alias(sess, term, QueryFilters(path_prefix=f"/v1/{step}"))
         elif action == "confirm":
@@ -303,12 +371,15 @@ async def test_memory_facts_are_exactly_the_confirmed_terms():
         elif action == "delete":
             await backend.delete_alias(sess, term)
         else:
-            await backend.note_vocabulary_use(sess, [term], rejected=True)
+            demotions += len(await backend.note_vocabulary_use(sess, [term], rejected=True))
         confirmed = {e.term.replace(" ", "_") for e in await backend.confirmed_vocabulary(session)}
         stored = {f.key for f in await backend.memory_store.get_facts("mes-demo")}
         assert stored == confirmed, f"step {step}: {action} {term!r}"
     # 시퀀스가 실제로 두 상태를 다 지났는지(빈 집합만 보고 통과한 게 아닌지) 확인한다.
     assert backend.store.list_vocabulary().total > 0
+    # 그리고 강등 갈래가 실제로 강등에 이르렀는지도 -- 서로 다른 운영자 3명이 필요해진 뒤로는
+    # 이게 0이면 불변식의 절반(강등이 fact를 민다)이 검사되지 않은 채 통과한다.
+    assert demotions > 0
 
 
 # -- 라우트 ----------------------------------------------------------------------------------

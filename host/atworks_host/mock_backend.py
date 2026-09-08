@@ -693,8 +693,12 @@ class MockAtworks(AtworksBackend):
         if not normalized:
             return []
         if rejected:
+            # 표는 **사람** 단위다: 세션의 operator가 곧 표의 주인이고, 같은 사람의 반복은
+            # `(term, operator_id)` 기본키가 흡수한다(라우트가 직전 표를 볼 필요가 없는 이유).
+            now = session.local_now() or datetime.now(UTC)
             demoted = self.store.note_vocabulary_rejection(
-                normalized, auto_demote_rejections=self._config.vocabulary_auto_demote_rejections)
+                normalized, operator_id=session.operator, now=now,
+                auto_demote_rejections=self._config.vocabulary_auto_demote_rejections)
             if demoted:
                 # 강등된 term만 confirmed 집합에서 빠진다. 강등이 없었던 호출은 집합을 바꾸지
                 # 않으므로 캐시도 그대로 둔다.

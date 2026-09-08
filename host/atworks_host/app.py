@@ -331,9 +331,12 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         1. **자기 턴만 투표한다**(다른 오퍼레이터의 turn_id면 403). turn_id는 SSE 응답에 실려
            나가는 값이라 추측이 아니라 전달로도 남의 손에 들어갈 수 있고, ask_log 행에는 그
            턴이 누구 것이었는지가 이미 적혀 있다.
-        2. **거부 집계는 전이에서만 1회**다: ``!= "down"`` → ``"down"``으로 바뀔 때만
-           ``note_vocabulary_use(rejected=True)``를 부른다. 요청마다 세면 같은 카드에서 👎를
-           세 번 누른 한 사람이 팀 전체가 확정한 용어를 혼자 강등시킨다.
+        2. **거부는 요청이 아니라 사람 단위로 센다**: 👎마다 ``note_vocabulary_use(rejected=True)``
+           를 그냥 부르고, 저장소가 ``(term, operator)`` 기본키로 한 사람의 표를 하나로 접는다.
+           전에는 ``!= "down"`` → ``"down"`` 전이에서만 셌는데, 그건 같은 요청의 반복에는
+           멱등이어도 같은 **사람**에게는 아니었다 -- 웹 토글은 뒤집을 때마다 ``"up"``을 보내므로
+           한 사람의 👎👍👎👍👎가 전이 셋이 되어 팀 전체가 확정한 용어를 혼자 강등시켰다.
+           멱등성이 여기 조건문이 아니라 기본키의 성질이라, 이 라우트에는 셈을 위한 조건이 없다.
         3. **`vote: null`은 표를 지운다** — 웹의 토글이 보내는 값이다.
 
         **표 자체는 감사 로그에 남기지 않는다.** 감사 2행은 "사람이 공유 상태를 바꿨다"의
@@ -345,7 +348,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         스펙이 남아 있을 때만 -- 회귀 eval 케이스 한 장이 된다(§9). 답하지 못한 턴의 👍는
         기록만 남는다: 고정할 행동이 없다."""
         _require_growth()
-        # 덮어쓰기 **전에** 읽는다: 소유자와 직전 표는 UPDATE 뒤에는 알 수 없다.
+        # 덮어쓰기 **전에** 읽는다: 이 턴이 누구 것이었는지를 보고 남의 표를 막는다(403).
         prior = await backend.get_ask(context(record), payload.turn_id)
         if prior is None:
             raise HTTPException(status_code=404, detail=f"unknown turn: {payload.turn_id!r}")
@@ -356,11 +359,12 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         if entry is None:   # 두 읽기 사이에 행이 사라진 경우 (보존 정리 등)
             raise HTTPException(status_code=404, detail=f"unknown turn: {payload.turn_id!r}")
         case_path: str | None = None
-        demotes_now = payload.vote == "down" and prior.feedback != "down"
-        if demotes_now and entry.vocabulary_terms:
+        if payload.vote == "down" and entry.vocabulary_terms:
             demoted = await backend.note_vocabulary_use(
                 context(record), list(entry.vocabulary_terms), rejected=True)
             for term in demoted:
+                # 감사 2행은 **실제로 강등된** term에만 쓴다. 조건이 `demoted`뿐이라 반복 👎는
+                # 저절로 아무 행도 쓰지 않는다: 이미 pending인 용어는 두 번 강등되지 않는다.
                 # 강등만 감사에 남는다. `growth_action`과 같은 2행이지만 `fn`이 없다 -- 여기서
                 # 일어난 일은 이미 일어났고, 실패할 수 있는 호출이 뒤따르지 않는다.
                 await audit_action(record, "vocabulary_auto_demote", "vocabulary", term)

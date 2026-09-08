@@ -360,10 +360,11 @@ export type UnmetReason = "no_dimension" | "no_evidence" | "out_of_scope" | "ref
 /**
  * `GET /ask-log` 한 행 (`AskEntry`). `question`은 **저장 시점에 이미 마스킹된** 요약이라 화면이
  * 다시 손대지 않는다 — 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽히면 기록이 아니다.
+ *
+ * `session_id`는 **없다** — 이 라우트는 팀 전체를 보여 주는 읽기라, 응답에 남의 살아 있는 세션
+ * 식별자를 실으면 그것이 곧 `X-Session-Id`에 붙일 수 있는 값이 된다. 행은 원장에 세션과 함께
+ * 남지만, 나가지는 않는다(`serialization.ask_record`).
  */
-/** `GET /ask-log`의 한 행. `session_id`는 **없다** — 이 라우트는 팀 전체를 보여 주는 읽기라,
- *  응답에 남의 살아 있는 세션 식별자를 실으면 그것이 곧 `X-Session-Id`에 붙일 수 있는 값이 된다.
- *  행은 원장에 세션과 함께 남지만, 나가지는 않는다(`serialization.ask_record`). */
 export interface AskEntry {
   seq?: number | null;
   at: string;
