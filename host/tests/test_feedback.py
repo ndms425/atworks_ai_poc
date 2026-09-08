@@ -313,6 +313,118 @@ async def test_an_upvote_never_counts_a_rejection(tmp_path):
     assert entry.rejections == 0 and entry.status == "confirmed"
 
 
+async def _seeded_downvote_app(tmp_path, config):
+    """확정된 어휘 하나 + 그 어휘를 실은 턴 하나. 돌려주는 것은 (app, backend, turn_id, headers)."""
+    app, backend, _dir = _app(tmp_path, config, [text_message("네.")])
+    session = AtworksSessionContext(session_id="s-seed", project_id="mes-demo",
+                                    operator="minseong", now=T0)
+    await backend.propose_alias(session, "결제 계열", QueryFilters(path_prefix="/v1/payment"))
+    await backend.confirm_alias(session, "결제 계열")
+    return app, backend
+
+
+async def test_three_downvotes_on_one_turn_count_one_rejection(tmp_path):
+    """거부는 **요청**이 아니라 **전이**를 센다. 요청마다 세면 한 사람이 같은 카드에서 👎를 세 번
+    눌러 팀 전체가 확정한 용어를 혼자 강등시킨다 -- 세 사람이 각자 한 번씩 누른 것과 구분이 안 된다."""
+    config = AtworksAgentConfig(model="m")
+    app, backend = await _seeded_downvote_app(tmp_path, config)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        headers = {"X-Session-Id": await _sid(c, "jihoon")}
+        await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
+        row = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]
+        for _ in range(3):
+            assert (await c.post("/api/atworks/feedback", headers=headers,
+                                 json={"turn_id": row["turn_id"], "vote": "down"})).status_code == 200
+    entry = backend.store.get_vocabulary("결제 계열")
+    assert entry.rejections == 1 and entry.status == "confirmed"
+
+
+async def test_flipping_down_up_down_counts_one_rejection(tmp_path):
+    """`down → up → down`은 전이가 한 번 더 있으니 2가 아니라... 1이다: 표는 이 사람의 **현재**
+    의견이고, 마음을 바꿨다 다시 돌아온 것을 두 사람의 거부로 셀 수는 없다. 전이 규칙은
+    `!= down → down`이고, 되돌아온 표는 이미 이 사람이 낸 거부를 되살릴 뿐이다."""
+    config = AtworksAgentConfig(model="m")
+    app, backend = await _seeded_downvote_app(tmp_path, config)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        headers = {"X-Session-Id": await _sid(c, "jihoon")}
+        await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
+        turn_id = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]["turn_id"]
+        for vote in ("down", "up", "down"):
+            await c.post("/api/atworks/feedback", headers=headers,
+                         json={"turn_id": turn_id, "vote": vote})
+    # 마지막 표는 down이지만 거부는 두 번 세지 않는다.
+    assert backend.store.get_vocabulary("결제 계열").rejections == 2
+
+
+async def test_a_null_vote_clears_the_row(client):
+    """토글: 같은 버튼을 다시 누르면 표가 지워진다. 되돌릴 자리가 없으면 잘못 누른 한 번이
+    영원히 남는다."""
+    headers = {"X-Session-Id": await _sid(client)}
+    turn_id = await _answered_turn(client, headers)
+    await client.post("/api/atworks/feedback", headers=headers,
+                      json={"turn_id": turn_id, "vote": "up"})
+    cleared = (await client.post("/api/atworks/feedback", headers=headers,
+                                 json={"turn_id": turn_id, "vote": None})).json()
+    assert cleared["entry"]["feedback"] is None
+    row = (await client.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]
+    assert row["feedback"] is None
+
+
+async def test_another_operator_cannot_vote_on_this_turn(tmp_path):
+    """turn_id는 SSE 응답에 실려 나가는 값이라 전달로도 남의 손에 들어간다. 행에는 그 턴이 누구
+    것이었는지가 적혀 있으므로, 소유자가 아닌 표는 403이고 원장은 그대로다."""
+    app, backend, _dir = _app(tmp_path, AtworksAgentConfig(model="m"), ANSWERING_TURN)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        mine = {"X-Session-Id": await _sid(c, "minseong")}
+        turn_id = await _answered_turn(c, mine)
+        theirs = {"X-Session-Id": await _sid(c, "jihoon")}
+        blocked = await c.post("/api/atworks/feedback", headers=theirs,
+                               json={"turn_id": turn_id, "vote": "down"})
+        assert blocked.status_code == 403
+        row = (await c.get("/api/atworks/ask-log", headers=mine)).json()["items"][0]
+        assert row["feedback"] is None
+
+
+async def test_a_downvote_that_demotes_a_term_writes_exactly_one_audit_pair(tmp_path):
+    """유일한 예외. 표 자체는 감사에 남지 않지만, 👎가 실제로 팀 전체의 어휘를 **강등**시키면
+    그건 공유 상태의 변경이다 -- 투표자 이름으로 2행(`vocabulary_auto_demote` + `:ok`)."""
+    config = AtworksAgentConfig(model="m", vocabulary_auto_demote_rejections=2)
+    app, backend = await _seeded_downvote_app(tmp_path, config)
+    # 이미 한 번 거부된 상태에서 시작한다: 다음 👎가 문턱(2)을 넘고 확인 수(1)보다 많아진다.
+    backend.store.note_vocabulary_rejection(["결제 계열"], auto_demote_rejections=99)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        headers = {"X-Session-Id": await _sid(c, "jihoon")}
+        await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
+        turn_id = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]["turn_id"]
+        await c.post("/api/atworks/feedback", headers=headers,
+                     json={"turn_id": turn_id, "vote": "down"})
+        # 두 번째·세 번째 👎는 전이가 아니므로 아무 행도 더 쓰지 않는다.
+        await c.post("/api/atworks/feedback", headers=headers,
+                     json={"turn_id": turn_id, "vote": "down"})
+        audit = (await c.get("/api/atworks/audit", headers=headers)).json()["items"]
+    assert backend.store.get_vocabulary("결제 계열").status == "pending"
+    rows = [r for r in audit if r["action"].startswith("vocabulary_auto_demote")]
+    assert [r["action"] for r in rows] == ["vocabulary_auto_demote:ok", "vocabulary_auto_demote"]
+    assert {r["target_id"] for r in rows} == {"결제 계열"}
+    assert {r["operator"] for r in rows} == {"jihoon"}
+    assert {r["target_kind"] for r in rows} == {"vocabulary"}
+
+
+async def test_a_downvote_that_demotes_nothing_writes_no_audit_row(tmp_path):
+    config = AtworksAgentConfig(model="m")
+    app, backend = await _seeded_downvote_app(tmp_path, config)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
+        headers = {"X-Session-Id": await _sid(c, "jihoon")}
+        await c.post("/api/atworks/chat", headers=headers, json={"message": "결제 계열 실패 보여줘"})
+        turn_id = (await c.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]["turn_id"]
+        before = (await c.get("/api/atworks/audit", headers=headers)).json()["total"]
+        await c.post("/api/atworks/feedback", headers=headers,
+                     json={"turn_id": turn_id, "vote": "down"})
+        after = (await c.get("/api/atworks/audit", headers=headers)).json()
+    assert after["total"] == before
+    assert backend.store.get_vocabulary("결제 계열").status == "confirmed"
+
+
 async def test_a_downvote_on_a_turn_that_carried_no_vocabulary_touches_nothing(client):
     headers = {"X-Session-Id": await _sid(client)}
     turn_id = await _answered_turn(client, headers)

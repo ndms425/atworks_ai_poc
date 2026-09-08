@@ -487,6 +487,16 @@ class AtworksBackend(ABC):
         건수이고 ``limit``과 무관하다."""
 
     @abstractmethod
+    async def get_ask(
+        self, session: AtworksSessionContext, turn_id: str
+    ) -> AskEntry | None:
+        """한 턴의 ask_log 행, 또는 ``None``. 투표 라우트가 **덮어쓰기 전에** 읽는 것이다:
+        누구의 턴인지(소유자 아닌 사람의 투표는 403)와 직전 표가 무엇이었는지(거부 집계는
+        ``!= "down" → "down"`` 전이에서만 1회) 둘 다 `set_feedback` 이후에는 알 수 없다.
+
+        REST 구현 의무: ``turn_id``는 UNIQUE 인덱스다 — 목록을 훑어 찾지 않는다."""
+
+    @abstractmethod
     async def set_feedback(
         self, session: AtworksSessionContext, turn_id: str, vote: Literal["up", "down"] | None
     ) -> AskEntry | None:
@@ -592,7 +602,7 @@ class AtworksBackend(ABC):
     @abstractmethod
     async def note_vocabulary_use(
         self, session: AtworksSessionContext, terms: list[str], rejected: bool = False
-    ) -> None:
+    ) -> list[str]:
         """이번 턴 컨텍스트가 실제로 실은 term들의 집계. 기본은 ``uses + 1``이고,
         ``rejected=True``(그 턴에 👎, §9)면 ``rejections + 1``에 자동 강등 규칙까지 — 거부가
         ``vocabulary_auto_demote_rejections`` 이상이고 확인 수보다 많으면 상태가 pending으로
@@ -600,7 +610,12 @@ class AtworksBackend(ABC):
         순수 집계라 어떤 경우에도 턴을 실패시키지 않는다.
 
         ``uses + 1``은 confirmed 집합을 바꾸지 않으므로 프로세스 캐시를 무효화하지 **않는다**;
-        강등이 실제로 일어난 호출만 무효화한다."""
+        강등이 실제로 일어난 호출만 무효화한다.
+
+        **실제로 강등된 term들을 돌려준다**(강등이 없었으면 빈 리스트). 강등은 팀 전체가 보는
+        상태의 변경이라 라우트가 그것만 감사 2행(``vocabulary_auto_demote``)으로 남기는데,
+        "무엇이 강등됐나"를 뒤에서 되읽을 방법이 없다 — 강등된 term은 confirmed 목록에서 이미
+        사라졌고, 사이드카를 다시 훑으면 이 호출이 내린 것과 남이 내린 것을 구분할 수 없다."""
 
     # -- 저장 질문 (자가발전 spec §8: 되풀이되는 질문의 승격) ---------------------------------
     # 이 3개 메서드가 공유하는 의무 (REST 구현이 반드시 지킨다):

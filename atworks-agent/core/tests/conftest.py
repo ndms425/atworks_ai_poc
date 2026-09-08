@@ -354,6 +354,10 @@ class InMemoryBackend(AtworksBackend):
         items = sorted(items, key=lambda e: (e.at, e.seq or 0), reverse=True)
         return Page[AskEntry](items=items[:limit], next_cursor=None, total=len(items))
 
+    async def get_ask(self, session, turn_id):
+        del session
+        return next((e for e in self.asks if e.turn_id == turn_id), None)
+
     async def set_feedback(self, session, turn_id, vote):
         # 덮어쓴다(같은 턴 재투표), 없으면 None -- Store와 같은 계약.
         del session
@@ -446,6 +450,7 @@ class InMemoryBackend(AtworksBackend):
         return [e for e in self.vocabulary.values() if e.status == "confirmed"]
 
     async def note_vocabulary_use(self, session, terms, rejected=False):
+        demoted: list[str] = []
         for term in terms:
             entry = self.vocabulary.get(normalize_term(term))
             if entry is None:
@@ -454,9 +459,12 @@ class InMemoryBackend(AtworksBackend):
                 entry = entry.model_copy(update={"rejections": entry.rejections + 1})
                 if entry.status == "confirmed" and entry.rejections >= 3 and entry.rejections > entry.confirmations:
                     entry = entry.model_copy(update={"status": "pending"})
+                    demoted.append(entry.term)
             else:
                 entry = entry.model_copy(update={"uses": entry.uses + 1})
             self.vocabulary[entry.term] = entry
+        # 실제로 강등된 term만 (ABC 계약): 라우트가 이것만 감사 2행으로 남긴다.
+        return demoted
 
     # -- 저장 질문 (self-growth §8). An in-memory dict: the promoter itself is a host job, so what
     # these doubles owe the ABC is the READ side -- list in `uses` order, run the stored spec

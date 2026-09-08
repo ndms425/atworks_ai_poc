@@ -543,6 +543,11 @@ class MockAtworks(AtworksBackend):
     async def list_asks(self, session, outcome=None, cursor=None, limit=50) -> Page[AskEntry]:
         return self.store.list_asks(outcome, cursor, limit)
 
+    async def get_ask(self, session, turn_id: str) -> AskEntry | None:
+        # UNIQUE 인덱스 한 번. 투표 라우트가 덮어쓰기 전에 소유자와 직전 표를 읽는 자리다.
+        del session
+        return self.store.ask_by_turn(turn_id)
+
     async def set_feedback(self, session, turn_id: str, vote) -> AskEntry | None:
         # 덮어쓰기 UPDATE 하나 + 갱신된 행 읽기 하나. 감사 로그는 건드리지 않는다 -- 표는 공유
         # 상태의 변경이 아니다(§9). 없는 turn_id면 None이고, 404는 라우트가 낸다.
@@ -682,10 +687,10 @@ class MockAtworks(AtworksBackend):
             self._confirmed_cache = self.store.confirmed_vocabulary()
         return list(self._confirmed_cache)
 
-    async def note_vocabulary_use(self, session, terms: list[str], rejected: bool = False) -> None:
+    async def note_vocabulary_use(self, session, terms: list[str], rejected: bool = False) -> list[str]:
         normalized = [normalize_term(t) for t in terms if normalize_term(t)]
         if not normalized:
-            return
+            return []
         if rejected:
             demoted = self.store.note_vocabulary_rejection(
                 normalized, auto_demote_rejections=self._config.vocabulary_auto_demote_rejections)
@@ -694,10 +699,12 @@ class MockAtworks(AtworksBackend):
                 # 않으므로 캐시도 그대로 둔다.
                 await self._forget_facts(session, demoted)
                 self._confirmed_cache = None
+            return list(demoted)
         else:
             # `uses + 1`은 순수 집계다 -- confirmed 집합이 그대로이므로 캐시를 버릴 이유가 없다.
             # (매 턴 버리면 캐시가 하는 일이 없어지고, 어휘가 실린 턴마다 SQL이 한 번 더 돈다.)
             self.store.bump_vocabulary_uses(normalized)
+            return []
 
     # -- 저장 질문 (자가발전 spec §8) --------------------------------------------------------
 

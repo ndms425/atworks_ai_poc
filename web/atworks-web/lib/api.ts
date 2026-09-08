@@ -73,8 +73,11 @@ export const fetchAskLog = (outcome?: string, cursor: string | null = null) =>
   api.getPage<AskEntry>("/ask-log", { outcome, cursor, limit: PAGE_SIZE });
 
 // 카드 푸터의 👍/👎 (spec §9). 같은 턴을 다시 투표하면 마지막 표만 남고, 감사 로그는 움직이지
-// 않는다 — 표는 공유 상태의 변경이 아니다. 👍가 회귀 eval 케이스를 만드는 것은 서버 쪽 일이다.
-export const sendFeedback = (turnId: string, vote: "up" | "down") =>
+// 않는다 — 표는 공유 상태의 변경이 아니다(👎가 실제로 어휘를 강등시킬 때만 서버가 2행을 남긴다).
+// 👍가 회귀 eval 케이스를 만드는 것은 서버 쪽 일이다.
+// `null`은 표를 **지운다**: 같은 버튼을 다시 누르는 토글이 보내는 값이고, 잘못 누른 사람이
+// 되돌릴 유일한 자리다.
+export const sendFeedback = (turnId: string, vote: "up" | "down" | null) =>
   api.post<{ ok: boolean; entry: { feedback: "up" | "down" | null }; case_path: string | null }>(
     "/feedback",
     { turn_id: turnId, vote },

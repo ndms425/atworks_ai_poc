@@ -66,7 +66,7 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `execute_job_once` → the execution engine, called by the scheduler with no LLM in it;
   `get_context` → the project profile that fills the per-request context block;
   `query_runs` → the self-growth query engine (Self-growth bullet); `record_ask` / `list_asks` /
-  `set_feedback` / `growth_summary` → the `ask_log`; `propose_alias` / `list_vocabulary` /
+  `get_ask` / `set_feedback` / `growth_summary` → the `ask_log`; `propose_alias` / `list_vocabulary` /
   `confirm_alias` / `reject_alias` / `delete_alias` / `confirmed_vocabulary` /
   `note_vocabulary_use` → the shared vocabulary; `list_saved_questions` / `run_saved_question` /
   `set_saved_question_status` → the promoted saved questions;
@@ -267,7 +267,15 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   a saved question is a question, not a saved answer.
   **(5) Feedback and evals.** The card's 👍/👎 posts to `/feedback` and writes NO audit row —
   the audit log answers "what did a person approve", and a vote approves nothing, moves no ledger,
-  and is invisible to everyone else; loading votes into it would cost the log that property. A 👎
+  and is invisible to everyone else; loading votes into it would cost the log that property. The
+  ONE exception is a 👎 that actually **demotes** a shared term: that is a change to state the
+  whole team sees, so the route writes the pair `vocabulary_auto_demote` / `:ok` per demoted term
+  with the voter as operator (`note_vocabulary_use` returns the terms it demoted, so the row names
+  what really happened, not what might have). A vote is **one person's current opinion**, not a
+  counter: it is idempotent (a rejection is counted only on the transition `!= "down"` → `"down"`,
+  so three 👎 on one card are one rejection, and a delegated demotion needs three different
+  operators), it is **owned** (a turn is votable only by the operator whose turn it was — another
+  operator's `turn_id` is a 403), and `vote: null` clears it (what the web's toggle sends). A 👎
   counts a rejection against the vocabulary the turn actually used; a 👍 on an `answered` turn
   with a stored spec writes one regression case to `evals/cases/` (`ATWORKS_EVALS_DIR` overrides
   the location) holding the turn's text plus `expected {calls_tool, spec_equals {dimensions,

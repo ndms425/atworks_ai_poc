@@ -56,17 +56,25 @@ function PendingAliasRow({ alias }: { alias: { term: string; fragment_summary: s
  */
 function FeedbackRow({ turnId, initial }: { turnId: string; initial?: "up" | "down" | null }) {
   const [vote, setVote] = useState<"up" | "down" | null>(initial ?? null);
+  const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const cast = async (next: "up" | "down") => {
+    // 이미 눌린 버튼을 다시 누르면 **지운다**(토글). 그러지 않으면 잘못 누른 표를 되돌릴 자리가
+    // 없고, 같은 버튼의 두 번째 클릭은 서버에 아무 뜻도 없는 두 번째 POST가 된다.
+    const target = vote === next ? null : next;
+    // 진행 중에는 더 받지 않는다 — 연타가 같은 표를 여러 번 보내면 화면과 원장이 어긋난다.
+    if (busy) return;
+    setBusy(true);
     setFailed(false);
     // 낙관적으로 먼저 칠한다 — 실패하면 되돌리고 한 줄로 말한다.
     const previous = vote;
-    setVote(next);
-    const data = await sendFeedback(turnId, next);
+    setVote(target);
+    const data = await sendFeedback(turnId, target);
     if (!data?.ok) {
       setVote(previous);
       setFailed(true);
     }
+    setBusy(false);
   };
   return (
     <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">

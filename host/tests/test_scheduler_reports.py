@@ -259,6 +259,10 @@ class RecordingBackend(AtworksBackend):
     async def list_asks(self, session, outcome=None, cursor=None, limit=50):
         return Page[AskEntry](items=list(self.asks), next_cursor=None, total=len(self.asks))
 
+    async def get_ask(self, session, turn_id):
+        # 표를 읽는 것도 사람의 클릭 경로다 -- 스케줄러가 부르면 테스트가 그걸 본다.
+        raise NotImplementedError
+
     async def set_feedback(self, session, turn_id, vote):
         # 스케줄러 경로에는 카드도, 사람도, 표도 없다 -- 불리면 테스트가 그걸 본다.
         raise NotImplementedError

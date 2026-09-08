@@ -154,10 +154,12 @@ class SessionStart(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    """카드 푸터의 한 표(자가발전 §9). `vote`는 두 값뿐이라 오타는 422이고, `null`은 표를 지운다
-    — 잘못 누른 사람이 되돌릴 자리가 있어야 한다."""
+    """카드 푸터의 한 표(자가발전 §9). `vote`는 두 값뿐이라 오타는 422다."""
     turn_id: str = Field(min_length=1, max_length=64)
-    vote: Literal["up", "down"] | None = None
+    #: `null`(또는 생략)은 표를 **지운다** — 웹의 토글(같은 버튼을 다시 누름)이 보내는 값이고,
+    #: 잘못 누른 사람이 되돌릴 유일한 자리다. 두 값 사이를 오가는 것도 여기로 온다.
+    vote: Literal["up", "down"] | None = Field(
+        default=None, description="up | down | null(표 지우기)")
 
 
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
@@ -324,22 +326,45 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     async def feedback(payload: FeedbackRequest, record: CurrentSession) -> dict:
         """카드 푸터의 👍/👎. 같은 턴을 다시 투표하면 마지막 표만 남고, 없는 턴은 404다.
 
-        **감사 로그에 남기지 않는다.** 감사 2행은 "사람이 공유 상태를 바꿨다"의 증적이고, 표는
-        그런 변경이 아니다 -- 승인 마크도, 원장도, 다른 사람에게 보이는 무엇도 움직이지 않는다.
-        투표까지 감사에 실으면 그 로그는 "무엇이 승인됐나"를 더 이상 한눈에 보여주지 못한다.
+        세 가지가 표를 **한 사람의 한 의견**으로 묶는다.
 
-        표가 하는 일은 둘뿐이다. 👎면 이 턴의 컨텍스트에 실렸던 어휘가 ``rejections + 1``을 받고
-        (충분히 쌓이면 자동으로 pending으로 강등된다, §7 단계 4), 👍면 -- 그 턴이 실제로 답을
-        했고(``answered``) 실행한 스펙이 남아 있을 때만 -- 회귀 eval 케이스 한 장이 된다(§9).
-        답하지 못한 턴의 👍는 기록만 남는다: 고정할 행동이 없다."""
+        1. **자기 턴만 투표한다**(다른 오퍼레이터의 turn_id면 403). turn_id는 SSE 응답에 실려
+           나가는 값이라 추측이 아니라 전달로도 남의 손에 들어갈 수 있고, ask_log 행에는 그
+           턴이 누구 것이었는지가 이미 적혀 있다.
+        2. **거부 집계는 전이에서만 1회**다: ``!= "down"`` → ``"down"``으로 바뀔 때만
+           ``note_vocabulary_use(rejected=True)``를 부른다. 요청마다 세면 같은 카드에서 👎를
+           세 번 누른 한 사람이 팀 전체가 확정한 용어를 혼자 강등시킨다.
+        3. **`vote: null`은 표를 지운다** — 웹의 토글이 보내는 값이다.
+
+        **표 자체는 감사 로그에 남기지 않는다.** 감사 2행은 "사람이 공유 상태를 바꿨다"의
+        증적이고, 표는 그런 변경이 아니다 -- 승인 마크도, 원장도 움직이지 않는다. 단 하나의
+        예외가 이 아래에 있다: 👎가 실제로 어휘를 **강등**시키면 그건 팀 전체가 보는 상태의
+        변경이므로, 강등된 term마다 ``vocabulary_auto_demote`` 2행을 투표자 이름으로 남긴다.
+
+        그 밖에 표가 하는 일은 하나. 👍면 -- 그 턴이 실제로 답을 했고(``answered``) 실행한
+        스펙이 남아 있을 때만 -- 회귀 eval 케이스 한 장이 된다(§9). 답하지 못한 턴의 👍는
+        기록만 남는다: 고정할 행동이 없다."""
         _require_growth()
+        # 덮어쓰기 **전에** 읽는다: 소유자와 직전 표는 UPDATE 뒤에는 알 수 없다.
+        prior = await backend.get_ask(context(record), payload.turn_id)
+        if prior is None:
+            raise HTTPException(status_code=404, detail=f"unknown turn: {payload.turn_id!r}")
+        if prior.operator != record.user_id:
+            raise HTTPException(
+                status_code=403, detail=f"turn {payload.turn_id!r} belongs to another operator")
         entry = await backend.set_feedback(context(record), payload.turn_id, payload.vote)
-        if entry is None:
+        if entry is None:   # 두 읽기 사이에 행이 사라진 경우 (보존 정리 등)
             raise HTTPException(status_code=404, detail=f"unknown turn: {payload.turn_id!r}")
         case_path: str | None = None
-        if payload.vote == "down" and entry.vocabulary_terms:
-            await backend.note_vocabulary_use(
+        demotes_now = payload.vote == "down" and prior.feedback != "down"
+        if demotes_now and entry.vocabulary_terms:
+            demoted = await backend.note_vocabulary_use(
                 context(record), list(entry.vocabulary_terms), rejected=True)
+            for term in demoted:
+                # 강등만 감사에 남는다. `growth_action`과 같은 2행이지만 `fn`이 없다 -- 여기서
+                # 일어난 일은 이미 일어났고, 실패할 수 있는 호출이 뒤따르지 않는다.
+                await audit_action(record, "vocabulary_auto_demote", "vocabulary", term)
+                await audit_action(record, "vocabulary_auto_demote", "vocabulary", term, "ok")
         if payload.vote == "up" and entry.outcome == "answered" and entry.spec is not None:
             try:
                 case_path = str(write_case(entry, cases_dir=evals_cases_dir))
