@@ -350,6 +350,13 @@ def generate(
     (out / "operators.json").write_text(json.dumps(operator_rows, ensure_ascii=False), encoding="utf-8")
     (out / "runs.json").write_text("[]", encoding="utf-8")
 
+    # Table statistics are part of a finished dataset, not something the first reader should have
+    # to build: the Store was opened when the file was EMPTY, so its open-time
+    # `analyze_if_missing` had nothing to measure. Without this, the query engine's runs-arm bench
+    # row read 443ms instead of 236ms on a freshly generated set -- SQLite picking the less
+    # selective of two usable indexes.
+    store.analyze()
+
     conn = store.conn()
     # Fold the WAL back into the main file so the dataset directory can be copied (a bench runs
     # a real job and writes; tests bench a copy) without losing the last transactions.

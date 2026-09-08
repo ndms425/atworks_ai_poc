@@ -45,6 +45,7 @@ briefing keeps its own exact-edge path (``Store.aggregate_rollups``), which is a
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -69,6 +70,22 @@ APIS_DIMENSIONS = ("path_segment_1", "path_segment_2", "path_segment_3", "path_p
 
 #: JSON map column per key axis, on ``rollup_day``.
 MAP_COLUMN = {"failed_rule": "failed_rule_counts", "http_status": "http_status_counts"}
+
+#: "not a pass", twice, because the two shapes want opposite plans and the status domain is
+#: exactly (pass, fail, error) so both are the same set.
+#:
+#: `NON_PASS_SQL` is the SARGABLE form, for a GROUPED statement that reads its whole window: as
+#: an IN it becomes two equality ranges on `idx_runs_status_executed_at` instead of a skip-scan
+#: of `idx_runs_executed_by_executed_at` over every run in the window -- the runs-arm bench row
+#: went from 190ms to 35ms on the reduced dataset.
+#:
+#: `NON_PASS_ORDERED_SQL` is the same set written so the planner does NOT reach for that index,
+#: for the evidence fill's `ORDER BY executed_at DESC LIMIT 5`. There the ordering index IS the
+#: plan -- five rows and stop. Made sargable, the planner instead takes the status ranges and
+#: sorts everything they match, and the `path_segment_2` bench row went 105ms -> 320ms. Same
+#: rows, opposite right answer; which one a call site wants is a property of its ORDER BY.
+NON_PASS_SQL = "runs.status IN ('fail', 'error')"
+NON_PASS_ORDERED_SQL = "runs.status != 'pass'"
 
 #: ``QueryRow.api_ids`` / ``QueryRow.run_ids`` schema caps (spec §4 "표본 채움").
 API_SAMPLE_CAP = 20
@@ -612,7 +629,7 @@ def _runs(spec: QuerySpec, status: str | None, day_from: str, day_to: str,
     run_params: list = [_sql_iso(since_dt), _sql_iso(until_dt)]
     if status is not None:
         if status == "non_pass":
-            run_where.append("runs.status != 'pass'")
+            run_where.append(NON_PASS_SQL)
         else:
             run_where.append("runs.status = ?")
             run_params.append(status)
@@ -631,7 +648,7 @@ def _runs(spec: QuerySpec, status: str | None, day_from: str, day_to: str,
         run_where.append(_failed_rule_predicate(filters.failed_rule, run_params))
     run_where += _scope_operator_clause(filters.scope_operator, since_dt, "runs.api_id", run_params)
     if fr_dim:
-        run_where.append("runs.status != 'pass'")   # a pass run yields no failed_rule key
+        run_where.append(NON_PASS_SQL)   # a pass run yields no failed_rule key
     if "executed_by" in spec.dimensions:
         # "실행자별" means the runs that HAVE an executor. An unattributed run belongs to no
         # operator (`rollup_operator_day` skips it at ingest, as `operator_api` always has), so
@@ -699,7 +716,7 @@ def _runs_p95(keys: list[str], from_sql: str, from_params: list, where: list[str
     return f"SELECT {columns} FROM ({inner}){group_sql}", [*from_params, *where_params]
 
 
-def _failed_rule_predicate(values, params: list) -> str:
+def _failed_rule_predicate(values, params: list, non_pass: str = NON_PASS_SQL) -> str:
     """"a run whose ``aggregation._keys(run, 'failed_rule')`` contains one of these" -- both
     halves of that definition: a named rule inside the JSON array, and the synthetic
     ``(error) HTTP nnn`` key a non-pass run with no named rule produces."""
@@ -707,17 +724,20 @@ def _failed_rule_predicate(values, params: list) -> str:
     synthetic = _in_clause("('(error) HTTP ' || COALESCE(CAST(runs.http_status AS TEXT), '(none)'))",
                            values, params)
     return (f"(EXISTS (SELECT 1 FROM json_each(runs.failed_rules) je2 WHERE {named}) "
-            f"OR (runs.status != 'pass' "
+            f"OR ({non_pass} "
             f"AND json_array_length(COALESCE(runs.failed_rules, '[]')) = 0 AND {synthetic}))")
 
 
-def sample_predicates(spec: QuerySpec, day_from: str, day_to: str,
-                      tz: str) -> tuple[list[str], list]:
+def sample_predicates(spec: QuerySpec, day_from: str, day_to: str, tz: str,
+                      non_pass: str = NON_PASS_ORDERED_SQL) -> tuple[list[str], list]:
     """The spec's whole filter set, expressed over ``runs`` ALONE (alias ``runs``, no join) --
     what the evidence-sample fill runs under. The api-scoped filters become one
     ``api_id IN (SELECT ... FROM apis)`` subquery instead of a join, so the outer statement keeps
     driving off a ``runs`` index; the run-level filters are the identical clauses the ``runs``
-    source builds, so a sample can never come from a population the row did not count."""
+    source builds, so a sample can never come from a population the row did not count.
+
+    ``non_pass`` defaults to the ORDERED form because the per-row fill's plan is its
+    ``ORDER BY executed_at DESC LIMIT 5``; ``sample_batch`` passes the sargable one."""
     filters = spec.filters
     since_dt, until_dt = day_bounds(day_from, day_to, tz)
     status = _status_of(spec)
@@ -725,7 +745,7 @@ def sample_predicates(spec: QuerySpec, day_from: str, day_to: str,
     params: list = [_sql_iso(since_dt), _sql_iso(until_dt)]
     if status is not None:
         if status == "non_pass":
-            where.append("runs.status != 'pass'")
+            where.append(non_pass)
         else:
             where.append("runs.status = ?")
             params.append(status)
@@ -741,7 +761,7 @@ def sample_predicates(spec: QuerySpec, day_from: str, day_to: str,
     if not _empty(filters.http_status):
         where.append(_in_clause("runs.http_status", filters.http_status, params, int))
     if not _empty(filters.failed_rule):
-        where.append(_failed_rule_predicate(filters.failed_rule, params))
+        where.append(_failed_rule_predicate(filters.failed_rule, params, non_pass))
     api_clauses: list[str] = []
     api_params: list = []
     api_clauses += _apis_predicates(filters, api_params)
@@ -750,6 +770,104 @@ def sample_predicates(spec: QuerySpec, day_from: str, day_to: str,
         params += api_params
     where += _scope_operator_clause(filters.scope_operator, since_dt, "runs.api_id", params)
     return where, params
+
+
+def batched_samples(spec: QuerySpec) -> bool:
+    """Whether the evidence fill runs as ONE batched pair of statements rather than two per row.
+
+    The row-by-row form is not naive: each of its statements is
+    ``ORDER BY executed_at DESC LIMIT 5`` on ``idx_runs_executed_at``, so it STOPS after five
+    matches instead of reading the window. A batched window function cannot stop early -- it
+    ranks the whole window -- so batching is a loss on every dimension whose key is a plain
+    indexed predicate (measured on the reduced dataset: ``method x target_env`` 132 ms row-by-row
+    vs 290 ms batched; ``path_segment_2`` 58 vs 111).
+
+    ``failed_rule`` is the exception, and it is the row that was red: its key predicate is an
+    ``EXISTS (json_each(...))`` that must be evaluated per candidate run, so early termination
+    buys nothing and the fan-out multiplies it by the page -- 352 ms row-by-row vs 187 ms batched
+    for the same twelve groups. Expanding the JSON once is strictly better there.
+
+    One rule, stated where both callers can read it, rather than a flag at the call site."""
+    return "failed_rule" in spec.dimensions
+
+
+def sample_batch(spec: QuerySpec, day_from: str, day_to: str, tz: str,
+                 raw_keys: Sequence[tuple], *, run_cap: int,
+                 api_cap: int) -> tuple[tuple[str, list], tuple[str, list]]:
+    """The evidence-sample fill for a WHOLE result page, as two statements instead of two per
+    row. Returns ``((run_sql, run_params), (api_sql, api_params))``; each yields
+    ``(k0, .., kn, value)`` rows for every returned key at once.
+
+    Used only where the row-by-row fill is pathological -- see ``batched_samples``. Two
+    statements, not one: the two samples differ in both ordering and cap (the 5 NEWEST runs; the
+    20 alphabetically-first DISTINCT api ids), so one window function cannot serve both, and a
+    UNION ALL would only hide the second pass behind one round trip.
+
+    **The population is unchanged.** The predicates are ``sample_predicates``' -- the spec's own
+    filters -- and the row's key is applied by joining the returned key tuples through a ``ks``
+    CTE with ``IS`` (null-safe: a key can legitimately be NULL), which is exactly what
+    ``row_key_predicates`` asserted per row. A ``failed_rule`` dimension expands ``json_each``
+    ONCE into the same ``fr_key`` the ``runs`` arm builds, instead of running an ``EXISTS``
+    subquery per returned row -- that fan-out was the whole cost of this fill (271 ms of a
+    271 ms key-arm query on the reduced dataset).
+
+    ``raw_keys`` must be the RAW key tuples ``Store._query_rows`` collected, in row order."""
+    # The batched form ranks the whole window rather than stopping after five rows, so it wants
+    # the SARGABLE non-pass predicate -- the opposite of what the per-row form wants.
+    base, params = sample_predicates(spec, day_from, day_to, tz, NON_PASS_SQL)
+    where = list(base)
+    dims = list(spec.dimensions)
+    if "failed_rule" in dims:
+        # A pass run yields no failed_rule key -- the same clause `_runs` adds, and the same one
+        # `row_key_predicates` paired with its EXISTS.
+        where.append(NON_PASS_SQL)
+        from_sql = (
+            "(SELECT DISTINCT COALESCE(je.value, '(error) HTTP ' || "
+            "COALESCE(CAST(runs.http_status AS TEXT), '(none)')) AS fr_key, runs.* "
+            "FROM runs LEFT JOIN json_each(runs.failed_rules) je "
+            f"WHERE {' AND '.join(where)}) AS runs"
+        )
+        from_params, outer_where, outer_params = list(params), [], []
+    else:
+        from_sql, from_params = "runs", []
+        outer_where, outer_params = where, list(params)
+    if any(d in APIS_DIMENSIONS for d in dims):
+        from_sql += " LEFT JOIN apis AS a ON a.api_id = runs.api_id"
+
+    key_exprs = [_RUNS_KEY[d] for d in dims]
+    ks_params: list = []
+    if dims:
+        columns = ", ".join(f"k{i}" for i in range(len(dims)))
+        tuples = ", ".join("(" + ",".join("?" for _ in dims) + ")" for _ in raw_keys)
+        for key in raw_keys:
+            ks_params.extend(key)
+        with_sql = f"WITH ks({columns}) AS (VALUES {tuples}) "
+        join = " JOIN ks ON " + " AND ".join(
+            f"{expr} IS ks.k{i}" for i, expr in enumerate(key_exprs))
+        selected = ", ".join(f"ks.k{i} AS k{i}" for i in range(len(dims)))
+        partition = f"PARTITION BY {', '.join(f'ks.k{i}' for i in range(len(dims)))} "
+        out_keys = ", ".join(f"k{i}" for i in range(len(dims))) + ", "
+        inner_partition = f"PARTITION BY {', '.join(f'k{i}' for i in range(len(dims)))} "
+    else:
+        with_sql = join = selected = partition = out_keys = inner_partition = ""
+
+    where_sql = f" WHERE {' AND '.join(outer_where)}" if outer_where else ""
+    run_select = (selected + ", " if selected else "") + "runs.run_id AS v"
+    run_sql = (
+        f"{with_sql}SELECT {out_keys}v FROM ("
+        f"SELECT {run_select}, ROW_NUMBER() OVER ({partition}"
+        "ORDER BY runs.executed_at DESC, runs.run_id DESC) AS rn "
+        f"FROM {from_sql}{join}{where_sql}) WHERE rn <= ? ORDER BY rn"
+    )
+    api_select = (selected + ", " if selected else "") + "runs.api_id AS v"
+    api_sql = (
+        f"{with_sql}SELECT {out_keys}v FROM (SELECT {out_keys}v, "
+        f"ROW_NUMBER() OVER ({inner_partition}ORDER BY v) AS rn FROM ("
+        f"SELECT DISTINCT {api_select} FROM {from_sql}{join}{where_sql}"
+        ")) WHERE rn <= ? ORDER BY rn"
+    )
+    tail = [*ks_params, *from_params, *outer_params]
+    return (run_sql, [*tail, run_cap]), (api_sql, [*tail, api_cap])
 
 
 def row_key_predicates(dimension: str, value: str | None, params: list) -> list[str]:
@@ -761,7 +879,8 @@ def row_key_predicates(dimension: str, value: str | None, params: list) -> list[
         params.append(value)
         return [f"runs.api_id IN (SELECT a.api_id FROM apis AS a WHERE {column} IS ?)"]
     if dimension == "failed_rule":
-        return ["runs.status != 'pass'", _failed_rule_predicate([value], params)]
+        return [NON_PASS_ORDERED_SQL,
+                _failed_rule_predicate([value], params, NON_PASS_ORDERED_SQL)]
     if dimension == "week":
         first, last = week_days(value or "")
         params += [first, last]

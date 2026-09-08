@@ -85,29 +85,31 @@ SLO_ASSERT: dict[str, bool] = {
     "aggregate_runs group_by=failed_rule": True,
     "aggregate_runs group_by=api_env_data": True,
     "aggregate_runs (max of 5)": True,
-    # Task 10 (self-growth §12): one row per arm `select_source` can pick. Two are green and
-    # asserted; three are NOT, and the limit is not moved to make them so.
+    # Task 10 (self-growth §12): one row per arm `select_source` can pick. Task 10 left three of
+    # the five unasserted and named two fixes rather than widening `slo_query_ms`; the final fix
+    # wave applied BOTH and all five are now asserted.
     #
-    # What the bench found is that the ARM is not what costs: measured on the 60k-run demo set,
-    # aggregation alone is 0.6ms (key arm), 28ms (rollup_day), 53ms (runs arm) -- every one of
-    # them comfortably inside 300ms. It is `include_samples` (the default, and what the model
-    # actually sends) that adds 30-464ms: `_fill_query_samples` runs TWO statements per returned
-    # row, and on the key axis each of those is a `json_each` EXISTS over the whole window with
-    # no index to drive off -- 40 window scans for one card. The runs arm pays the same toll for
-    # a different reason: `executed_by IS ?` and `api_id IS ?` are both usable indexes and,
-    # without table statistics, SQLite picks the far less selective one.
+    # What the bench had found is that the ARM is not what costs: aggregation alone is 0.3ms
+    # (key arm), 27ms (rollup_day), 43ms (runs arm). It was `include_samples` (the default, and
+    # what the model actually sends) that added 30-464ms.
     #
-    # Named follow-ups, in the order they should be tried: (1) a bounded `PRAGMA analysis_limit`
-    # + `ANALYZE` step in the daily retention job -- measured on a copy of the demo set it takes
-    # the runs-arm row from 790ms to 166ms with no schema change; (2) fill the evidence samples
-    # for the whole page in ONE pair of statements keyed on the returned group keys, instead of
-    # one pair per row. Documented with its per-read profile in the Task 10 report, never by
-    # widening `slo_query_ms`.
-    "query_runs path_segment_2 (non_pass)": True,              # 164 / 177ms over two runs
-    "query_runs method x target_env": False,                   # 264 / 294ms -- inside, but only just
-    "query_runs failed_rule (key arm)": False,                 # 295 / 566ms
-    "query_runs executed_by x api (runs arm)": False,          # 630 / 734ms
-    "query_runs compare_previous_window (rollup arm)": True,   # 27 / 40ms
+    # (1) `PRAGMA analysis_limit=1000` + `ANALYZE`, once at `Store` open when the file has no
+    #     stats and then as a daily retention step. Without table statistics SQLite picked the
+    #     less selective of two usable indexes on the runs arm: 790ms -> 166ms, no schema change.
+    # (2) `_fill_query_samples` fills the WHOLE page in one pair of statements -- but only where
+    #     that helps. The row-by-row form stops after five matches on `idx_runs_executed_at`; a
+    #     window function cannot, so batching is a loss on an ordinary indexed key
+    #     (`method x target_env` 132ms row-by-row vs 290ms batched) and a large win on
+    #     `failed_rule`, whose per-row predicate is a `json_each` EXISTS early termination cannot
+    #     help (352ms vs 187ms). `query_sql.batched_samples` is that rule, and a test asserts the
+    #     two forms return identical id lists on eleven dimension shapes.
+    #
+    # Measured on the reduced set after both, all five inside 300ms:
+    "query_runs path_segment_2 (non_pass)": True,              # 106ms (was 164 / 177)
+    "query_runs method x target_env": True,                    # 164ms (was 264 / 294)
+    "query_runs failed_rule (key arm)": True,                  # 161ms (was 295 / 566)
+    "query_runs executed_by x api (runs arm)": True,           # 236ms (was 630 / 734)
+    "query_runs compare_previous_window (rollup arm)": True,   # 30ms
     "simulate_rule (30d, amount)": True,
     "insights.build (deterministic)": True,
     "briefing.generate": True,

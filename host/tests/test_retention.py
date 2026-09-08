@@ -380,3 +380,54 @@ async def test_asks_past_the_ask_window_are_deleted_and_recent_ones_are_not(tmp_
     assert [e.turn_id for e in store.list_asks().items] == ["recent"]
     day = Retention(store, backend._config, tmp_path).local_date(NOW).isoformat()
     assert f"asks_deleted:{day}" in store.retention_state()
+
+
+# -- ANALYZE (계층이 아니라 플래너 유지보수) ------------------------------------------------
+
+
+async def test_the_retention_tail_refreshes_the_planner_statistics(tmp_path):
+    """`ANALYZE` is not a retention TIER -- nothing ages out and nothing is deleted -- but the
+    daily job is the one place that already runs once per local day, LLM-free, right after the
+    store's shape changed. Stale `sqlite_stat1` is what made the query engine's runs-arm bench
+    row read 790ms instead of 166ms, so the numbers have to keep up with the data."""
+    backend = _backend()
+    store = backend.store
+    _seed(store, age_days=1, count=5, prefix="a")
+    store.conn().execute("DROP TABLE IF EXISTS sqlite_stat1")
+    store.conn().commit()
+
+    counts = await Retention(store, backend._config, tmp_path).run(NOW)
+
+    assert counts["analyzed"] == 1
+    assert store.conn().execute(
+        "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'runs'").fetchone()[0] > 0
+    day = Retention(store, backend._config, tmp_path).local_date(NOW).isoformat()
+    assert f"analyze:{day}" in store.retention_state()
+    assert "analyze" in STEPS
+
+
+def test_a_store_opened_on_a_dataset_with_no_statistics_analyzes_once(tmp_path):
+    """A generated dataset is written by a Store that was opened while the file was EMPTY, so its
+    own open-time check had nothing to measure. The next reader -- the host, the bench -- must not
+    have to wait a day for the retention job to give the planner its numbers. `sqlite_stat1`
+    EXISTING is not the test: ANALYZE on an empty table records no row for it."""
+    path = tmp_path / "scale.sqlite"
+    first = Store(str(path))
+    _seed(first, age_days=1, count=5, prefix="a")
+    assert first.conn().execute(
+        "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'runs'").fetchone()[0] == 0
+    first.conn().close()
+
+    reopened = Store(str(path))
+    assert reopened.conn().execute(
+        "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'runs'").fetchone()[0] > 0
+
+    # ...and a store whose stats are already there is not re-analyzed at every open.
+    reopened.conn().execute("DELETE FROM sqlite_stat1 WHERE tbl = 'runs'")
+    reopened.conn().execute(
+        "INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES ('runs', NULL, '9999')")
+    reopened.conn().commit()
+    reopened.conn().close()
+    third = Store(str(path))
+    assert third.conn().execute(
+        "SELECT stat FROM sqlite_stat1 WHERE tbl = 'runs'").fetchone()[0] == "9999"

@@ -893,6 +893,70 @@ def test_samples_are_bounded_and_belong_to_the_row(synthetic):
         assert moments == sorted(moments, reverse=True)
 
 
+def _samples_row_by_row(store: Store, spec: QuerySpec) -> list[tuple[list[str], list[str]]]:
+    """The evidence fill the way it was written first: two statements PER ROW, the row's key as a
+    predicate. Kept here as the oracle for the batched version -- the whole point of the batch is
+    that it changes the number of statements and nothing about the population."""
+    from atworks_host.query_sql import row_key_predicates, sample_predicates
+    compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
+    rows, raw_keys = store._query_rows(spec, compiled)
+    base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, TZ)
+    out = []
+    for raw in raw_keys:
+        clauses, params = list(base), list(base_params)
+        for dimension, value in zip(spec.dimensions, raw, strict=True):
+            clauses += row_key_predicates(dimension, value, params)
+        where_sql = " AND ".join(clauses)
+        api_ids = [r[0] for r in store.conn().execute(
+            f"SELECT DISTINCT api_id FROM runs WHERE {where_sql} ORDER BY api_id LIMIT 20",
+            params).fetchall()]
+        run_ids = [r[0] for r in store.conn().execute(
+            f"SELECT run_id FROM runs WHERE {where_sql} "
+            "ORDER BY executed_at DESC, run_id DESC LIMIT 5", params).fetchall()]
+        out.append((api_ids, run_ids))
+    del rows
+    return out
+
+
+@pytest.mark.parametrize("label,spec", [
+    ("api", QuerySpec(dimensions=["api"], measures=["runs"], order_by="runs", limit=25)),
+    # api_group has a NULL key in the fixture catalogue -- `IN (VALUES ...)` would drop it,
+    # which is why the ks join uses null-safe `IS`.
+    ("api_group", QuerySpec(dimensions=["api_group"], measures=["runs"], order_by="runs", limit=25)),
+    ("segment+env", QuerySpec(dimensions=["path_segment_2", "target_env"], measures=["runs"],
+                              order_by="runs", limit=25)),
+    ("test_data_label", QuerySpec(dimensions=["test_data_label"], measures=["runs"],
+                                  order_by="runs", limit=25)),
+    ("failed_rule", QuerySpec(dimensions=["failed_rule"], measures=["runs"], order_by="runs", limit=25)),
+    ("http_status", QuerySpec(dimensions=["http_status"], measures=["runs"], order_by="runs", limit=25)),
+    ("executed_by", QuerySpec(dimensions=["executed_by"], measures=["runs"], order_by="runs", limit=25)),
+    ("day", QuerySpec(dimensions=["day"], measures=["runs"], order_by="runs", limit=25)),
+    ("week", QuerySpec(dimensions=["week"], measures=["runs"], order_by="runs", limit=25)),
+    ("grand total", QuerySpec(measures=["runs"])),
+    ("filtered", QuerySpec(dimensions=["path_segment_1"], measures=["runs"], order_by="runs",
+                           limit=25, filters=QueryFilters(status="non_pass", target_env=["dev"]))),
+])
+def test_the_batched_sample_fill_returns_exactly_what_the_row_by_row_fill_did(synthetic, label, spec):
+    """Both shapes on EVERY dimension shape, not only the ones ``batched_samples`` picks today.
+    The choice between them is a performance decision; that they read the same population is the
+    invariant, and it has to hold whichever way the rule swings later."""
+    from atworks_host.query_sql import sample_batch
+    compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
+    _rows, raw_keys = synthetic._query_rows(spec, compiled)
+    (run_sql, run_params), (api_sql, api_params) = sample_batch(
+        spec, compiled.day_from, compiled.day_to, TZ, raw_keys, run_cap=5, api_cap=20)
+    width = len(spec.dimensions)
+    batched: dict[tuple, tuple[list[str], list[str]]] = {key: ([], []) for key in raw_keys}
+    for sql, params, slot in ((api_sql, api_params, 0), (run_sql, run_params, 1)):
+        for record in synthetic.conn().execute(sql, params).fetchall():
+            batched[tuple(record[i] for i in range(width))][slot].append(record[width])
+    assert raw_keys
+    assert [batched[key] for key in raw_keys] == _samples_row_by_row(synthetic, spec), label
+    # ...and what the engine actually returns is one of the two, whichever the rule picked.
+    result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    assert [(r.api_ids, r.run_ids) for r in result.rows] == [batched[key] for key in raw_keys], label
+
+
 def test_include_samples_false_skips_the_fill(synthetic):
     spec = QuerySpec(dimensions=["api"], measures=["runs"], order_by="runs", include_samples=False)
     result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)

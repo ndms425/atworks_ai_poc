@@ -71,10 +71,12 @@ from .query_sql import (
     API_SAMPLE_CAP,
     RUN_SAMPLE_CAP,
     CompiledQuery,
+    batched_samples,
     compile_query,
     day_bounds,
     path_segments,
     row_key_predicates,
+    sample_batch,
     sample_predicates,
 )
 from .query_sql import KEY_AXES as QUERY_KEY_AXES
@@ -682,9 +684,40 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self.init_schema()
+        self.analyze_if_missing()
 
     def conn(self) -> sqlite3.Connection:
         return self._conn
+
+    def analyze(self) -> None:
+        """``ANALYZE`` — refresh ``sqlite_stat1`` so the planner picks the right index.
+
+        Without it SQLite plans every one of this schema's multi-index tables from its built-in
+        guesses, and on the generated datasets it picked a scan where a composite index was
+        available: the query engine's own bench row went from 790 ms to 166 ms with nothing else
+        changed. ``PRAGMA analysis_limit=1000`` caps the rows sampled per index, which is what
+        keeps this a sub-second statement on a 2M-run file instead of a full read of every index.
+
+        Called once at open when the file has no stats at all (a fresh generated dataset is
+        exactly that case), and again as a retention step so the numbers keep up with the data.
+        Never inside ``_transaction``: ANALYZE writes ``sqlite_stat1`` itself."""
+        self._conn.execute("PRAGMA analysis_limit=1000")
+        self._conn.execute("ANALYZE")
+        self._conn.commit()
+
+    def analyze_if_missing(self) -> None:
+        """``analyze()`` when the file carries no usable statistics for ``runs`` -- either no
+        ``sqlite_stat1`` at all, or one written while the table was still empty (ANALYZE on an
+        empty table records nothing, and "the table exists" would then wrongly count as analyzed
+        forever: exactly what happened to a dataset whose Store was opened before its rows were
+        ingested). A generated dataset therefore gets its stats before the first read, rather
+        than a day later when the retention job first runs."""
+        analyzed = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'"
+        ).fetchone() is not None and self._conn.execute(
+            "SELECT 1 FROM sqlite_stat1 WHERE tbl = 'runs'").fetchone() is not None
+        if not analyzed:
+            self.analyze()
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -2084,12 +2117,41 @@ class Store:
     def _fill_query_samples(self, rows: list[QueryRow], raw_keys: list[tuple], spec: QuerySpec,
                            compiled: CompiledQuery, tz: str) -> None:
         """Evidence for each returned row: up to 20 api ids and the 5 newest run ids, from
-        ``runs`` under the spec's own filters plus the row's key -- two indexed statements per
-        row, never a scan per row and never more than ``2 * limit`` statements per query.
+        ``runs`` under the spec's own filters plus the row's key.
+
+        Two shapes, chosen by ``query_sql.batched_samples`` and for the reason stated there: two
+        statements PER ROW (each an ``ORDER BY executed_at DESC LIMIT 5`` that stops after five
+        matches), or -- when a ``failed_rule`` dimension makes the per-row key predicate an
+        ``EXISTS(json_each(...))`` that early termination cannot help -- two statements for the
+        WHOLE page. That one shape was the entire cost of a key-arm query: 271 ms with samples,
+        0.4 ms without, on the reduced scale dataset.
+
+        The two shapes read the same POPULATION, and a test asserts they return byte-identical
+        id lists across every dimension shape -- the batched form's predicates are still
+        ``sample_predicates``' and its key match is still null-safe ``IS``, so a sample can never
+        come from a population the row did not count.
 
         These ids are what the executor remembers in ``seen_apis``/``seen_runs``, so the card's
         provenance discipline (an id the session has seen) holds for a query result exactly as it
         does for a digest."""
+        if not rows:
+            return
+        if batched_samples(spec):
+            (run_sql, run_params), (api_sql, api_params) = sample_batch(
+                spec, compiled.day_from, compiled.day_to, tz, raw_keys,
+                run_cap=RUN_SAMPLE_CAP, api_cap=API_SAMPLE_CAP)
+            width = len(spec.dimensions)
+            # `ORDER BY rn` on both statements, so appending in row order preserves per-key order
+            # (newest-first run ids; ascending api ids) without a second sort here.
+            by_key: dict[tuple, tuple[list[str], list[str]]] = {key: ([], []) for key in raw_keys}
+            for sql, params, slot in ((api_sql, api_params, 0), (run_sql, run_params, 1)):
+                for record in self._tuples(sql, params):
+                    bucket = by_key.get(tuple(record[:width]))
+                    if bucket is not None:
+                        bucket[slot].append(record[width])
+            for row, raw in zip(rows, raw_keys, strict=True):
+                row.api_ids, row.run_ids = by_key[raw]
+            return
         base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, tz)
         for row, raw in zip(rows, raw_keys, strict=True):
             clauses, params = list(base), list(base_params)

@@ -14,6 +14,8 @@
 파생    ``insights_out/<op>/<날짜>`` ``insights_cache_days``    회전
 세션    ``SessionStore``           ``session_idle_hours``      TTL 스윕
 질문    ``ask_log``                ``ask_log_retention_days``  **삭제**(자가발전 spec §6)
+통계    ``sqlite_stat1``           —                           ``ANALYZE`` — 계층이 아니라 플래너
+                                                               유지보수(``analyze:<날짜>``)
 ======  =========================  ==========================  ==================================
 
 콜드 삭제는 ``retention_cold_until``이 **설정되어 있고 지났을 때만** 일어난다 — 기본값 None은
@@ -45,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 #: The `retention_state.partition_key` prefixes, one per step, plus the once-a-day guard.
 STEPS = ("runs_archived", "bodies_deleted", "archive_purged", "insight_cache_rotated",
-         "sessions_swept", "asks_deleted")
+         "sessions_swept", "asks_deleted", "analyze")
 DAILY_GUARD = "daily"
 #: Rows per body-DELETE statement. Small enough that no single statement holds the loop for
 #: seconds at 450k rows, large enough that the loop is a few dozen statements, not thousands.
@@ -150,6 +152,14 @@ class Retention:
         # One bounded DELETE, no day loop: a year of asks is thousands of rows, not millions.
         counts["asks_deleted"] = self.store.delete_asks_before(
             now - timedelta(days=self.config.ask_log_retention_days))
+
+        # ANALYZE. Not a tier -- housekeeping for the PLANNER, and this is the one place that
+        # already runs once a local day, LLM-free, on a store whose shape has just changed
+        # (a day partition moved out, a day's bodies deleted). Stale `sqlite_stat1` is what made
+        # the query engine's bench row read 790 ms instead of 166 ms. Counted as 1/0 rather than
+        # a row count: ANALYZE affects no rows, and reporting 0 would read as "did not run".
+        self.store.analyze()
+        counts["analyzed"] = 1
 
         for step in STEPS:
             self.store.set_retention_state(f"{step}:{day}", now)
