@@ -93,6 +93,7 @@ class TurnAgent(Protocol):
         attached_items: Any = (),
         screen_state: Any = None,
         turn_id: str | None = None,
+        vocabulary: Any = (),
     ) -> AsyncIterator[AgentEvent]: ...
 
 
@@ -122,6 +123,7 @@ def stream_turn(
     attached_items: Any = (),
     screen_state: Any = None,
     turn_id: str | None = None,
+    vocabulary: Any = (),
     on_turn_end: Callable[[SessionRecord[Any], str, BaseException | None], Awaitable[None]] | None = None,
 ) -> StreamingResponse:
     """Stream one turn as SSE; the record is written back once the stream has ended (the
@@ -140,7 +142,7 @@ def stream_turn(
         try:
             async for event in agent.stream_turn(
                 record.messages, session, record.state, attached_items=attached_items,
-                screen_state=screen_state, turn_id=turn_id,
+                screen_state=screen_state, turn_id=turn_id, vocabulary=vocabulary,
             ):
                 if event.type == "turn_complete" and event.data.get("results_cleared"):
                     record.stored_messages = 0  # earlier messages changed: rewrite the transcript

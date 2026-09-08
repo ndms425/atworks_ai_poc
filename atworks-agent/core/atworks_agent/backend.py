@@ -27,6 +27,7 @@ from .types import (
     JobSpec,
     OperatorProfile,
     Page,
+    QueryFilters,
     QueryResult,
     QuerySpec,
     RuleRecommendation,
@@ -34,6 +35,8 @@ from .types import (
     RunResult,
     RunsQuery,
     ScopeSummary,
+    VocabularyEntry,
+    VocabularyStatus,
 )
 
 
@@ -487,6 +490,79 @@ class AtworksBackend(ABC):
         """Growth 뷰 '이번 주' 타일. REST 구현 의무: 전부 **COUNT 질의**로 답한다 — 행 목록을
         받아 애플리케이션에서 세면 안 된다(그 목록엔 상한이 있고, 상한은 곧 틀린 비율이다).
         ``unmet_clusters``의 예시는 저장된 마스킹 요약 그대로다."""
+
+    # -- 어휘 (자가발전 spec §7: commerce_common.memory 위의 조직 공용 어휘) ------------------
+    # 이 6개 메서드가 공유하는 세 가지 의무 (REST 구현이 반드시 지킨다):
+    #   1) **어휘는 프로젝트 공유다.** subject는 사람이 아니라 프로젝트다 — 한 사람이 확인한 용어를
+    #      팀 전체가 쓰는 것이 이 기능의 전부이고, 그래서 저장 키에 사용자 id가 없다.
+    #   2) **쓰기 필터를 통과한 값만 저장된다.** term과 fragment는 저장 직전에
+    #      ``commerce_common.memory.validate_fact``(펜스 + ``MemoryWriteFilter``)를 지난다.
+    #      9자리+ 숫자·IBAN·이메일 모양이면 ``MemoryWriteRejected``이고, 그때 이 계약은 예외를
+    #      밖으로 내보내지 않고 ``None``을 돌려준다 — 거절 사유는 도구 결과의 한 문장이다.
+    #   3) **모델의 컨텍스트에는 confirmed만 들어간다.** pending은 제안한 세션의 카드에서만 쓰이고
+    #      (spec §2 조항 4), rejected는 쿨다운이 끝나기 전까지 다시 제안되지 않는다.
+    @abstractmethod
+    async def propose_alias(
+        self, session: AtworksSessionContext, term: str, fragment: QueryFilters,
+        note: str | None = None,
+    ) -> VocabularyEntry | None:
+        """모델이 사용자 용어를 필터 조각으로 해석했을 때 남기는 제안 1건(``status=pending``).
+
+        ``None``을 돌려주는 두 경우 — 그리고 그 둘뿐이다: 쓰기 필터가 거절했을 때(개인정보 모양),
+        그리고 그 term이 아직 **쿨다운** 중일 때(사람이 거부한 용어를 다음 날 다시 제안하지
+        않는다). 두 경우 모두 저장은 전혀 일어나지 않는다 — 사이드카 행도, fact도 남지 않는다.
+
+        REST 구현 의무: term은 정규형으로 저장한다(``vocabulary.normalize_term``); 이미 있는
+        term은 **덮어쓰지 않는다**(확정된 항목이 새 제안으로 pending이 되면 안 되고, 거부가
+        남긴 쿨다운도 지워지면 안 된다) — 저장된 행을 그대로 돌려준다."""
+
+    @abstractmethod
+    async def list_vocabulary(
+        self, session: AtworksSessionContext, status: VocabularyStatus | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[VocabularyEntry]:
+        """어휘 목록(제안 최신순). REST 구현 의무: ``proposed_at`` DESC, ``term`` DESC 순서,
+        ``cursor``는 서버가 만든 불투명 문자열, ``Page.total``은 ``status`` 필터 적용 후의 건수이고
+        ``limit``과 무관하다."""
+
+    @abstractmethod
+    async def confirm_alias(
+        self, session: AtworksSessionContext, term: str
+    ) -> VocabularyEntry | None:
+        """사람이 [예]를 눌렀다. ``confirmations + 1``, 누른 사람과 시각을 찍고 상태를 confirmed로.
+        다른 오퍼레이터가 같은 term을 나중에 확인하면 카운터가 또 오른다 — 그 숫자가 §7의 자동
+        강등 규칙에서 거부 수와 비교된다. 없는 term이면 ``None``(라우트는 404)."""
+
+    @abstractmethod
+    async def reject_alias(
+        self, session: AtworksSessionContext, term: str
+    ) -> VocabularyEntry | None:
+        """사람이 [아니오]를 눌렀다. ``rejections + 1``, 상태는 rejected, ``cooldown_until``에
+        ``now + vocabulary_cooldown_days``를 찍는다. **행은 남긴다**: 쿨다운이 곧 그 거부의
+        기억이고, 행을 지우면 다음 턴에 같은 제안이 다시 올라온다."""
+
+    @abstractmethod
+    async def delete_alias(
+        self, session: AtworksSessionContext, term: str
+    ) -> VocabularyEntry | None:
+        """Growth 뷰의 삭제. 사이드카 행과 ``memory_facts``의 fact를 **둘 다** 지운다 — 한쪽만
+        지우면 저장소가 용어를 반쯤 기억한 상태로 남는다."""
+
+    @abstractmethod
+    async def confirmed_vocabulary(self, session: AtworksSessionContext) -> list[VocabularyEntry]:
+        """컨텍스트 주입의 재료: 확정된 항목 전부(최신 확인순). 페이지가 아니다 — 여기에 상한을
+        두면 오래된 절반이 조용히 매칭되지 않는다. 구현은 프로세스 캐시를 둘 수 있지만 **모든
+        쓰기(제안·확인·거부·삭제·강등)에서 무효화**해야 한다."""
+
+    @abstractmethod
+    async def note_vocabulary_use(
+        self, session: AtworksSessionContext, terms: list[str], rejected: bool = False
+    ) -> None:
+        """이번 턴 컨텍스트가 실제로 실은 term들의 집계. 기본은 ``uses + 1``이고,
+        ``rejected=True``(그 턴에 👎, §9)면 ``rejections + 1``에 자동 강등 규칙까지 — 거부가
+        ``vocabulary_auto_demote_rejections`` 이상이고 확인 수보다 많으면 상태가 pending으로
+        내려가 아무의 컨텍스트에도 들어가지 않는다. 순수 집계라 어떤 경우에도 턴을 실패시키지
+        않는다."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod

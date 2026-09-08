@@ -90,6 +90,29 @@ _STATUS_LABEL_KO: dict[str, str] = {
 }
 
 
+#: ``QueryFilters`` 필드 하나하나의 사람이 읽는 이름 (self-growth §7). 어휘 조각의 요약
+#: (``vocabulary.fragment_summary_ko``)이 이 라벨로 만들어진다 -- 카드 푸터에 뜨는 "‘결제 계열’을
+#: **경로 접두사 /v1/payment**로 해석했습니다"의 굵은 부분이다. ``catalog_hint()``는 이 딕트를 읽지
+#: 않으므로 툴 스키마 바이트는 그대로다.
+FILTER_LABELS_KO: dict[str, str] = {
+    "status": "상태",
+    "since": "시작",
+    "until": "끝",
+    "window_days": "기간(일)",
+    "api_ids": "API",
+    "path_contains": "경로 포함",
+    "path_prefix": "경로 접두사",
+    "method": "메서드",
+    "api_group": "API 그룹",
+    "target_env": "대상 계",
+    "test_data_label": "테스트 데이터",
+    "executed_by": "실행한 오퍼레이터",
+    "scope_operator": "실행 범위 오퍼레이터",
+    "failed_rule": "실패 규칙",
+    "http_status": "HTTP 상태코드",
+}
+
+
 def title_for_spec(spec: QuerySpec, *, default_window_days: int | None = None) -> str:
     """카탈로그 라벨로 결정론 생성하는 사람이 읽는 제목(≤120자) -- 예: '실패·에러 · 경로 2조각별 ·
     30일 · 상위 20'. saved_questions.title과 query_table 카드 제목이 여기서 나온다. 숫자는

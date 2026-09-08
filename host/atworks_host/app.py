@@ -5,6 +5,7 @@ Route parameters below are annotated with dependencies built at call time (``Cur
 annotations``) — FastAPI resolves string annotations against a function's globals, and these
 names are local to ``create_app``."""
 
+import logging
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ from atworks_agent import (
     RunsQuery,
     RunStatusFilter,
     ScreenState,
+    VocabularyEntry,
     classify_turn,
     policy_from_config,
 )
@@ -36,7 +38,9 @@ from atworks_agent.serialization import (
     profile_record,
     rule_record,
     run_record,
+    vocabulary_record,
 )
+from atworks_agent.vocabulary import match_terms
 from atworks_agent_runtime import AtworksAgent
 
 from .briefing import Briefings
@@ -48,6 +52,8 @@ from .scheduler import Scheduler
 from .sessions import SessionRecord, SessionStore, session_dependency
 from .streaming import append_user_turn, build_app, stream_turn
 
+logger = logging.getLogger(__name__)
+
 PROJECT_ID = "mes-demo"
 DEFAULT_OPERATOR_ID = "minseong"
 
@@ -56,6 +62,11 @@ DEFAULT_OPERATOR_ID = "minseong"
 #: `?status=nonsense` used to reach the backend as a plain string, match nothing, and come back as
 #: an empty page with `total: 0` -- indistinguishable from "no rules in that state" (M18).
 LedgerStatusFilter = Literal["staged", "applied", "discarded"]
+
+#: `GET /vocabulary?status=` -- the same three-member vocabulary the sidecar stores. Declared as a
+#: Literal so FastAPI 422s a typo instead of letting it reach the backend, match nothing and come
+#: back as an empty page indistinguishable from "no terms in that state" (the M18 lesson).
+VocabularyStatusFilter = Literal["pending", "confirmed", "rejected"]
 
 T = TypeVar("T")
 
@@ -222,20 +233,41 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         )
         await backend.record_ask(context(record), entry)
 
+    async def matched_vocabulary(record: Record, message: str) -> list[VocabularyEntry]:
+        """이번 메시지에 나온 확정 어휘 (자가발전 §7). 실패해도 턴은 그대로 간다 — 어휘는 편의지
+        권한이 아니라서, 읽지 못한 턴은 어휘 없이 답할 뿐 실패하지 않는다."""
+        if not agent.config.enable_growth:
+            return []
+        try:
+            confirmed = await backend.confirmed_vocabulary(context(record))
+        except Exception:
+            logger.exception("vocabulary lookup failed; the turn runs without it")
+            return []
+        return match_terms(message, confirmed, agent.config.vocabulary_max_inject)
+
     @router.post("/chat")
     async def chat(request: ChatRequest, record: CurrentSession) -> StreamingResponse:
         append_user_turn(record, request.message, "Portal events")
         turn_id = uuid4().hex
         message = request.message
+        # 어휘 주입(자가발전 §7 단계 3): 이번 메시지에 실제로 나온 **확정된** 용어만, 최신순으로
+        # `vocabulary_max_inject`개. pending은 여기 오지 않는다 -- 제안한 세션의 카드에서만
+        # 보인다(spec §2 조항 4). 확정본은 프로세스 캐시라 대부분의 턴에서 SQL이 한 번도 돌지
+        # 않고, 맞는 게 없으면 컨텍스트 블록에 키 자체가 생기지 않는다(바이트 동일).
+        matched = await matched_vocabulary(record, message)
 
         async def on_turn_end(rec: Record, tid: str, failure: BaseException | None) -> None:
             if agent.config.enable_growth:
                 await record_ask(rec, tid, failure, message)
+                # 집계는 턴이 어떻게 끝났든(성공·예외·중단) 한 번. 어휘가 실제로 실린 턴만 센다.
+                if matched:
+                    await backend.note_vocabulary_use(
+                        context(rec), [entry.term for entry in matched])
 
         return stream_turn(
             agent, sessions, record, context(record), env_hint=".env",
             attached_items=request.attached_items, screen_state=request.screen_state,
-            turn_id=turn_id, on_turn_end=on_turn_end,
+            turn_id=turn_id, vocabulary=matched, on_turn_end=on_turn_end,
         )
 
     # -- 자가발전: 질문 기록과 성장 요약 (spec §6/§10) ------------------------------------
@@ -258,6 +290,64 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         since = datetime.now(UTC) - timedelta(days=days)
         summary = await backend.growth_summary(context(record), since=since)
         return {**summary.model_dump(mode="json"), "window_days": days}
+
+    # -- 자가발전: 조직 공용 어휘 (spec §7/§10) --------------------------------------------
+    async def growth_action(record: Record, *, action: str, target_kind: str, target_id: str,
+                            fn: Callable[[], Awaitable[T]]) -> T:
+        """`host_action`의 가벼운 짝: 감사 2행(시도 + `<action>:<ok|error>`)과 try/except는 같고,
+        **승인 마크는 없다**. 어휘와 저장 질문은 job 승인이 아니다 — 실행 계획을 집행하지도,
+        원장의 상태를 모델이 쓸 수 있게 열어 주지도 않으므로, 승인 마크라는 일회용 권한을
+        여기서 쓰면 그 단어의 뜻이 흐려진다. 그래도 사람이 눌렀다는 증적은 남는다(spec §10).
+
+        `fn`은 백엔드 호출 하나다(실행기를 거치지 않는다): 어휘 라우트가 부르는 것은 모델에게
+        열려 있지 않은 백엔드 메서드라, 도구 이름으로 우회할 표면 자체가 없다."""
+        await audit_action(record, action, target_kind, target_id)
+        try:
+            result = await fn()
+        except Exception:
+            await audit_action(record, action, target_kind, target_id, "error")
+            raise
+        await audit_action(record, action, target_kind, target_id, "ok")
+        return result
+
+    @router.get("/vocabulary")
+    async def vocabulary(record: CurrentSession, status: VocabularyStatusFilter | None = None,
+                         cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
+        """조직 공용 어휘(제안 최신순, keyset 커서). 다른 목록 라우트와 같은 봉투다."""
+        _require_growth()
+        page = await _paged(
+            backend.list_vocabulary(context(record), status=status, cursor=cursor, limit=limit))
+        return {"items": [vocabulary_record(e) for e in page.items],
+                "next_cursor": page.next_cursor, "total": page.total}
+
+    async def vocabulary_action(term: str, action: str, record: Record) -> dict:
+        """[예]/[아니오]/삭제 — 사람의 클릭만 닿는 세 경로. 모델에게는 `propose_alias` 하나뿐이고
+        그건 pending밖에 못 만든다: 확정은 오직 여기서 일어난다."""
+        _require_growth()
+        method = {"confirm": backend.confirm_alias, "reject": backend.reject_alias,
+                  "delete": backend.delete_alias}[action]
+        entry = await growth_action(
+            record, action=f"vocabulary_{action}", target_kind="vocabulary", target_id=term,
+            fn=lambda: method(context(record), term),
+        )
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown term: {term!r}")
+        record.pending_app_events.append(
+            f"Operator {action}ed the term {entry.term!r} on the vocabulary list."
+        )
+        return {"ok": True, "entry": vocabulary_record(entry)}
+
+    @router.post("/vocabulary/{term:path}/confirm")
+    async def confirm_vocabulary(term: str, record: CurrentSession) -> dict:
+        return await vocabulary_action(term, "confirm", record)
+
+    @router.post("/vocabulary/{term:path}/reject")
+    async def reject_vocabulary(term: str, record: CurrentSession) -> dict:
+        return await vocabulary_action(term, "reject", record)
+
+    @router.post("/vocabulary/{term:path}/delete")
+    async def delete_vocabulary(term: str, record: CurrentSession) -> dict:
+        return await vocabulary_action(term, "delete", record)
 
     # Every list route answers in ONE shape: the paged envelope {items, next_cursor, total}
     # (Task 10 — the legacy `apis` / `runs` + `population` keys are gone, and the 500-row default
@@ -308,8 +398,11 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return {"items": [job_record(j) for j in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
-    # 이 배포는 메모리가 꺼져 있다(enable_memory=False). web-shared의 useAgentTurn이
-    # 로드 시 무조건 이 경로를 찾으므로, 빈 상태를 돌려주는 자리표시 라우트를 둔다.
+    # 이 배포의 메모리에는 **개인 사실이 하나도 없다**: 저장되는 건 조직 공용 어휘뿐이고
+    # (self-growth §7, `memory_extract_facts=False`) 그건 `/vocabulary`가 자기 봉투로 서빙한다.
+    # web-shared의 useAgentTurn이 로드 시 무조건 이 경로를 찾으므로, 빈 상태를 돌려주는
+    # 자리표시 라우트를 그대로 둔다 -- 어휘를 여기로 흘리면 "내 기억"이라는 화면에 남의 팀
+    # 어휘가 뜬다.
     @router.get("/memory")
     async def memory(record: CurrentSession) -> dict:
         del record

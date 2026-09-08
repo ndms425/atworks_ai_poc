@@ -17,6 +17,7 @@ from atworks_agent_runtime.insight_narrator import narrate_insights
 from .app import create_app
 from .briefing import Briefings
 from .insights import InsightPanels
+from .memory_store import SqliteMemoryStore
 from .mock_backend import MockAtworks
 from .reports import Reports
 from .retention import Retention, TimestampedSessionStore
@@ -50,6 +51,11 @@ def build() -> tuple:
     config = AtworksAgentConfig(
         model=os.environ.get("ATWORKS_MODEL", "claude-sonnet-4-5"),
         enable_insight_narration=os.environ.get("ATWORKS_INSIGHT_NARRATION", "1") != "0",
+        # 메모리는 켜되(어휘가 그 위에 산다) 참조 구현의 턴 후 자유 사실 추출은 켜지 않는다
+        # (self-growth §7): 저장되는 것은 사람이 [예]를 누른 어휘뿐이다. save_memory/
+        # recall_memories 도구는 애초에 레지스트리에 없어서 모델은 이 저장소에 닿지 못한다.
+        enable_memory=True,
+        memory_extract_facts=False,
     )
     # ATWORKS_STORE_PATH picks the SQLite file the Mock runs on; unset keeps the demo's
     # ephemeral ":memory:" store (fixtures reloaded every boot). Point it at a file and runs,
@@ -61,7 +67,10 @@ def build() -> tuple:
     # large dataset (scripts/scale/generate.py writes both in one out dir). Unset = demo fixtures.
     fixtures_dir = Path(os.environ.get("ATWORKS_FIXTURES_DIR", HERE / "fixtures"))
     backend = MockAtworks(config, fixtures_dir, store=store)
-    agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config)
+    # 같은 SQLite 파일 위의 MemoryStore. `MemoryRuntime.build`가 `check_memory_store`를 돌리므로
+    # 계약이 하나라도 비면 첫 턴이 아니라 부팅에서 죽는다.
+    agent = AtworksAgent(backend=backend, skills_dir=ROOT / "atworks-agent" / "skills", config=config,
+                         memory_store=SqliteMemoryStore(store))
     portal_origin = os.environ.get("ATWORKS_PORTAL_ORIGIN", "http://localhost:3110")
     # `capture_disabled` is wired by create_app (one place, so the test client gets it too).
     reports = Reports(HERE / "reports_out", portal_origin=portal_origin)

@@ -48,6 +48,7 @@ from atworks_agent import (
     Insights,
     KeyCounts,
     Page,
+    QueryFilters,
     QueryResult,
     QueryRow,
     QuerySpec,
@@ -55,6 +56,7 @@ from atworks_agent import (
     RunResult,
     RunsQuery,
     RunStatus,
+    VocabularyEntry,
     decode_cursor,
     encode_cursor,
     key_rollup_delta,
@@ -62,6 +64,7 @@ from atworks_agent import (
     rollup_delta,
 )
 from atworks_agent.aggregation import MAX_RUN_IDS
+from atworks_agent.vocabulary import fragment_json
 
 from .query_sql import (
     API_SAMPLE_CAP,
@@ -323,6 +326,48 @@ CREATE TABLE IF NOT EXISTS ask_log (
 CREATE INDEX IF NOT EXISTS idx_ask_log_at ON ask_log(at DESC, seq DESC);
 CREATE INDEX IF NOT EXISTS idx_ask_log_cluster_at ON ask_log(cluster_key, at);
 CREATE INDEX IF NOT EXISTS idx_ask_log_outcome_at ON ask_log(outcome, at);
+
+-- The `commerce_common.memory` MemoryStore contract, in SQL (self-growth spec §7). `subject_id`
+-- is the PROJECT, never a person: this deployment's memory is organisation-level vocabulary, and
+-- the reference's per-user facts have no shape here. `purge_generation` lives in its own table
+-- because it must survive `clear()` (which deletes every fact row for the subject) -- an
+-- extraction pass that started before a purge reads it to discard its own batch.
+CREATE TABLE IF NOT EXISTS memory_facts (
+    subject_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    category TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    source_session_id TEXT,
+    PRIMARY KEY (subject_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS memory_meta (
+    subject_id TEXT PRIMARY KEY,
+    purge_generation INTEGER NOT NULL DEFAULT 0
+);
+
+-- The vocabulary sidecar (self-growth spec §7). `memory_facts` holds what the write filter let
+-- through; THIS table holds everything the filter has no opinion about -- the term in its
+-- canonical (space-separated) form, the lifecycle, and the counters the auto-demotion rule reads.
+-- `status` gates injection: pending is used only by the proposing session's own card, confirmed
+-- is what reaches another operator's context (spec §2 clause 4). `cooldown_until` is stamped by a
+-- rejection so the same term cannot be re-proposed the next day, and it OUTLIVES a delete of the
+-- row only if the row stays -- so `reject` keeps the row and `delete` removes it outright.
+CREATE TABLE IF NOT EXISTS vocabulary (
+    term TEXT PRIMARY KEY,
+    fragment_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    proposed_at TEXT NOT NULL,
+    confirmed_by TEXT,
+    confirmed_at TEXT,
+    confirmations INTEGER NOT NULL DEFAULT 0,
+    uses INTEGER NOT NULL DEFAULT 0,
+    rejections INTEGER NOT NULL DEFAULT 0,
+    cooldown_until TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_vocabulary_status_at ON vocabulary(status, proposed_at DESC);
 
 -- One row per retention STEP per local day (spec §3/§6): `partition_key` is `<step>:<YYYY-MM-DD>`
 -- (plus the `daily:<YYYY-MM-DD>` guard row that makes the tick-tail job run once a day), and
@@ -2503,3 +2548,214 @@ class Store:
             deleted = self._conn.execute(
                 "DELETE FROM ask_log WHERE at < ?", (_iso(cutoff),)).rowcount
         return deleted
+
+    # -- 어휘 (자가발전 spec §7: memory_facts의 사이드카) ------------------------------------
+
+    @staticmethod
+    def _row_to_vocabulary(row: sqlite3.Row) -> VocabularyEntry:
+        return VocabularyEntry(
+            term=row["term"],
+            fragment=QueryFilters.model_validate_json(row["fragment_json"]),
+            status=row["status"],
+            proposed_by=row["proposed_by"],
+            proposed_at=_parse_iso(row["proposed_at"]),
+            confirmed_by=row["confirmed_by"],
+            confirmed_at=_parse_iso(row["confirmed_at"]) if row["confirmed_at"] else None,
+            confirmations=row["confirmations"],
+            uses=row["uses"],
+            rejections=row["rejections"],
+            cooldown_until=_parse_iso(row["cooldown_until"]) if row["cooldown_until"] else None,
+        )
+
+    def get_vocabulary(self, term: str) -> VocabularyEntry | None:
+        row = self._conn.execute("SELECT * FROM vocabulary WHERE term = ?", (term,)).fetchone()
+        return self._row_to_vocabulary(row) if row is not None else None
+
+    def propose_vocabulary(self, entry: VocabularyEntry) -> VocabularyEntry:
+        """One pending proposal. ``INSERT ... ON CONFLICT DO NOTHING``: a term already in the
+        table KEEPS its row -- re-proposing must never reset a confirmed entry to pending, nor
+        clear the counters (or the cooldown) a rejection left behind. The stored row is what
+        comes back, so the caller shows what the team actually has rather than what this turn
+        tried to write. The cooldown check itself is the backend's (it needs `now`)."""
+        with self._transaction():
+            self._conn.execute(
+                "INSERT INTO vocabulary (term, fragment_json, status, proposed_by, proposed_at, "
+                "confirmed_by, confirmed_at, confirmations, uses, rejections, cooldown_until) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(term) DO NOTHING",
+                (entry.term, fragment_json(entry.fragment), entry.status, entry.proposed_by,
+                 _iso(entry.proposed_at), entry.confirmed_by,
+                 _iso(entry.confirmed_at) if entry.confirmed_at else None,
+                 entry.confirmations, entry.uses, entry.rejections,
+                 _iso(entry.cooldown_until) if entry.cooldown_until else None),
+            )
+        stored = self.get_vocabulary(entry.term)
+        return stored if stored is not None else entry
+
+    def list_vocabulary(self, status: str | None = None, cursor: str | None = None,
+                        limit: int = 50) -> Page[VocabularyEntry]:
+        """Newest proposal first, keyset over ``(proposed_at DESC, term DESC)`` -- the same
+        envelope and the same opaque cursor codec as every other list read; ``total`` is the
+        count AFTER the status filter and independent of ``limit``."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        total_sql = f"SELECT COUNT(*) FROM vocabulary{' WHERE ' + ' AND '.join(clauses) if clauses else ''}"
+        total = self._conn.execute(total_sql, params).fetchone()[0]
+        keyset, keyset_params = list(clauses), list(params)
+        if cursor:
+            after_at, after_term = decode_cursor(cursor)
+            keyset.append("(proposed_at < ? OR (proposed_at = ? AND term < ?))")
+            keyset_params += [_iso(after_at), _iso(after_at), after_term]
+        where_sql = f"WHERE {' AND '.join(keyset)}" if keyset else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM vocabulary {where_sql} ORDER BY proposed_at DESC, term DESC LIMIT ?",
+            [*keyset_params, limit + 1],
+        ).fetchall()
+        items = [self._row_to_vocabulary(r) for r in rows[:limit]]
+        next_cursor = encode_cursor(items[-1].proposed_at, items[-1].term) if len(rows) > limit else None
+        return Page(items=items, next_cursor=next_cursor, total=total)
+
+    def confirmed_vocabulary(self) -> list[VocabularyEntry]:
+        """Every confirmed term, newest confirmation first. Unpaged on purpose: this is what the
+        per-turn matcher reads, it is bounded by how many words a team actually names, and a page
+        boundary here would silently stop matching the oldest half of the vocabulary."""
+        rows = self._conn.execute(
+            "SELECT * FROM vocabulary WHERE status = 'confirmed' "
+            "ORDER BY confirmed_at DESC, term DESC"
+        ).fetchall()
+        return [self._row_to_vocabulary(r) for r in rows]
+
+    def set_vocabulary_status(self, term: str, status: str, by: str, now: datetime,
+                              cooldown_days: int = 30) -> VocabularyEntry | None:
+        """The one state change (confirm / reject / pending). None means no such term -- the route
+        answers 404 rather than silently accepting a click on nothing.
+
+        confirm: ``confirmations + 1`` and the confirming operator is stamped. A SECOND operator
+        confirming the same term bumps the counter again (spec §7) -- that is how a term the whole
+        team recognises outranks one person's guess in the auto-demotion rule.
+        reject: ``rejections + 1``, the status goes to rejected and ``cooldown_until`` is stamped
+        so the model cannot re-propose the same term tomorrow. The row STAYS: the cooldown is the
+        memory of the rejection, and deleting the row would forget it."""
+        row = self._conn.execute("SELECT * FROM vocabulary WHERE term = ?", (term,)).fetchone()
+        if row is None:
+            return None
+        with self._transaction():
+            if status == "confirmed":
+                self._conn.execute(
+                    "UPDATE vocabulary SET status = 'confirmed', confirmations = confirmations + 1, "
+                    "confirmed_by = ?, confirmed_at = ?, cooldown_until = NULL WHERE term = ?",
+                    (by, _iso(now), term),
+                )
+            elif status == "rejected":
+                self._conn.execute(
+                    "UPDATE vocabulary SET status = 'rejected', rejections = rejections + 1, "
+                    "cooldown_until = ? WHERE term = ?",
+                    (_iso(now + timedelta(days=cooldown_days)), term),
+                )
+            else:
+                self._conn.execute("UPDATE vocabulary SET status = ? WHERE term = ?", (status, term))
+        return self.get_vocabulary(term)
+
+    def delete_vocabulary(self, term: str) -> VocabularyEntry | None:
+        """Remove the sidecar row entirely (the Growth view's 삭제). The `memory_facts` row is
+        deleted by the backend through the MemoryStore contract, not here -- one deleter per
+        table, so a REST implementation cannot half-forget a term."""
+        entry = self.get_vocabulary(term)
+        if entry is None:
+            return None
+        with self._transaction():
+            self._conn.execute("DELETE FROM vocabulary WHERE term = ?", (term,))
+        return entry
+
+    def bump_vocabulary_uses(self, terms: Sequence[str]) -> None:
+        """``uses + 1`` for every term this turn's context actually carried. Bookkeeping only:
+        nothing reads it but the Growth view's ranking, so it is one statement and never fails a
+        turn."""
+        if not terms:
+            return
+        with self._transaction():
+            self._conn.executemany(
+                "UPDATE vocabulary SET uses = uses + 1 WHERE term = ?", [(t,) for t in terms])
+
+    def note_vocabulary_rejection(self, terms: Sequence[str], auto_demote_rejections: int = 3) -> list[str]:
+        """A 👎 on a turn whose context carried these terms (spec §7 step 4 / §9). Each gets
+        ``rejections + 1``, and one that has now been voted down at least ``auto_demote_rejections``
+        times AND more often than it was confirmed drops back to **pending** -- it stops reaching
+        anyone's context until a person confirms it again. Returns the demoted terms.
+
+        Demotion is deliberately not a rejection: the term keeps its row, its counters and its
+        history, so the Growth view can show that the team once agreed and then stopped."""
+        if not terms:
+            return []
+        demoted: list[str] = []
+        with self._transaction():
+            for term in terms:
+                self._conn.execute(
+                    "UPDATE vocabulary SET rejections = rejections + 1 WHERE term = ?", (term,))
+                row = self._conn.execute(
+                    "SELECT status, confirmations, rejections FROM vocabulary WHERE term = ?", (term,)
+                ).fetchone()
+                if row is None:
+                    continue
+                if (row["status"] == "confirmed" and row["rejections"] >= auto_demote_rejections
+                        and row["rejections"] > row["confirmations"]):
+                    self._conn.execute(
+                        "UPDATE vocabulary SET status = 'pending' WHERE term = ?", (term,))
+                    demoted.append(term)
+        return demoted
+
+    def count_vocabulary_since(self, since: datetime, status: str = "confirmed") -> int:
+        """The Growth view's "새 어휘" tile -- a COUNT, never a list this method then counts."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM vocabulary WHERE status = ? AND COALESCE(confirmed_at, proposed_at) >= ?",
+            (status, _iso(since)),
+        ).fetchone()[0]
+
+    # -- commerce_common.memory 계약의 SQL 뒷면 (SqliteMemoryStore가 감싼다) ------------------
+
+    def memory_facts(self, subject_id: str) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM memory_facts WHERE subject_id = ? ORDER BY updated_at DESC, key",
+            (subject_id,),
+        ).fetchall()
+
+    def upsert_memory_facts(
+        self, subject_id: str, rows: Sequence[tuple[str, str, str, datetime, str | None]]
+    ) -> None:
+        """One transaction for the whole batch (`_transaction`): a half-written set of facts is
+        exactly the failure the store-wide rule exists to prevent."""
+        if not rows:
+            return
+        with self._transaction():
+            self._conn.executemany(
+                "INSERT INTO memory_facts (subject_id, key, value, category, updated_at, source_session_id) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(subject_id, key) DO UPDATE SET "
+                "value = excluded.value, category = excluded.category, "
+                "updated_at = excluded.updated_at, source_session_id = excluded.source_session_id",
+                [(subject_id, key, value, category, _iso(updated_at), source)
+                 for key, value, category, updated_at, source in rows],
+            )
+
+    def delete_memory_fact(self, subject_id: str, key: str) -> bool:
+        with self._transaction():
+            deleted = self._conn.execute(
+                "DELETE FROM memory_facts WHERE subject_id = ? AND key = ?", (subject_id, key)).rowcount
+        return deleted > 0
+
+    def clear_memory_facts(self, subject_id: str) -> None:
+        """Purge + advance the generation, in ONE transaction: a purge whose counter did not move
+        would let an in-flight extraction pass write its batch back in (commerce_common.memory)."""
+        with self._transaction():
+            self._conn.execute("DELETE FROM memory_facts WHERE subject_id = ?", (subject_id,))
+            self._conn.execute(
+                "INSERT INTO memory_meta (subject_id, purge_generation) VALUES (?, 1) "
+                "ON CONFLICT(subject_id) DO UPDATE SET purge_generation = purge_generation + 1",
+                (subject_id,),
+            )
+
+    def memory_purge_generation(self, subject_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT purge_generation FROM memory_meta WHERE subject_id = ?", (subject_id,)).fetchone()
+        return int(row["purge_generation"]) if row is not None else 0

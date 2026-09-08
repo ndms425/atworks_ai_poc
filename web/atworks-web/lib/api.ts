@@ -14,6 +14,7 @@ import type {
   OperatorProfile,
   RunResult,
   ValidationRule,
+  VocabularyEntry,
 } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
@@ -54,6 +55,13 @@ export const fetchProfiles = (jobId?: string, cursor: string | null = null) =>
 // /changes/ 가 아니다 — profile_action은 rule_action/format_batch_action의 미러지만 별도 경로다.
 export const actOnProfile = (profileId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ComparisonProfile | null }>(`/profiles/${encodeURIComponent(profileId)}/${action}`, {});
+// /changes/ 도 /rules/ 도 아니다 — 어휘는 job 승인이 아니라서 자기 네임스페이스를 쓴다(spec §10).
+// 확인/거부/삭제는 사람의 클릭만 닿는 경로이고, 서버는 감사 2행을 남긴다.
+export const actOnVocabulary = (term: string, action: "confirm" | "reject" | "delete") =>
+  api.post<{ ok: boolean; entry: VocabularyEntry }>(`/vocabulary/${encodeURIComponent(term)}/${action}`, {});
+export const fetchVocabulary = (status?: string, cursor: string | null = null) =>
+  api.getPage<VocabularyEntry>("/vocabulary", { status, cursor, limit: PAGE_SIZE });
+
 /** Home's whole above-the-fold state in ONE call — counts, insight flags and the briefing header.
  * It replaced four parallel reads, two of which downloaded a run page only to count it. */
 export const fetchHomeSummary = () => api.get<HomeSummary>("/home/summary");

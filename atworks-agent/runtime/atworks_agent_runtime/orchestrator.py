@@ -81,6 +81,7 @@ from atworks_agent.types import (
     AtworksSessionContext,
     AtworksSessionState,
     ScreenState,
+    VocabularyEntry,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ class AtworksAgent:
         attached_items: Sequence[AttachedItem] = (),
         screen_state: ScreenState | None = None,
         turn_id: str | None = None,
+        vocabulary: Sequence[VocabularyEntry] = (),
     ) -> AsyncIterator[AgentEvent]:
         """Run one turn. ``messages`` ends with the operator's message and is extended
         in place with the turn's assistant messages, tool results, and any reminder, so
@@ -147,7 +149,12 @@ class AtworksAgent:
 
         ``turn_id`` is the host's id for this turn (``app.py`` mints one per ``/chat``): the
         query_table card carries it so a 👍/👎 finds its ask_log row, and the host's turn-end
-        hook reads the three per-turn counters reset just below to classify the turn."""
+        hook reads the three per-turn counters reset just below to classify the turn.
+
+        ``vocabulary`` is what the host matched between this message and the org's CONFIRMED
+        terms (self-growth §7). It rides the per-turn context block, never the static system:
+        it changes with the message, so putting it in the cached half would break the prefix on
+        every turn. Empty (the usual case) adds no bytes at all."""
         state = state if state is not None else AtworksSessionState()
         state.current_screen = screen_state
         # Per-turn scratch, cleared HERE and nowhere else — a turn must never be classified with
@@ -157,6 +164,7 @@ class AtworksAgent:
         state.turn_tool_names = []
         state.turn_cards = 0
         state.turn_unmet = None
+        state.pending_aliases = []
         turn_started = time.monotonic()
         usage = usage_totals()
         atworks_context = await fetched(self.backend.get_context(session))
@@ -172,6 +180,7 @@ class AtworksAgent:
             now=session.local_now(),
             context_max_chars=self.config.max_context_chars,
             screen_state=screen_state,
+            vocabulary=vocabulary,
         )
         system = build_system_blocks(self._static_system, context)
         # Delegates post progress lines while their executions are in flight; the loop
@@ -386,7 +395,15 @@ class AtworksAgent:
         self, messages: list[dict[str, Any]], session: AtworksSessionContext
     ) -> list[MemoryFact]:
         """Extract what the finished turn taught about the operation and store it. Run
-        it once the reply has streamed; returns the facts written and never raises."""
+        it once the reply has streamed; returns the facts written and never raises.
+
+        ``memory_extract_facts=False`` (this deployment's setting, self-growth §7) makes it a
+        no-op that does not call the model at all. Memory here is the team's SHARED vocabulary,
+        and the only thing that may enter it is a term a person clicked [예] on -- a free-fact
+        extraction pass would write one operator's sentence into everyone else's context, which
+        is exactly the write nobody approved."""
+        if not getattr(self.config, "memory_extract_facts", False):
+            return []
         transcript = transcript_text(latest_exchange(messages, HOST_TEXTS), HOST_TEXTS)
         return await self.memory.extract(
             self.client, session.project_id, session.session_id, transcript

@@ -13,8 +13,10 @@ from commerce_common.testing import (
 )
 
 from atworks_agent.gates import FIGURES_IN_PROSE_REMINDER, STAGING_FOLLOWTHROUGH_REMINDER
-from atworks_agent.types import AttachedItem
+from atworks_agent.types import AttachedItem, QueryFilters, VocabularyEntry
 from atworks_agent_runtime import AtworksAgent
+
+from .conftest import T0
 
 
 @pytest.fixture
@@ -178,3 +180,55 @@ async def test_attached_items_reach_the_system_prompt(make_agent, session, state
     system = agent.client.calls[0]["system"]
     assert "<attached-result-items>" in system[1]["text"] and "run-1" in system[1]["text"]
     assert "cache_control" in system[0]
+
+
+# -- 어휘와 메모리 (self-growth spec §7) ----------------------------------------------------
+
+class _SpyMemory:
+    """MemoryRuntime is a frozen dataclass, so the spy replaces the whole runtime."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def extract(self, *args, **kwargs):
+        self.calls.append("extract")
+        return []
+
+
+async def test_update_memory_does_not_extract_when_the_switch_is_off(make_agent, session):
+    """메모리는 켜져 있어도(어휘가 그 위에 산다) 참조 구현의 자유 사실 추출은 돌지 않는다.
+    켜졌다면 한 사람의 문장이 팀 전체의 컨텍스트에 들어간다 -- 아무도 승인하지 않은 쓰기다."""
+    agent = make_agent([], enable_memory=True, memory_extract_facts=False)
+    agent.memory = _SpyMemory()
+    messages = [{"role": "user", "content": "결제 계열 실패"}, {"role": "assistant", "content": "네."}]
+    assert await agent.update_memory(messages, session) == []
+    assert agent.memory.calls == []
+
+
+async def test_update_memory_extracts_when_a_deployment_turns_it_on(make_agent, session):
+    # The guard is the config flag, not a removed code path: a deployment that wants the
+    # reference behaviour still gets it.
+    agent = make_agent([], enable_memory=True, memory_extract_facts=True)
+    agent.memory = _SpyMemory()
+    await agent.update_memory([{"role": "user", "content": "x"}], session)
+    assert agent.memory.calls == ["extract"]
+
+
+async def test_matched_vocabulary_reaches_the_context_block_of_the_request(make_agent, session, state):
+    entry = VocabularyEntry(term="결제 계열", fragment=QueryFilters(path_prefix="/v1/payment"),
+                            status="confirmed", proposed_by="minseong", proposed_at=T0)
+    agent = make_agent([text_message("네.")])
+    messages = [{"role": "user", "content": "결제 계열 실패 보여줘"}]
+    async for _ in agent.stream_turn(messages, session, state, vocabulary=[entry]):
+        pass
+    system = json.dumps(agent.client.calls[0]["system"], ensure_ascii=False)
+    assert "결제 계열" in system and "경로 접두사 /v1/payment" in system
+
+
+async def test_pending_aliases_are_cleared_at_the_start_of_every_turn(make_agent, session, state):
+    state.pending_aliases.append(VocabularyEntry(
+        term="지난 턴", fragment=QueryFilters(path_prefix="/v1/x"), proposed_by="m", proposed_at=T0))
+    agent = make_agent([text_message("네.")])
+    async for _ in agent.stream_turn([{"role": "user", "content": "안녕"}], session, state):
+        pass
+    assert state.pending_aliases == []

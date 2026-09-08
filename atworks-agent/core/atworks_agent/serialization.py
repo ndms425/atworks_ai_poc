@@ -14,7 +14,9 @@ from .types import (
     JobSpec,
     RuleRecommendation,
     RunResult,
+    VocabularyEntry,
 )
+from .vocabulary import fragment_summary_ko
 
 
 def api_record(api: ApiSpec) -> dict[str, Any]:
@@ -80,6 +82,15 @@ def ask_record(entry: AskEntry) -> dict[str, Any]:
     """ask_log 1행. ``question``은 저장 시점에 이미 마스킹된 요약이라 여기서 더 손대지 않는다 --
     한 번 더 마스킹하면 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽힌다. 파생 필드도 별칭도 없다."""
     return entry.model_dump(mode="json")
+
+
+def vocabulary_record(entry: VocabularyEntry) -> dict[str, Any]:
+    """어휘 1행. 사이드카의 필드 그대로 + 사람이 읽는 요약 한 줄. 요약은 카탈로그 라벨로 만들고
+    (``fragment_summary_ko``), 그래서 포털이 필터 이름을 저 나름으로 번역하지 않는다 -- 카드 푸터와
+    Growth 뷰와 컨텍스트 블록이 같은 문장을 읽는다."""
+    record = entry.model_dump(mode="json", exclude_none=True)
+    record["fragment_summary"] = fragment_summary_ko(entry.fragment)
+    return record
 
 
 def format_batch_record(batch: FormatBatch) -> dict[str, Any]:

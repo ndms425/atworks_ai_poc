@@ -4,12 +4,14 @@ from datetime import UTC, datetime, timedelta
 from itertools import product
 
 import pytest
+from commerce_common.memory import MemoryWriteRejected, validate_fact, write_filter_for
 from commerce_common.skills import Skill, SkillRegistry
 
 from atworks_agent.aggregation import aggregate, summarize_insights
 from atworks_agent.backend import AtworksBackend
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.cursor import decode_cursor, encode_cursor
+from atworks_agent.fencing import ATWORKS_FENCE
 from atworks_agent.jobs import JobDraft, JobLedger
 from atworks_agent.profiles import ProfileLedger
 from atworks_agent.rules import FormatBatchLedger, FormatLibrary, RuleImpact, RuleLedger
@@ -29,7 +31,9 @@ from atworks_agent.types import (
     RunResult,
     RunStatus,
     ScopeSummary,
+    VocabularyEntry,
 )
+from atworks_agent.vocabulary import entry_to_fact, normalize_term
 
 T0 = datetime(2026, 9, 1, 9, tzinfo=UTC)
 
@@ -117,6 +121,7 @@ class InMemoryBackend(AtworksBackend):
         ]
         self.executed: list[str] = []
         self.asks: list[AskEntry] = []
+        self.vocabulary: dict[str, VocabularyEntry] = {}
 
     async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
                           path_prefix=None):
@@ -342,6 +347,85 @@ class InMemoryBackend(AtworksBackend):
             up=sum(1 for e in window if e.feedback == "up"),
             down=sum(1 for e in window if e.feedback == "down"),
         )
+
+    # -- 어휘 (self-growth §7). In-memory dicts: the same three gates as the Mock (normalize,
+    # write filter, cooldown) but no SQL -- these doubles exist so a core/runtime test can drive
+    # propose/confirm/inject without a host store.
+    async def propose_alias(self, session, term, fragment, note=None):
+        del note
+        normalized = normalize_term(term)
+        if not normalized:
+            return None
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        existing = self.vocabulary.get(normalized)
+        if existing is not None and existing.cooldown_until is not None and existing.cooldown_until > now:
+            return None
+        entry = VocabularyEntry(
+            term=normalized, fragment=fragment, status="pending",
+            proposed_by=session.operator if session is not None else "", proposed_at=now,
+        )
+        fact = entry_to_fact(entry)
+        try:
+            validate_fact(fact.key, fact.value, fact.category.value, fence=ATWORKS_FENCE,
+                          write_filter=write_filter_for(()))
+        except MemoryWriteRejected:
+            return None
+        stored = existing or entry
+        self.vocabulary[normalized] = stored
+        return stored
+
+    async def list_vocabulary(self, session, status=None, cursor=None, limit=50):
+        items = [e for e in self.vocabulary.values() if status is None or e.status == status]
+        items = sorted(items, key=lambda e: (e.proposed_at, e.term), reverse=True)
+        return Page[VocabularyEntry](items=items[:limit], next_cursor=None, total=len(items))
+
+    def _set_vocabulary(self, session, term, status, **fields):
+        entry = self.vocabulary.get(normalize_term(term))
+        if entry is None:
+            return None
+        updated = entry.model_copy(update={"status": status, **fields})
+        self.vocabulary[updated.term] = updated
+        return updated
+
+    async def confirm_alias(self, session, term):
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        entry = self.vocabulary.get(normalize_term(term))
+        if entry is None:
+            return None
+        return self._set_vocabulary(
+            session, term, "confirmed", confirmations=entry.confirmations + 1,
+            confirmed_by=session.operator if session is not None else "", confirmed_at=now,
+            cooldown_until=None,
+        )
+
+    async def reject_alias(self, session, term):
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        entry = self.vocabulary.get(normalize_term(term))
+        if entry is None:
+            return None
+        return self._set_vocabulary(
+            session, term, "rejected", rejections=entry.rejections + 1,
+            cooldown_until=now + timedelta(days=30),
+        )
+
+    async def delete_alias(self, session, term):
+        return self.vocabulary.pop(normalize_term(term), None)
+
+    async def confirmed_vocabulary(self, session):
+        return [e for e in self.vocabulary.values() if e.status == "confirmed"]
+
+    async def note_vocabulary_use(self, session, terms, rejected=False):
+        for term in terms:
+            entry = self.vocabulary.get(normalize_term(term))
+            if entry is None:
+                continue
+            if rejected:
+                entry = entry.model_copy(update={"rejections": entry.rejections + 1})
+                if entry.status == "confirmed" and entry.rejections >= 3 and entry.rejections > entry.confirmations:
+                    entry = entry.model_copy(update={"status": "pending"})
+            else:
+                entry = entry.model_copy(update={"uses": entry.uses + 1})
+            self.vocabulary[entry.term] = entry
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind):
         return self.ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)

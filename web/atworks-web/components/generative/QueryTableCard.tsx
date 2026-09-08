@@ -3,7 +3,9 @@
 
 "use client";
 
+import { useState } from "react";
 import { AskButton, formatDate, GenCard, GenCardHeader, Pill } from "web-shared";
+import { actOnVocabulary } from "@/lib/api";
 import { QUERY_SOURCE_LABEL } from "@/lib/kinds";
 import type { AttachedItem, QueryTableColumn, QueryTablePayload, QueryTableRow } from "@/lib/types";
 
@@ -32,6 +34,40 @@ function cellTone(value: number | null | undefined, kind: QueryTableColumn["kind
 function rowKey(row: QueryTableRow, index: number): string {
   const keys = Object.values(row.keys).map((v) => v ?? "—").join(" · ");
   return keys.length > 0 ? `${index}:${keys}` : `${index}`;
+}
+
+/**
+ * "‘결제 계열’을 경로 접두사 /v1/payment로 해석했습니다 — 맞나요? [예] [아니오]".
+ * 확인되면 그 용어는 팀 전체의 컨텍스트에 들어가고(조직 공용), 거부되면 쿨다운 동안 다시 제안되지
+ * 않는다. 문구는 서버가 카탈로그 라벨로 만든 것이라 이 파일은 뜻을 해석하지 않는다.
+ */
+function PendingAliasRow({ alias }: { alias: { term: string; fragment_summary: string } }) {
+  const [state, setState] = useState<"asking" | "busy" | "confirmed" | "rejected" | "failed">("asking");
+  const act = async (action: "confirm" | "reject") => {
+    if (state === "busy") return;
+    setState("busy");
+    const data = await actOnVocabulary(alias.term, action);
+    setState(data?.ok ? (action === "confirm" ? "confirmed" : "rejected") : "failed");
+  };
+  if (state === "confirmed" || state === "rejected") {
+    return (
+      <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">
+        <b className="font-semibold text-(--ink)">‘{alias.term}’</b>{" "}
+        {state === "confirmed" ? "저장됨 · 팀 공용" : "거부됨"}
+      </p>
+    );
+  }
+  return (
+    <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">
+      <b className="font-semibold text-(--ink)">‘{alias.term}’</b>을(를) {alias.fragment_summary}(으)로
+      해석했습니다 — 맞나요?
+      <span className="ml-1.5 inline-flex gap-1.5">
+        <AskButton label="예" onClick={() => void act("confirm")} />
+        <AskButton label="아니오" onClick={() => void act("reject")} />
+      </span>
+      {state === "failed" ? <span className="ml-1.5 text-(--danger)">저장하지 못했습니다.</span> : null}
+    </p>
+  );
 }
 
 export default function QueryTableCard({
@@ -113,12 +149,9 @@ export default function QueryTableCard({
         <p className="px-3.5 pb-2 text-[11.5px] text-(--ink-soft)">{payload.compare_note}</p>
       ) : null}
       {payload.note ? <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">{payload.note}</p> : null}
-      {/* T6이 pending_alias를, T8이 👍/👎를 채운다 — 그때까지 아무것도 그리지 않는다. */}
-      {payload.pending_alias ? (
-        <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">
-          <b className="font-semibold text-(--ink)">‘{payload.pending_alias.term}’</b> = {payload.pending_alias.fragment_summary}
-        </p>
-      ) : null}
+      {/* 어휘 확인 (spec §7). 확정은 오직 이 클릭에서 일어난다 — 채팅에 "그래"라고 써도 아무것도
+          저장되지 않는다. T8이 이 아래에 👍/👎를 붙인다. */}
+      {payload.pending_alias ? <PendingAliasRow alias={payload.pending_alias} /> : null}
       <div className="px-3.5 pb-3 text-[12px] text-(--ink-soft)">
         <p>
           {payload.spec_summary}

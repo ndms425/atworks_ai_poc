@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -15,7 +16,8 @@ from .catalog import catalog_hint
 from .config import AtworksAgentConfig
 from .fencing import ATWORKS_FENCE
 from .screen import render_screen_state_hint
-from .types import AttachedItem, ScreenState
+from .types import AttachedItem, ScreenState, VocabularyEntry
+from .vocabulary import fragment_summary_ko
 
 
 def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> str:
@@ -162,6 +164,7 @@ def build_dynamic_context(
     max_chars: int = 6000,
     context_max_chars: int = 2000,
     screen_state: ScreenState | None = None,
+    vocabulary: Sequence[VocabularyEntry] = (),
 ) -> str:
     payload: dict[str, Any] = {}
     if atworks_context is not None:
@@ -178,5 +181,16 @@ def build_dynamic_context(
             )
     if now is not None:
         payload["local_time"] = context_clock(now)
+    if vocabulary:
+        # 조직이 확정한 어휘 중 **이번 메시지에 실제로 나온 것**만 (self-growth §7). 빈 목록이면
+        # 키 자체를 넣지 않는다: 이 블록은 턴마다 달라지는 동적 컨텍스트라, 아무도 안 쓰는 턴의
+        # 바이트가 늘어나면 안 되고 기존 바이트 고정 테스트도 그대로 통과해야 한다.
+        # `means`는 카탈로그 라벨로 만든 문장이고 `fragment`가 모델이 실제로 쓸 필터다 -- 모델은
+        # 되묻지 않고 이 조각을 QuerySpec.filters에 그대로 넣는다.
+        payload["vocabulary"] = [
+            {"term": entry.term, "means": fragment_summary_ko(entry.fragment),
+             "fragment": entry.fragment.model_dump(mode="json", exclude_none=True)}
+            for entry in vocabulary
+        ]
     block = "# aTworks context\n\n" + ATWORKS_FENCE.fence_payload(payload, max_chars=max_chars)
     return block + render_attached_items_hint(attached_items) + render_screen_state_hint(screen_state)

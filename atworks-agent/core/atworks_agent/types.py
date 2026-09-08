@@ -662,12 +662,17 @@ class AskEntry(BaseModel):
     turn_id: str
 
 
+#: 어휘 항목의 수명주기. pending은 제안한 세션의 카드에서만 보이고, confirmed만 다른 오퍼레이터의
+#: 컨텍스트에 들어가며, rejected는 쿨다운이 끝날 때까지 재제안을 막는다(self-growth spec §7).
+VocabularyStatus = Literal["pending", "confirmed", "rejected"]
+
+
 class VocabularyEntry(BaseModel):
     """조직 공유 어휘 한 항목 -- commerce_common.memory 사이드카(vocabulary 테이블)를 미러한다.
     fragment는 QueryFilters의 부분 조각이라 confirmed 상태에서만 컨텍스트에 주입된다."""
     term: str = Field(max_length=40)
     fragment: QueryFilters
-    status: Literal["pending", "confirmed", "rejected"] = "pending"
+    status: VocabularyStatus = "pending"
     proposed_by: str
     proposed_at: datetime
     confirmed_by: str | None = None
@@ -815,6 +820,11 @@ class AtworksSessionState(BaseModel):
     turn_tool_names: list[str] = Field(default_factory=list, exclude=True)
     turn_cards: int = Field(default=0, exclude=True)
     turn_unmet: tuple[UnmetReason, str, str] | None = Field(default=None, exclude=True)
+    # 이번 턴에 propose_alias가 낸 제안들 (self-growth §7). 카드 푸터의 "‘결제 계열’을 …로
+    # 해석했습니다 — 맞나요?"가 여기서 나온다. 세션 문서에 실리지 않는(`exclude=True`) 이유는 위와
+    # 같고, 하나 더 있다: pending 별칭은 **제안한 세션 안에서만** 쓰인다(spec §2 조항 4). 다른
+    # 오퍼레이터에게 보이는 유일한 경로는 확정 뒤의 컨텍스트 블록이지 이 목록이 아니다.
+    pending_aliases: list[VocabularyEntry] = Field(default_factory=list, exclude=True)
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)

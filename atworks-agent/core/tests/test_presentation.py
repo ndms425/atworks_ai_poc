@@ -39,6 +39,7 @@ from atworks_agent.types import (
     ScreenFilter,
     ScreenState,
     ScreenTarget,
+    VocabularyEntry,
 )
 
 CFG = AtworksAgentConfig(model="m")
@@ -724,6 +725,32 @@ async def test_query_table_carries_the_turn_id_and_no_alias_yet():
     state.last_query_result = _query_result()
     payload = (await _query_table(state)).events[0].data["payload"]
     assert payload["turn_id"] == "turn-77" and payload["pending_alias"] is None
+
+
+async def test_query_table_asks_to_confirm_this_turn_s_alias():
+    # self-growth §7: the confirmation rides the card the operator is already reading, and its
+    # wording is built from catalogue labels -- the model contributes the term, nothing else.
+    state = AtworksSessionState()
+    state.last_query_result = _query_result()
+    state.pending_aliases.append(VocabularyEntry(
+        term="결제 계열", fragment=QueryFilters(path_prefix="/v1/payment"),
+        proposed_by="minseong", proposed_at=datetime(2026, 9, 8, tzinfo=UTC),
+    ))
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert payload["pending_alias"] == {"term": "결제 계열",
+                                        "fragment_summary": "경로 접두사 /v1/payment"}
+
+
+async def test_query_table_asks_about_the_newest_alias_only():
+    state = AtworksSessionState()
+    state.last_query_result = _query_result()
+    for term, prefix in (("결제 계열", "/v1/payment"), ("계약 계열", "/v1/contract")):
+        state.pending_aliases.append(VocabularyEntry(
+            term=term, fragment=QueryFilters(path_prefix=prefix), proposed_by="minseong",
+            proposed_at=datetime(2026, 9, 8, tzinfo=UTC),
+        ))
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert payload["pending_alias"]["term"] == "계약 계열"
 
 
 async def test_query_table_refuses_without_a_query_result():

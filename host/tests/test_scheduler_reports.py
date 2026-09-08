@@ -20,6 +20,7 @@ from atworks_agent import (
     RunResult,
     RunStatus,
     TestDataSet,
+    VocabularyEntry,
 )
 from atworks_host.mock_backend import MockAtworks
 from atworks_host.reports import TEMPLATE, Reports, _matrix
@@ -259,6 +260,29 @@ class RecordingBackend(AtworksBackend):
 
     async def growth_summary(self, session, since):
         return GrowthSummary(asks_total=len(self.asks))
+
+    # 어휘 (self-growth §7): 스케줄러 경로는 채팅 턴이 아니라 어휘를 읽지도 쓰지도 않는다 --
+    # 이 여섯은 그것을 그대로 주장하는 빈 구현이다(어느 하나라도 불리면 테스트가 그걸 본다).
+    async def propose_alias(self, session, term, fragment, note=None):
+        raise NotImplementedError
+
+    async def list_vocabulary(self, session, status=None, cursor=None, limit=50):
+        return Page[VocabularyEntry](items=[], next_cursor=None, total=0)
+
+    async def confirm_alias(self, session, term):
+        raise NotImplementedError
+
+    async def reject_alias(self, session, term):
+        raise NotImplementedError
+
+    async def delete_alias(self, session, term):
+        raise NotImplementedError
+
+    async def confirmed_vocabulary(self, session):
+        return []
+
+    async def note_vocabulary_use(self, session, terms, rejected=False):
+        raise NotImplementedError
 
     async def active_jobs(self, session):
         self.calls.append("active_jobs")

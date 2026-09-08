@@ -9,6 +9,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from commerce_common.memory import (
+    MemoryWriteRejected,
+    check_memory_store,
+    validate_fact,
+    write_filter_for,
+)
+from commerce_common.turn import session_tag
+
 from atworks_agent import (
     ActorKind,
     AggregateQuery,
@@ -47,6 +55,7 @@ from atworks_agent import (
     SelectWhere,
     TestDataSet,
     ValidationRule,
+    VocabularyEntry,
     body_capture_enabled,
     decode_cursor,
     encode_cursor,
@@ -56,8 +65,11 @@ from atworks_agent import (
     policy_from_config,
     resolve_select_where,
 )
-from atworks_agent.types import Binding
+from atworks_agent.fencing import ATWORKS_FENCE
+from atworks_agent.types import Binding, QueryFilters
+from atworks_agent.vocabulary import entry_to_fact, normalize_term
 
+from .memory_store import SqliteMemoryStore
 from .reports import Reports
 from .store import Store
 
@@ -210,6 +222,14 @@ class MockAtworks(AtworksBackend):
             row["operator_id"]: OperatorProfile(**row)
             for row in json.loads((fixtures_dir / "operators.json").read_text(encoding="utf-8"))
         }
+        # The org vocabulary's durable half (self-growth §7): the commerce_common MemoryStore
+        # contract over this same SQLite file. `check_memory_store` runs here rather than at first
+        # use, so a store missing part of the contract fails at construction.
+        self.memory_store = check_memory_store(SqliteMemoryStore(self.store))
+        self._memory_filter = write_filter_for(config.memory_blocked_patterns)
+        # Process cache for `confirmed_vocabulary` -- read once per turn by /chat, invalidated by
+        # EVERY write below (propose/confirm/reject/delete/use). None = not loaded.
+        self._confirmed_cache: list[VocabularyEntry] | None = None
 
     @property
     def apis(self) -> _ApisDict:
@@ -523,11 +543,109 @@ class MockAtworks(AtworksBackend):
         return GrowthSummary(
             asks_total=counts["total"], answered=counts["answered"], partial=counts["partial"],
             unmet=counts["unmet"], up=counts["up"], down=counts["down"],
-            # Vocabulary (§7) and saved questions (§8) land in Tasks 6/7; until then these two are
-            # honestly zero rather than a number invented from another table.
-            new_terms=0, new_saved=0,
+            # `new_terms` is a COUNT over the vocabulary sidecar (Task 6). Saved questions (§8)
+            # land in Task 7; until then that one stays honestly zero rather than a number
+            # invented from another table.
+            new_terms=self.store.count_vocabulary_since(since), new_saved=0,
             unmet_clusters=self.store.unmet_clusters(since),
         )
+
+    # -- 어휘 (자가발전 spec §7) -------------------------------------------------------------
+
+    def _vocabulary_fact_subject(self, session) -> str:
+        """저장 주체는 **프로젝트**다 — 사람이 아니다. 한 사람이 확인한 용어를 팀이 쓰는 것이
+        이 기능의 전부라, 세션의 operator는 저자로만 기록되고 키에는 들어가지 않는다."""
+        return session.project_id if session is not None else "project"
+
+    def _validated_fact(self, session, entry: VocabularyEntry):
+        """저장 직전의 단 하나의 문: 펜스 + ``MemoryWriteFilter``. term이나 fragment 값에 개인정보
+        모양(9자리+ 숫자·IBAN·이메일)이 있으면 ``MemoryWriteRejected``가 올라오고, 호출자는 그것을
+        ``None``으로 바꿔 돌려준다 — 아무것도 저장되지 않는다."""
+        fact = entry_to_fact(
+            entry,
+            source_session_id=session_tag(session.session_id) if session is not None else None,
+        )
+        return validate_fact(
+            fact.key, fact.value, fact.category.value, fence=ATWORKS_FENCE,
+            write_filter=self._memory_filter, source_session_id=fact.source_session_id,
+        )
+
+    async def propose_alias(self, session, term: str, fragment: QueryFilters,
+                            note: str | None = None) -> VocabularyEntry | None:
+        del note   # 카드에도 컨텍스트에도 실리지 않는다 -- 모델이 남기는 메모일 뿐이라 저장하지 않는다
+        normalized = normalize_term(term)
+        if not normalized:
+            return None
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        existing = self.store.get_vocabulary(normalized)
+        if existing is not None and existing.cooldown_until is not None and existing.cooldown_until > now:
+            # 사람이 거부한 용어를 다음 날 다시 제안하지 않는다. 저장도, 갱신도 없다.
+            return None
+        candidate = VocabularyEntry(
+            term=normalized, fragment=fragment, status="pending",
+            proposed_by=session.operator if session is not None else "", proposed_at=now,
+        )
+        try:
+            fact = self._validated_fact(session, candidate)
+        except MemoryWriteRejected:
+            # 사이드카에도 아무것도 쓰지 않는다: 필터가 막은 값은 어느 테이블에도 남지 않는다.
+            return None
+        stored = self.store.propose_vocabulary(candidate)
+        await self.memory_store.upsert_facts(self._vocabulary_fact_subject(session), [fact])
+        self._confirmed_cache = None
+        return stored
+
+    async def list_vocabulary(self, session, status=None, cursor=None, limit=50) -> Page[VocabularyEntry]:
+        del session
+        return self.store.list_vocabulary(status, cursor, limit)
+
+    async def confirm_alias(self, session, term: str) -> VocabularyEntry | None:
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        entry = self.store.set_vocabulary_status(
+            normalize_term(term), "confirmed",
+            by=session.operator if session is not None else "", now=now,
+            cooldown_days=self._config.vocabulary_cooldown_days,
+        )
+        self._confirmed_cache = None
+        return entry
+
+    async def reject_alias(self, session, term: str) -> VocabularyEntry | None:
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        entry = self.store.set_vocabulary_status(
+            normalize_term(term), "rejected",
+            by=session.operator if session is not None else "", now=now,
+            cooldown_days=self._config.vocabulary_cooldown_days,
+        )
+        self._confirmed_cache = None
+        return entry
+
+    async def delete_alias(self, session, term: str) -> VocabularyEntry | None:
+        normalized = normalize_term(term)
+        entry = self.store.delete_vocabulary(normalized)
+        if entry is not None:
+            # 사이드카와 fact를 함께 지운다 -- 한쪽만 지우면 용어를 반쯤 기억한 저장소가 남는다.
+            await self.memory_store.delete_fact(
+                self._vocabulary_fact_subject(session), normalized.replace(" ", "_"))
+        self._confirmed_cache = None
+        return entry
+
+    async def confirmed_vocabulary(self, session) -> list[VocabularyEntry]:
+        del session
+        if self._confirmed_cache is None:
+            self._confirmed_cache = self.store.confirmed_vocabulary()
+        return list(self._confirmed_cache)
+
+    async def note_vocabulary_use(self, session, terms: list[str], rejected: bool = False) -> None:
+        del session
+        normalized = [normalize_term(t) for t in terms if normalize_term(t)]
+        if not normalized:
+            return
+        if rejected:
+            self.store.note_vocabulary_rejection(
+                normalized, auto_demote_rejections=self._config.vocabulary_auto_demote_rejections)
+        else:
+            self.store.bump_vocabulary_uses(normalized)
+        self._confirmed_cache = None
 
     def _audit(self, session, action: str, target_kind: str, target_id: str) -> None:
         """Append-only audit row (spec §2). Every `apply_*` below writes one the moment the

@@ -141,6 +141,14 @@ from .types import (
     TestDataSet,
     UnmetReason,
     VocabularyEntry,
+    VocabularyStatus,
+)
+from .vocabulary import (
+    fragment_from_tool,
+    fragment_json,
+    fragment_summary_ko,
+    match_terms,
+    normalize_term,
 )
 
 __all__ = [n for n in dir() if not n.startswith("_")]

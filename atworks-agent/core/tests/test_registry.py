@@ -7,7 +7,7 @@ from atworks_agent.tools.registry import build_tools
 from atworks_agent.types import Dimension, Measure, QueryFilters, QuerySpec
 
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
-            "query_runs", "note_unmet_ask",
+            "query_runs", "note_unmet_ask", "propose_alias",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
             "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
             "find_apis_with_param", "recommend_rules_for_api",
@@ -268,3 +268,33 @@ def test_query_tools_are_byte_stable_across_builds():
     b = json.dumps(build_tools(AtworksAgentConfig(model="m"), ["a"]), sort_keys=True, ensure_ascii=False)
     assert a == b
     assert json.dumps(_tool("query_runs"), sort_keys=True) == json.dumps(_tool("query_runs"), sort_keys=True)
+
+
+def test_memory_tools_are_never_built_even_with_memory_enabled():
+    # self-growth §7: memory is ON in the host (the org vocabulary lives on it) but the model
+    # gets no reach into it -- vocabulary enters a turn as a CONTEXT BLOCK, and the only tool
+    # that touches the store proposes a term for a person to confirm.
+    names = [t["name"] for t in build_tools(
+        AtworksAgentConfig(model="m", enable_memory=True), ["failed-triage"])]
+    assert "save_memory" not in names and "recall_memories" not in names
+    assert "propose_alias" in names
+
+
+def test_propose_alias_disappears_with_query_runs():
+    off = [t["name"] for t in build_tools(
+        AtworksAgentConfig(model="m", enable_query_runs=False), ["failed-triage"])]
+    assert "propose_alias" not in off and "query_runs" not in off
+
+
+def test_propose_alias_schema_reuses_the_query_filters_shape():
+    tool = next(t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "propose_alias")
+    schema = tool["input_schema"]
+    assert schema["required"] == ["term", "fragment"]
+    assert schema["properties"]["term"]["maxLength"] == 40
+    fragment = schema["properties"]["fragment"]
+    # The same filter properties query_runs offers -- one definition of what a filter is.
+    query_filters = next(
+        t for t in build_tools(AtworksAgentConfig(model="m"), []) if t["name"] == "query_runs"
+    )["input_schema"]["properties"]["filters"]
+    assert fragment["properties"] == query_filters["properties"]
+    assert fragment["additionalProperties"] is False

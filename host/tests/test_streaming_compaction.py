@@ -22,9 +22,10 @@ class _StubAgent:
         self._events = events
 
     async def stream_turn(
-        self, messages, session, state, *, attached_items=(), screen_state=None, turn_id=None
+        self, messages, session, state, *, attached_items=(), screen_state=None, turn_id=None,
+        vocabulary=(),
     ) -> AsyncIterator[AgentEvent]:
-        del messages, session, state, attached_items, screen_state, turn_id
+        del messages, session, state, attached_items, screen_state, turn_id, vocabulary
         for event in self._events:
             yield event
 

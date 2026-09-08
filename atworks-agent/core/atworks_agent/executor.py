@@ -94,6 +94,7 @@ from .types import (
     RunStatus,
     UnmetReason,
 )
+from .vocabulary import MAX_TERM_CHARS, fragment_from_tool
 
 
 def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = None) -> MemoryRuntime:
@@ -374,6 +375,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "discard_profile": self._discard_profile,
             "recommend_ignore_paths": self._recommend_ignore_paths,
             "note_unmet_ask": self._note_unmet_ask,
+            "propose_alias": self._propose_alias,
         }
 
     # -- 읽기 -------------------------------------------------------------------------
@@ -978,6 +980,39 @@ class AtworksToolExecutor(BaseToolExecutor):
         self._state.turn_unmet = (reason, summary, wanted)
         return ToolOutcome(
             "기록했습니다 — 이 질문은 미충족으로 남고, 무엇이 있으면 답할 수 있는지 한 문장으로 설명하세요."
+        )
+
+    async def _propose_alias(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        """모델이 사용자 용어를 필터로 읽었을 때의 제안(자가발전 spec §7). 세 겹의 문을 지난다:
+        모양 검사(:func:`vocabulary.fragment_from_tool` -- 기간·id 목록은 별칭이 될 수 없다),
+        쓰기 필터(백엔드가 저장 직전에 ``validate_fact``), 그리고 **사람의 클릭**. 이 도구는
+        아무것도 확정하지 않는다 -- pending 한 행을 남기고, 이번 턴 카드가 확인을 요청할 뿐이다.
+
+        카드를 직접 내지 않는 이유: 확인 문구는 `query_table` 카드 푸터에 붙는다(그 턴의 숫자를
+        보면서 판단하라고). 그래서 여기서는 이번 턴 스크래치에만 적어 두고, 카드 enrichment가
+        읽는다."""
+        term = self._sanitize(tool_input.get("term"), MAX_TERM_CHARS)
+        if not term:
+            raise InvalidToolArgument("term", kind="schema", detail="term must be the operator's word")
+        try:
+            fragment = fragment_from_tool(tool_input.get("fragment"))
+        except ValueError as invalid:
+            raise InvalidToolArgument("fragment", kind="schema", detail=str(invalid)) from invalid
+        entry = await self._backend.propose_alias(
+            self._session, term=term, fragment=fragment,
+            note=self._sanitize(tool_input.get("note"), 120) or None,
+        )
+        if entry is None:
+            # 왜 거절됐는지는 두 가지뿐이고, 둘 다 모델이 고쳐 쓸 수 있는 종류가 아니다 -- 다시
+            # 제안하지 말고 설명 없이 넘어가라는 뜻이다.
+            return ToolOutcome(
+                f"‘{term}’ 별칭은 저장되지 않았습니다 — 개인정보 모양이거나(rejected: looks like "
+                "personal data), 이미 사람이 거부해 쿨다운 중인 용어입니다. 다시 제안하지 마세요."
+            )
+        self._state.pending_aliases.append(entry)
+        return ToolOutcome(
+            f"‘{entry.term}’ 별칭을 제안했습니다 — 카드의 [예/아니오]로 확인을 받습니다. "
+            "확인되기 전까지는 이 해석을 팀의 약속처럼 말하지 마세요."
         )
 
     async def _recommend_ignore_paths(self, tool_input: dict[str, Any]) -> ToolOutcome:

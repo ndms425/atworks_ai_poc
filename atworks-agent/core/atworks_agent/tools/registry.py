@@ -236,6 +236,28 @@ def build_tools(
                 "wanted": {"type": "string", "maxLength": 200, "description": "One line: what dimension, filter or record WOULD have answered it."}},
                 "required": ["reason", "summary"], "additionalProperties": False},
         },
+        {
+            "name": "propose_alias",
+            "description": ("Call this in the SAME turn you read an operator's own word as a filter — '결제 계열' as "
+                            "path_prefix /v1/payment, '결제 API' as api_group payment. It proposes the reading to the "
+                            "team; the card then asks the operator [예]/[아니오], and once someone confirms it, every "
+                            "operator's later turns carry that term and you stop asking. Propose the SHAPE the word "
+                            "names — a path, a method, a group, a target env, a rule, a status code — never a time "
+                            "window and never a list of ids (those are true today and false next month, and the tool "
+                            "refuses them). Do not propose catalogue words that already mean themselves, and do not "
+                            "propose a person's or a customer's name. It stores nothing until a person clicks; it "
+                            "renders no card of its own. / 사용자 용어를 필터로 해석했으면 그 해석을 제안한다. 사람이 "
+                            "한 번 확인하면 팀 전체의 컨텍스트에 들어간다."),
+            "input_schema": {"type": "object", "properties": {
+                "term": {"type": "string", "maxLength": 40,
+                         "description": "The operator's own word, as they wrote it (≤40 chars)."},
+                "fragment": {**_query_filters_schema(),
+                             "description": ("What the word means, as QueryFilters fields. At least one; "
+                                             "since/until/window_days/api_ids/scope_operator are refused.")},
+                "note": {"type": "string", "maxLength": 120,
+                         "description": "Optional: one line on why you read it this way."}},
+                "required": ["term", "fragment"], "additionalProperties": False},
+        },
         # -- 실행 계획 ------------------------------------------------------------------
         {
             "name": "get_pending_jobs",

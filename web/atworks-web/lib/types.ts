@@ -295,8 +295,25 @@ export interface QueryTablePayload {
   compare_note?: string | null;
   /** T4가 채운다. T8의 👍/👎가 이 값으로 ask_log 행을 찾는다. */
   turn_id?: string | null;
-  /** T6이 채운다 — 그때까지 null이고 카드는 아무것도 그리지 않는다. */
+  /** 이번 턴 propose_alias가 낸 제안. 카드 푸터가 [예]/[아니오]를 묻는다(spec §7). */
   pending_alias?: { term: string; fragment_summary: string } | null;
+}
+
+/** 조직 공용 어휘 1항목 (`GET /vocabulary`, `POST /vocabulary/{term}/confirm|reject|delete`).
+ *  `fragment_summary`는 서버가 카탈로그 라벨로 만든 한 줄이다 — 포털이 필터 이름을 번역하지 않는다. */
+export interface VocabularyEntry {
+  term: string;
+  fragment: Record<string, unknown>;
+  fragment_summary: string;
+  status: "pending" | "confirmed" | "rejected";
+  proposed_by: string;
+  proposed_at: string;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  confirmations: number;
+  uses: number;
+  rejections: number;
+  cooldown_until?: string | null;
 }
 
 export type RuleKind = "compare" | "membership" | "required" | "format";

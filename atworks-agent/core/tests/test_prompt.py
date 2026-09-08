@@ -5,7 +5,7 @@ from commerce_common.skills import Skill, SkillRegistry
 from atworks_agent.catalog import catalog_hint
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.prompt import build_dynamic_context, build_static_system
-from atworks_agent.types import AttachedItem
+from atworks_agent.types import AttachedItem, QueryFilters, VocabularyEntry
 
 SKILLS = SkillRegistry([Skill(name="failed-triage", description="실패 triage", body="...")])
 
@@ -63,6 +63,20 @@ def test_dynamic_context_carries_attachments_and_clock():
 
 def test_dynamic_context_without_attachments_has_no_block():
     assert "<attached-result-items>" not in build_dynamic_context(atworks_context=None, attached_items=[], now=None)
+
+
+def test_dynamic_context_carries_matched_vocabulary_and_nothing_when_there_is_none():
+    # self-growth §7 step 3: the confirmed terms this message actually used, with the meaning the
+    # host derived from catalogue labels and the fragment the model is expected to reuse.
+    entry = VocabularyEntry(term="결제 계열", fragment=QueryFilters(path_prefix="/v1/payment"),
+                            status="confirmed", proposed_by="minseong",
+                            proposed_at=datetime(2026, 9, 8))
+    text = build_dynamic_context(atworks_context=None, attached_items=[], vocabulary=[entry])
+    assert '"term": "결제 계열"' in text and '"means": "경로 접두사 /v1/payment"' in text
+    assert '"path_prefix": "/v1/payment"' in text
+    # Byte stability: no matched term, no key at all -- an ordinary turn's context is unchanged.
+    assert build_dynamic_context(atworks_context=None, attached_items=[], vocabulary=[]) ==            build_dynamic_context(atworks_context=None, attached_items=[])
+    assert "vocabulary" not in build_dynamic_context(atworks_context=None, attached_items=[])
 
 
 def test_dynamic_context_renders_operator_line_only_when_present():

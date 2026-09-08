@@ -1293,3 +1293,57 @@ async def test_a_refused_card_does_not_increment_turn_cards(backend, config, ski
         "title": "실패", "items": [{"kind": "fail", "ref_id": "run-never-seen", "headline": "x"}],
     })
     assert out.refused and state.turn_cards == 0
+
+
+# -- propose_alias (self-growth spec §7) -------------------------------------------------
+
+async def test_propose_alias_records_a_pending_entry_for_this_turn(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("propose_alias", {
+        "term": "  결제 계열 ", "fragment": {"path_prefix": "/v1/payment"}, "note": "경로로 읽었습니다",
+    })
+    assert not out.refused
+    # The tool result points at the card, and says the model may not treat it as agreed yet.
+    assert "결제 계열" in out.result_text and "[예/아니오]" in out.result_text
+    (entry,) = state.pending_aliases
+    assert entry.term == "결제 계열" and entry.status == "pending"
+    assert entry.fragment.path_prefix == "/v1/payment"
+    # Stored under the normalized term, once.
+    assert list(backend.vocabulary) == ["결제 계열"]
+
+
+async def test_propose_alias_refuses_a_time_window_or_an_id_list(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    for fragment in ({"window_days": 7}, {"api_ids": ["api-1"]}, {"scope_operator": "minseong"}):
+        out = await ex.execute("propose_alias", {"term": "지난주", "fragment": fragment})
+        assert out.refused and "fragment" in out.result_text
+    assert state.pending_aliases == [] and backend.vocabulary == {}
+
+
+async def test_propose_alias_refuses_an_empty_fragment(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute(
+        "propose_alias", {"term": "결제", "fragment": {}})
+    assert out.refused and state.pending_aliases == []
+
+
+async def test_propose_alias_reports_a_write_filter_rejection_without_staging_anything(
+        backend, config, skills, session, state):
+    # An email-shaped value trips MemoryWriteFilter; the backend answers None and the tool says so
+    # rather than pretending a proposal exists.
+    out = await _exec(backend, config, skills, session, state).execute("propose_alias", {
+        "term": "담당자", "fragment": {"path_contains": ["hong@example.com"]},
+    })
+    assert not out.refused and "저장되지 않았습니다" in out.result_text
+    assert state.pending_aliases == [] and backend.vocabulary == {}
+
+
+async def test_propose_alias_is_silent_while_the_term_is_in_cooldown(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("propose_alias", {"term": "결제 계열", "fragment": {"path_prefix": "/v1/payment"}})
+    await backend.reject_alias(session, "결제 계열")
+    state.pending_aliases.clear()
+    out = await ex.execute("propose_alias", {"term": "결제 계열", "fragment": {"path_prefix": "/v1/pay"}})
+    assert not out.refused and "저장되지 않았습니다" in out.result_text
+    assert state.pending_aliases == []
+    # The rejected row keeps its own fragment: a re-proposal may not quietly rewrite it.
+    assert backend.vocabulary["결제 계열"].fragment.path_prefix == "/v1/payment"

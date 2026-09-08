@@ -47,6 +47,7 @@ from .tools.presentation import (
     PresentRunGroupsPayload,
 )
 from .types import Binding, RunStatus
+from .vocabulary import fragment_summary_ko
 
 LOW_CONFIDENCE = 0.5
 
@@ -215,9 +216,16 @@ async def enrich_query_table(payload: PresentQueryTablePayload, context: Enrichm
         "compare": compare,
         "compare_note": COMPARE_NOTE if compare else None,
         "turn_id": result.turn_id or context.state.current_turn_id,
-        # Task 6 fills this (a vocabulary alias the turn proposed); until then the card renders
-        # nothing for it, and Task 8 does the same for the 👍/👎 row.
-        "pending_alias": None,
+        # The confirmation the card asks for (self-growth §7): THIS turn's newest propose_alias,
+        # or nothing. Per-turn scratch, so a card rendered in a later turn never re-asks a
+        # question already answered — and a pending alias never travels outside the session that
+        # proposed it (spec §2 clause 4). The summary is built from catalogue labels, never from a
+        # model sentence, exactly like every other figure on this card.
+        "pending_alias": (
+            {"term": alias.term, "fragment_summary": fragment_summary_ko(alias.fragment)}
+            if (alias := (context.state.pending_aliases[-1] if context.state.pending_aliases else None))
+            else None
+        ),
     }
 
 
