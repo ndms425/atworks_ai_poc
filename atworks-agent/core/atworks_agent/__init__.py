@@ -41,6 +41,7 @@ from .materialize import (
     KeyCounts,
     KeyRollupRow,
     OperatorApiDelta,
+    OperatorDayDelta,
     RollupRow,
     cell_key,
     key_rollup_delta,

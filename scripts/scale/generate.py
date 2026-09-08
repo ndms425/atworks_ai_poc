@@ -100,7 +100,8 @@ PII_SAMPLES = (
     "연락처 010-1234-5678",
     "계좌 110-234-567890 입금",
 )
-ROW_TABLES = ("apis", "runs", "bodies", "rollup_day", "current_state", "api_watermark", "operator_api")
+ROW_TABLES = ("apis", "runs", "bodies", "rollup_day", "current_state", "api_watermark",
+              "operator_api", "rollup_operator_day")
 
 
 def _weighted_pool(weights: list[float], size: int = 8192) -> list[int]:

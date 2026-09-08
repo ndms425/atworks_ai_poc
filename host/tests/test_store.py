@@ -1226,3 +1226,74 @@ def test_slo_smoke_fixture_reads_are_fast():
         check()
         elapsed_ms = (time.perf_counter() - start) * 1000
         assert elapsed_ms < 10, f"{check} took {elapsed_ms:.2f}ms"
+
+
+# -- self-growth (spec 2026-09-07 §11): api path segments + the operator-day rollup -------------
+
+
+def test_api_path_segments_are_materialized_on_the_write():
+    """``query_runs`` groups by "endpoint family", and a GROUP BY over a SUBSTR of `path` can use
+    no index at all. The split therefore happens on the write that already touches the row."""
+    store = _store_with_fixtures()
+    rows = {r["api_id"]: (r["path"], r["path_segment_1"], r["path_segment_2"], r["path_prefix_2"])
+            for r in store.conn().execute("SELECT * FROM apis").fetchall()}
+    assert rows
+    for _api_id, (path, seg1, seg2, prefix) in rows.items():
+        parts = [p for p in path.split("/") if p]
+        assert seg1 == parts[0]
+        assert seg2 == (parts[1] if len(parts) > 1 else None)
+        assert prefix == "/" + "/".join(parts[:2])
+    # a replacement rewrites them too (`replace_all_apis` backs `backend.apis = {...}`)
+    store.replace_all_apis([ApiSpec(api_id="api-900", method="GET", path="/v2/orders/{id}/items",
+                                    name="x", updated_at=datetime(2026, 9, 1, tzinfo=UTC))])
+    row = store.conn().execute("SELECT * FROM apis").fetchone()
+    assert (row["path_segment_1"], row["path_segment_2"], row["path_prefix_2"]) == \
+        ("v2", "orders", "/v2/orders")
+
+
+def test_a_store_written_before_the_path_segment_columns_is_migrated_and_backfilled(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` never widens an existing table, so an on-disk store keeps its
+    old `apis` shape until the ALTER runs -- and an ALTER alone leaves every existing row NULL,
+    which would make the three path dimensions answer "one group, key NULL" over a full catalogue."""
+    path = tmp_path / "old.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        'CREATE TABLE apis (api_id TEXT PRIMARY KEY, method TEXT NOT NULL, path TEXT NOT NULL, '
+        'name TEXT NOT NULL, "group" TEXT, updated_at TEXT NOT NULL, '
+        "has_rules INTEGER NOT NULL DEFAULT 0, params JSON NOT NULL DEFAULT '[]');"
+    )
+    legacy.executemany(
+        "INSERT INTO apis VALUES (?,?,?,?,?,?,?,?)",
+        [("api-001", "GET", "/v1/payments/{id}", "p", "payment", "2026-09-01T00:00:00.000000Z", 0, "[]"),
+         ("api-002", "GET", "/health", "h", None, "2026-09-01T00:00:00.000000Z", 0, "[]")],
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = Store(path)
+    rows = {r["api_id"]: (r["path_segment_1"], r["path_segment_2"], r["path_prefix_2"])
+            for r in store.conn().execute("SELECT * FROM apis").fetchall()}
+    assert rows == {"api-001": ("v1", "payments", "/v1/payments"),
+                    "api-002": ("health", None, "/health")}
+    # ...and re-opening the migrated file is a no-op, not a second backfill
+    again = Store(path)
+    assert {r["api_id"]: r["path_prefix_2"] for r in again.conn().execute("SELECT * FROM apis")} == \
+        {"api-001": "/v1/payments", "api-002": "/health"}
+
+
+def test_a_store_written_before_rollup_operator_day_derives_it_from_the_runs(tmp_path):
+    """The table is NEW, and an empty new table would make the ``executed_by`` axis answer "no
+    groups" over a store full of runs. Derived once, from the run rows themselves."""
+    path = tmp_path / "pre-operator-rollup.db"
+    store = Store(path)
+    store.load_fixtures(FIXTURES, briefing_tz="Asia/Seoul")
+    expected = {(r["day"], r["operator_id"]): r["count"] for r in
+                store.conn().execute("SELECT * FROM rollup_operator_day").fetchall()}
+    assert expected
+    store.conn().execute("DROP TABLE rollup_operator_day")      # ...as if it never existed
+    store.conn().commit()
+
+    reopened = Store(path)
+    derived = {(r["day"], r["operator_id"]): r["count"] for r in
+               reopened.conn().execute("SELECT * FROM rollup_operator_day").fetchall()}
+    assert derived == expected

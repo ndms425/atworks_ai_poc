@@ -6,7 +6,8 @@ index for ledger guardrails stays `MockAtworks.apis` (a plain dict) per the cont
 ``current_state`` / ``rollup_day`` / ``api_watermark`` / ``operator_api`` are materialized at
 **ingest** (Task 5, spec §4): ``ingest()`` is the single write path for runs -- one transaction
 inserts the new runs and their (optionally masked) bodies and folds the same batch into all four
-tables via the pure ``atworks_agent.materialize.rollup_delta``. ``current_state()`` /
+tables (plus ``rollup_key_day`` / ``rollup_operator_day``) via the pure
+``atworks_agent.materialize.rollup_delta``. ``current_state()`` /
 ``watermarks()`` / ``operator_scope_ids()`` read those tables by primary key; the Task 4
 on-demand scans survive as ``recompute_*`` **oracles for tests only**. ``aggregate_runs`` still
 reads base ``runs`` through ``fetch_runs`` (Task 8 decides rollup-fed aggregation reads).
@@ -46,6 +47,9 @@ from atworks_agent import (
     Insights,
     KeyCounts,
     Page,
+    QueryResult,
+    QueryRow,
+    QuerySpec,
     RunGroup,
     RunResult,
     RunsQuery,
@@ -58,6 +62,18 @@ from atworks_agent import (
 )
 from atworks_agent.aggregation import MAX_RUN_IDS
 
+from .query_sql import (
+    API_SAMPLE_CAP,
+    RUN_SAMPLE_CAP,
+    CompiledQuery,
+    compile_query,
+    day_bounds,
+    path_segments,
+    row_key_predicates,
+    sample_predicates,
+)
+from .query_sql import KEY_AXES as QUERY_KEY_AXES
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS apis (
     api_id TEXT PRIMARY KEY,
@@ -67,11 +83,25 @@ CREATE TABLE IF NOT EXISTS apis (
     "group" TEXT,
     updated_at TEXT NOT NULL,
     has_rules INTEGER NOT NULL DEFAULT 0,
-    params JSON NOT NULL DEFAULT '[]'
+    params JSON NOT NULL DEFAULT '[]',
+    -- The path, pre-split at ingest (self-growth spec 2026-09-07 §11). `query_runs` groups by
+    -- "endpoint family" -- the first or second `/`-separated segment, or the two of them joined --
+    -- and a GROUP BY over a SUBSTR/INSTR expression of `path` can use no index at all: every
+    -- grouped read would be a full scan of the catalogue (50,000 rows) plus a temp b-tree. Split
+    -- once, on the write that already touches the row, and the same read is an index scan.
+    -- Segments are kept VERBATIM: `{id}` and a numeric segment are values an operator typed into
+    -- the spec, and relabelling them here would invent a grouping nobody asked for.
+    path_segment_1 TEXT,
+    path_segment_2 TEXT,
+    path_prefix_2 TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_apis_updated_at ON apis(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_apis_group ON apis("group");
 CREATE INDEX IF NOT EXISTS idx_apis_path ON apis(path);
+CREATE INDEX IF NOT EXISTS idx_apis_seg1 ON apis(path_segment_1);
+CREATE INDEX IF NOT EXISTS idx_apis_seg2 ON apis(path_segment_2);
+CREATE INDEX IF NOT EXISTS idx_apis_prefix2 ON apis(path_prefix_2);
+CREATE INDEX IF NOT EXISTS idx_apis_method ON apis(method);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
@@ -204,6 +234,25 @@ CREATE TABLE IF NOT EXISTS rollup_key_day (
 -- right half of the table instead of straddling both.
 CREATE INDEX IF NOT EXISTS idx_rollup_key_day_axis_day ON rollup_key_day(axis, day);
 
+-- (day, operator) counters, materialized at ingest (self-growth spec 2026-09-07 §4/§11). The
+-- "executed_by" axis has no other home: `rollup_day` does not know who ran a cell (it is keyed by
+-- api/env/data), and `operator_api.run_count` has no day in it, so "내가 어제 몇 건 돌렸나" was a
+-- `runs` scan. One row per (day, operator) makes it a range scan of at most (days x operators).
+-- Runs with `executed_by IS NULL` contribute NOTHING (same rule as `operator_api`), so the sum of
+-- this table over a window can be SMALLER than the same window's `rollup_day` sum -- that is the
+-- honest answer, not a discrepancy: an unattributed run belongs to no operator.
+CREATE TABLE IF NOT EXISTS rollup_operator_day (
+    day TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    pass INTEGER NOT NULL DEFAULT 0,
+    fail INTEGER NOT NULL DEFAULT 0,
+    error INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, operator_id)
+);
+-- The PK is (day, operator); the read shape "this operator, this window" wants the other order.
+CREATE INDEX IF NOT EXISTS idx_rollup_operator_day_op ON rollup_operator_day(operator_id, day);
+
 CREATE TABLE IF NOT EXISTS api_watermark (
     api_id TEXT PRIMARY KEY,
     last_pass_at TEXT,
@@ -302,6 +351,23 @@ def _label_in(label: str | None) -> str:
 def _label_out(label: str | None) -> str | None:
     """...and back: ``''`` (or a NULL left by an older row) reads as ``None``."""
     return label if label else None
+
+
+#: ``query_sql.KEY_AXES``, re-exported under a local name so this module reads one vocabulary.
+_QUERY_KEY_AXES = QUERY_KEY_AXES
+
+
+def _measure_out(name: str, value) -> float | int | None:
+    """One measure cell, out of SQLite and into ``QueryRow.measures``. ``fail_rate`` is the only
+    float; every other measure is a count, a level or NULL (a source that does not carry it --
+    ``transitions`` off anything but ``rollup_day``, ``p95``/``apis`` off
+    ``rollup_operator_day``). NULL stays NULL: a source that cannot measure something must not
+    report a 0, which reads as a measurement."""
+    if value is None:
+        return None
+    if name == "fail_rate":
+        return float(value)
+    return int(value)
 
 
 _RUN_ID_SCAN_CAP = 5000     # bounded newest-first scan that fills run_ids for the map-keyed axes
@@ -544,22 +610,38 @@ class Store:
         """CREATE TABLE/INDEX IF NOT EXISTS throughout -- safe to call on an already-initialized
         connection (constructor calls it once; tests call it again to assert idempotency)."""
         with self._transaction():
+            added = self._widen_columns()
             self._conn.executescript(_SCHEMA)
-            self._migrate_columns()
+            self._migrate_columns(added)
 
-    def _migrate_columns(self) -> None:
+    def _widen_columns(self) -> set[tuple[str, str]]:
         """Columns added to a table that already exists on disk. ``CREATE TABLE IF NOT EXISTS``
         never widens an existing table, so a store written before Task 8 keeps its old
         ``rollup_day`` shape until this ALTER runs; the new column stays NULL (read as an empty
-        map) until ``rebuild_materialized`` refills it."""
+        map) until ``rebuild_materialized`` refills it.
+
+        Runs BEFORE the schema script, not after (self-growth): ``_SCHEMA`` now creates indexes ON
+        the new ``apis`` columns, and an index over a column an old file does not have yet is an
+        ``OperationalError`` at open time -- the store would not boot at all."""
         added: set[tuple[str, str]] = set()
         for table, column, decl in (("rollup_day", "http_status_counts", "JSON"),
                                     ("bodies", "masked_paths", "JSON"),
-                                    ("rollup_key_day", "p95_duration_ms", "INTEGER")):
+                                    ("rollup_key_day", "p95_duration_ms", "INTEGER"),
+                                    ("apis", "path_segment_1", "TEXT"),
+                                    ("apis", "path_segment_2", "TEXT"),
+                                    ("apis", "path_prefix_2", "TEXT")):
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
                 added.add((table, column))
+        return added
+
+    def _migrate_columns(self, added: set[tuple[str, str]]) -> None:
+        """Everything a widened (or brand-new) table needs AFTER the schema script has run: the
+        reshape of a table whose columns changed meaning, and the backfills that turn a NULL
+        column or an empty new table into the values every read assumes are there."""
+        if ("apis", "path_segment_1") in added:
+            self._backfill_path_segments()
         # `retention_state` was created in Task 4 as a generic (key, value) pair table and never
         # written by anything; Task 9 gives it the spec's own columns. A store written before
         # this keeps the old shape (CREATE TABLE IF NOT EXISTS never reshapes), so drop it --
@@ -571,6 +653,40 @@ class Store:
                 "CREATE TABLE retention_state (partition_key TEXT PRIMARY KEY, archived_at TEXT NOT NULL)"
             )
         self._backfill_key_rollup(rebuild=("rollup_key_day", "p95_duration_ms") in added)
+        self._backfill_operator_rollup()
+
+    def _backfill_path_segments(self) -> None:
+        """Fill the three new ``apis`` columns on a store written before they existed. The split
+        is python (``path_segments``), not SQL: the SQL for "the second `/`-separated segment, or
+        NULL when there isn't one" is a nest of SUBSTR/INSTR that would then have to agree
+        CHARACTER FOR CHARACTER with the python the write path uses -- two definitions of one
+        grouping. A catalogue is at most tens of thousands of rows and this runs once per file."""
+        rows = self._conn.execute("SELECT api_id, path FROM apis").fetchall()
+        self._conn.executemany(
+            "UPDATE apis SET path_segment_1 = ?, path_segment_2 = ?, path_prefix_2 = ? WHERE api_id = ?",
+            [(*path_segments(r["path"]), r["api_id"]) for r in rows],
+        )
+
+    def _backfill_operator_rollup(self) -> None:
+        """``rollup_operator_day`` is a NEW TABLE (self-growth spec §11), and
+        ``CREATE TABLE IF NOT EXISTS`` leaves it EMPTY on a store written before it existed -- so
+        the ``executed_by`` axis would answer "no groups" over a store full of runs. Derived here,
+        once, from the run rows themselves (both partitions: the archive is moved, never deleted,
+        and its days are as real as the hot ones), which is the same fold ``rollup_delta`` does at
+        ingest expressed in SQL. Runs with no ``executed_by`` are skipped, exactly as the delta
+        skips them."""
+        if self._conn.execute("SELECT EXISTS(SELECT 1 FROM rollup_operator_day)").fetchone()[0]:
+            return
+        for table in ("runs", "runs_archive"):
+            self._conn.execute(
+                'INSERT INTO rollup_operator_day (day, operator_id, "count", "pass", fail, error) '
+                'SELECT day, executed_by, COUNT(*), SUM(status = \'pass\'), SUM(status = \'fail\'), '
+                f"SUM(status = 'error') FROM {table} "
+                "WHERE executed_by IS NOT NULL AND day IS NOT NULL GROUP BY day, executed_by "
+                'ON CONFLICT(day, operator_id) DO UPDATE SET '
+                '"count" = "count" + excluded."count", "pass" = "pass" + excluded."pass", '
+                "fail = fail + excluded.fail, error = error + excluded.error"
+            )
 
     def _backfill_key_rollup(self, *, rebuild: bool = False) -> None:
         """``rollup_key_day`` is a NEW TABLE, and `CREATE TABLE IF NOT EXISTS` leaves it empty on a
@@ -626,16 +742,20 @@ class Store:
 
     @staticmethod
     def _api_rows(apis: Iterable[ApiSpec]) -> list[tuple]:
+        """One tuple per spec, with the path pre-split (``query_sql.path_segments``) -- see the
+        ``apis`` DDL for why the split happens on the write rather than inside a GROUP BY."""
         return [
-            (a.api_id, a.method, a.path, a.name, a.group, _iso(a.updated_at), int(a.has_rules), json.dumps(a.params))
+            (a.api_id, a.method, a.path, a.name, a.group, _iso(a.updated_at), int(a.has_rules),
+             json.dumps(a.params), *path_segments(a.path))
             for a in apis
         ]
 
     def _write_api_rows(self, rows: Sequence[tuple]) -> None:
         """Rows in, no commit -- the caller owns the transaction."""
         self._conn.executemany(
-            'INSERT OR REPLACE INTO apis (api_id, method, path, name, "group", updated_at, has_rules, params) '
-            "VALUES (?,?,?,?,?,?,?,?)",
+            'INSERT OR REPLACE INTO apis (api_id, method, path, name, "group", updated_at, has_rules, params, '
+            "path_segment_1, path_segment_2, path_prefix_2) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         self._refresh_api_updated_at([a[0] for a in rows])
@@ -736,14 +856,15 @@ class Store:
         mask: MaskFn | None = None,
     ) -> int:
         """**The** write path for runs (spec §4): one transaction inserts the batch and folds it
-        into ``current_state`` / ``rollup_day`` / ``api_watermark`` / ``operator_api``. Returns the
+        into ``current_state`` / ``rollup_day`` / ``rollup_key_day`` / ``api_watermark`` /
+        ``operator_api`` / ``rollup_operator_day``. Returns the
         number of runs that were actually new.
 
         Idempotent by construction: run_ids already present are filtered out up front (and the
         insert itself is ``INSERT OR IGNORE``), so re-ingesting a batch inserts nothing and adds
         no delta anywhere -- a retried ``record_execution`` cannot double-count a rollup.
 
-        ALL-OR-NOTHING: the run rows, their bodies and all four materialized folds share one
+        ALL-OR-NOTHING: the run rows, their bodies and every materialized fold share one
         ``_transaction``. A failure anywhere inside rolls the whole batch back, so the store never
         holds a run that no rollup counted."""
         batch: dict[str, RunResult] = {}
@@ -806,11 +927,12 @@ class Store:
     # -- ingest-time materialization (spec §4) ---------------------------------------------------
 
     def _clear_materialized(self) -> None:
-        for table in ("current_state", "rollup_day", "rollup_key_day", "api_watermark", "operator_api"):
+        for table in ("current_state", "rollup_day", "rollup_key_day", "api_watermark",
+                      "operator_api", "rollup_operator_day"):
             self._conn.execute(f"DELETE FROM {table}")
 
     def rebuild_materialized(self, briefing_tz: str = "Asia/Seoul") -> None:
-        """Drop the four materialized tables and fold every stored run back in, in one pass. Used
+        """Drop every materialized table and fold every stored run back in, in one pass. Used
         when a run already folded in is overwritten (``upsert_run``) -- an increment cannot undo
         history. No commit here; the caller owns the transaction."""
         self._clear_materialized()
@@ -822,11 +944,11 @@ class Store:
             self._materialize(runs)
 
     def _materialize(self, fresh: Sequence[RunResult]) -> None:
-        """Fold a batch of *new* runs into the four materialized tables. Pure arithmetic lives in
+        """Fold a batch of *new* runs into the materialized tables. Pure arithmetic lives in
         ``atworks_agent.materialize.rollup_delta``; this method only reads the rows the batch
         touches, merges, and writes them back inside the caller's transaction."""
         prev_state = self._current_state_for(sorted({r.api_id for r in fresh}))
-        rollups, cells, marks, operators = rollup_delta(fresh, prev_state)
+        rollups, cells, marks, operators, operator_days = rollup_delta(fresh, prev_state)
 
         self._conn.executemany(
             "INSERT OR REPLACE INTO current_state "
@@ -933,6 +1055,17 @@ class Store:
                 (delta.operator_id, delta.api_id, last,
                  (row["run_count"] if row is not None else 0) + delta.run_count),
             )
+
+        # (day, operator) counters -- pure addition, so ON CONFLICT does the merge in one
+        # statement (no read-modify-write): nothing here is a level or a set.
+        self._conn.executemany(
+            'INSERT INTO rollup_operator_day (day, operator_id, "count", "pass", fail, error) '
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(day, operator_id) DO UPDATE SET "
+            '"count" = "count" + excluded."count", "pass" = "pass" + excluded."pass", '
+            "fail = fail + excluded.fail, error = error + excluded.error",
+            [(d.day, d.operator_id, d.count, d.passed, d.fail, d.error) for d in operator_days],
+        )
 
     def _refresh_api_updated_at(self, api_ids: Sequence[str] | None = None) -> None:
         """Copy ``apis.updated_at`` onto ``api_watermark.api_updated_at`` for the given APIs (all
@@ -1745,6 +1878,141 @@ class Store:
                 cell = cells.get(group.key)
                 if cell is not None:
                     group.latest_status = cell.status
+
+    # -- the self-growth query engine (spec 2026-09-07 §3/§4) ------------------------------------
+
+    def query(self, spec: QuerySpec, *, now: datetime, tz: str = "Asia/Seoul",
+              default_window_days: int = 30) -> QueryResult:
+        """Execute one ``QuerySpec``. Compilation (and with it source selection, the window rule
+        and every measure's arithmetic) lives in ``query_sql``; this method owns only the round
+        trips: the ranked page, the totals, the two fills a source cannot answer in SQL, the
+        evidence samples, and the previous-window join.
+
+        Python sees at most ``spec.limit`` rows -- the rank and the cut are in the statement, the
+        scale branch's standing rule."""
+        compiled = compile_query(spec, now=now, tz=tz, default_days=default_window_days)
+        rows, raw_keys = self._query_rows(spec, compiled)
+        total_groups, population = self._conn.execute(
+            compiled.totals_sql, compiled.totals_params).fetchone()
+        if compiled.p95_sql:
+            self._fill_query_p95(rows, raw_keys, compiled)
+        if compiled.apis_from_key_rows:
+            self._fill_query_key_apis(rows, raw_keys, spec, compiled)
+        if spec.include_samples:
+            self._fill_query_samples(rows, raw_keys, spec, compiled, tz)
+        if spec.compare_previous_window:
+            previous = compile_query(spec, now=now, tz=tz, previous=True,
+                                     default_days=default_window_days)
+            self._join_previous_window(rows, raw_keys, spec, previous)
+        return QueryResult(
+            spec=spec, rows=rows, total_groups=total_groups, population=population,
+            window=day_bounds(compiled.day_from, compiled.day_to, tz), source=compiled.source,
+        )
+
+    def _query_rows(self, spec: QuerySpec, compiled: CompiledQuery) -> tuple[list[QueryRow], list[tuple]]:
+        """The page, plus the RAW key tuple of each row. The raw tuple is what every follow-up
+        statement matches on: ``QueryRow.keys`` has already mapped the ``''`` label sentinel back
+        to ``None``, and a fill that matched on the mapped value would silently miss that row."""
+        rows: list[QueryRow] = []
+        raw_keys: list[tuple] = []
+        for row in self._conn.execute(compiled.sql, compiled.params).fetchall():
+            raw = tuple(row[f"k{i}"] for i in range(len(spec.dimensions)))
+            raw_keys.append(raw)
+            keys = {
+                dim: (_label_out(value) if dim == "test_data_label" else value)
+                for dim, value in zip(spec.dimensions, raw, strict=True)
+            }
+            rows.append(QueryRow(keys=keys, measures={
+                name: _measure_out(name, row[f"m_{name}"]) for name in spec.measures}))
+        return rows, raw_keys
+
+    def _fill_query_p95(self, rows: list[QueryRow], raw_keys: list[tuple],
+                        compiled: CompiledQuery) -> None:
+        """The ``runs`` source's exact p95 (``query_sql._runs_p95``), matched onto the returned
+        rows. One extra statement, never one per row."""
+        levels = {
+            tuple(row[i] for i in range(len(compiled.group_columns))): row[-1]
+            for row in self._tuples(compiled.p95_sql, compiled.p95_params)
+        }
+        for row, key in zip(rows, raw_keys, strict=True):
+            row.measures["p95_duration_ms"] = levels.get(key)
+
+    def _fill_query_key_apis(self, rows: list[QueryRow], raw_keys: list[tuple], spec: QuerySpec,
+                             compiled: CompiledQuery) -> None:
+        """``apis`` on the ``rollup_key_day`` arm: the union of the returned keys' stored
+        ``api_ids`` across the window's days -- the TRUE distinct count, exactly as
+        ``_fill_key_api_count`` computes it for ``aggregate_runs``. A stored per-day COUNT would
+        be cheaper and wrong: the same API appears on many days of a window."""
+        if not rows:
+            return
+        axis = next(d for d in spec.dimensions if d in _QUERY_KEY_AXES)
+        placeholders = ",".join("?" for _ in rows)
+        unions: dict[str, set[str]] = {key[0]: set() for key in raw_keys}
+        for key, api_ids in self._tuples(
+            f'SELECT "key", api_ids FROM rollup_key_day WHERE axis = ? AND day >= ? AND day <= ? '
+            f'AND "key" IN ({placeholders})',
+            [axis, compiled.day_from, compiled.day_to, *(k[0] for k in raw_keys)],
+        ):
+            if api_ids:
+                unions[key].update(json.loads(api_ids))
+        for row, key in zip(rows, raw_keys, strict=True):
+            row.measures["apis"] = len(unions[key[0]])
+
+    def _fill_query_samples(self, rows: list[QueryRow], raw_keys: list[tuple], spec: QuerySpec,
+                           compiled: CompiledQuery, tz: str) -> None:
+        """Evidence for each returned row: up to 20 api ids and the 5 newest run ids, from
+        ``runs`` under the spec's own filters plus the row's key -- two indexed statements per
+        row, never a scan per row and never more than ``2 * limit`` statements per query.
+
+        These ids are what the executor remembers in ``seen_apis``/``seen_runs``, so the card's
+        provenance discipline (an id the session has seen) holds for a query result exactly as it
+        does for a digest."""
+        base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, tz)
+        for row, raw in zip(rows, raw_keys, strict=True):
+            clauses, params = list(base), list(base_params)
+            for dimension, value in zip(spec.dimensions, raw, strict=True):
+                clauses += row_key_predicates(dimension, value, params)
+            where_sql = " AND ".join(clauses)
+            row.api_ids = [r[0] for r in self._tuples(
+                f"SELECT DISTINCT api_id FROM runs WHERE {where_sql} ORDER BY api_id LIMIT ?",
+                [*params, API_SAMPLE_CAP])]
+            row.run_ids = [r[0] for r in self._tuples(
+                f"SELECT run_id FROM runs WHERE {where_sql} "
+                "ORDER BY executed_at DESC, run_id DESC LIMIT ?",
+                [*params, RUN_SAMPLE_CAP])]
+
+    def _join_previous_window(self, rows: list[QueryRow], raw_keys: list[tuple], spec: QuerySpec,
+                              previous: CompiledQuery) -> None:
+        """``compare_previous_window``: the same compiled query over the window immediately
+        before, joined on the group key. A key the previous window did not return counts as 0
+        (``None`` for the two measures that are levels rather than counters, where 0 would be a
+        claim about a duration nobody measured).
+
+        The previous query carries the SAME ``LIMIT``, so a key that exists in both windows but
+        ranked below the cut in the earlier one reads ``_prev = 0``. That is the brief's bound --
+        two bounded statements per query, never an unbounded second pass -- and it is why the
+        card labels the column as a comparison of the two TOP lists, not of two populations."""
+        before: dict[tuple, dict[str, float | int | None]] = {}
+        for row in self._conn.execute(previous.sql, previous.params).fetchall():
+            key = tuple(row[f"k{i}"] for i in range(len(spec.dimensions)))
+            before[key] = {name: _measure_out(name, row[f"m_{name}"]) for name in spec.measures}
+        for row, key in zip(rows, raw_keys, strict=True):
+            other = before.get(key, {})
+            for name in spec.measures:
+                current = row.measures.get(name)
+                prior = other.get(name)
+                if name in ("p95_duration_ms", "transitions") and prior is None:
+                    row.measures[f"{name}_prev"] = None
+                    row.measures[f"{name}_delta"] = None
+                    continue
+                prior = 0 if prior is None else prior
+                row.measures[f"{name}_prev"] = prior
+                if current is None:
+                    row.measures[f"{name}_delta"] = None
+                elif name == "fail_rate":
+                    row.measures[f"{name}_delta"] = round(current - prior, 4)
+                else:
+                    row.measures[f"{name}_delta"] = current - prior
 
     def summarize_insights(
         self, since: datetime, until: datetime | None = None, *, flaky_min: int,

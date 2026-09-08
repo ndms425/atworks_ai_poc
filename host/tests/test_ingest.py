@@ -112,7 +112,7 @@ def _snapshot(store: Store) -> dict:
 
     return {t: rows(t) for t in
             ("runs", "bodies", "current_state", "rollup_day", "rollup_key_day",
-             "api_watermark", "operator_api")}
+             "api_watermark", "operator_api", "rollup_operator_day")}
 
 
 # -- transactional safety (final review C1) ------------------------------------------------------
@@ -286,6 +286,25 @@ def test_incremental_ingest_matches_the_recompute_oracles():
             # api_ids is what api_count is derived from: the TRUE distinct set behind the key
             assert api_ids == {r.api_id for r in runs
                                if key in _group_keys(r, group_by)}, key
+
+    # rollup_operator_day (self-growth spec §11) == a per-(day, operator) recompute over the same
+    # runs. Unattributed runs contribute to NOTHING here, which is why the table's total is the
+    # count of attributed runs rather than len(runs) -- the same rule `operator_api` follows.
+    expected_days: dict[tuple[str, str], list[int]] = {}
+    for run in runs:
+        if not run.executed_by:
+            continue
+        day = run.executed_at.astimezone(KST).date().isoformat()
+        acc = expected_days.setdefault((day, run.executed_by), [0, 0, 0, 0])
+        acc[0] += 1
+        acc[1 if run.status is RunStatus.PASS else 2 if run.status is RunStatus.FAIL else 3] += 1
+    stored_days = {
+        (r["day"], r["operator_id"]): [r["count"], r["pass"], r["fail"], r["error"]]
+        for r in store.conn().execute("SELECT * FROM rollup_operator_day").fetchall()
+    }
+    assert stored_days == expected_days
+    assert sum(v[0] for v in stored_days.values()) == sum(1 for r in runs if r.executed_by)
+    assert sum(v[0] for v in stored_days.values()) < len(runs)      # the test means something
 
     # -- idempotency: every batch again, in a different order, changes nothing -------------------
     before = _snapshot(store)

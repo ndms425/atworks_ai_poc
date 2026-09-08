@@ -5,7 +5,9 @@
   transitions/p95/failed_rule_counts,
 * ``current_state`` 새 행 — 셀별 최신 run + 누적 전환 수,
 * ``api_watermark`` 갱신분 — API별 last_pass / first_non_pass / last_non_pass / latest_status,
-* ``operator_api`` 증분 — (operator, api) 별 마지막 실행 시각과 건수.
+* ``operator_api`` 증분 — (operator, api) 별 마지막 실행 시각과 건수,
+* ``rollup_operator_day`` 증분 — (day, operator) 별 count/pass/fail/error (self-growth spec
+  2026-09-07 §11): "실행자별"이 run 스캔 없이 답해지는 유일한 이유다.
 
 이 모듈에는 SQL도, I/O도, 시계도 없다. 저장소(``host/atworks_host/store.py``)는 트랜잭션과
 병합만 맡고, "무엇이 얼마나 늘어나는가"는 전부 여기서 결정된다 — 그래서 이 계산은 aggregation.py
@@ -188,6 +190,23 @@ class OperatorApiDelta(BaseModel):
     run_count: int = 0
 
 
+class OperatorDayDelta(BaseModel):
+    """``rollup_operator_day`` 한 행의 증분 — (day, operator) 하나의 건수와 판정 분해.
+
+    ``OperatorApiDelta``와 같은 순회에서 나오지만 다른 질문에 답한다: 저쪽은 "이 사람이 만진 API
+    집합"(스코프), 이쪽은 "이 사람이 그 날 돌린 run이 몇 건이고 어떻게 끝났는가"(측정). 스코프
+    테이블을 합쳐서 후자를 낼 수는 없다 — ``operator_api``의 ``run_count``에는 날짜가 없다.
+
+    ``executed_by``가 없는 run은 아무것도 만들지 않는다(``OperatorApiDelta``와 같은 규칙): 주인
+    없는 run은 어떤 실행자 행에도 더해지지 않으므로, 실행자별 합계는 전체 합계보다 작을 수 있다."""
+    day: str
+    operator_id: str
+    count: int = 0
+    passed: int = 0
+    fail: int = 0
+    error: int = 0
+
+
 def cell_key(run: RunResult) -> CellKey:
     return (run.api_id, run.target_env, run.test_data_label)
 
@@ -204,11 +223,13 @@ def _is_pass(run: RunResult) -> bool:
 
 def rollup_delta(
     runs: Sequence[RunResult], prev_state: Mapping[CellKey, CellState]
-) -> tuple[list[RollupRow], list[CellState], list[ApiWatermark], list[OperatorApiDelta]]:
-    """순수 함수. 배치 하나에서 나오는 네 갈래 증분을 돌려준다(모듈 독스트링의 계약 그대로).
+) -> tuple[list[RollupRow], list[CellState], list[ApiWatermark], list[OperatorApiDelta],
+           list[OperatorDayDelta]]:
+    """순수 함수. 배치 하나에서 나오는 다섯 갈래 증분을 돌려준다(모듈 독스트링의 계약 그대로).
 
     네 번째 원소(``OperatorApiDelta``)는 브리프의 3-튜플 시그니처에 컨트롤러 룰링으로 덧붙인
-    것이다 — 같은 순회에서 공짜로 나오는 값을 굳이 두 번 돌 이유가 없다."""
+    것이다 — 같은 순회에서 공짜로 나오는 값을 굳이 두 번 돌 이유가 없다. 다섯 번째
+    (``OperatorDayDelta``, self-growth spec 2026-09-07 §11)도 같은 이유로 같은 순회에 있다."""
     ordered = sorted(runs, key=lambda r: (r.executed_at, r.run_id))
 
     rollups: dict[tuple[str, CellKey], RollupRow] = {}
@@ -218,6 +239,7 @@ def rollup_delta(
     last_pass_flag: dict[CellKey, bool] = {}
     watermarks: dict[str, dict] = {}
     operators: dict[tuple[str, str], OperatorApiDelta] = {}
+    operator_days: dict[tuple[str, str], OperatorDayDelta] = {}
 
     for run in ordered:
         key = cell_key(run)
@@ -286,6 +308,19 @@ def rollup_delta(
                 delta.run_count += 1
                 delta.last_executed_at = max(delta.last_executed_at, run.executed_at)
 
+            day_key = (day, run.executed_by)
+            op_day = operator_days.get(day_key)
+            if op_day is None:
+                op_day = OperatorDayDelta(day=day, operator_id=run.executed_by)
+                operator_days[day_key] = op_day
+            op_day.count += 1
+            if run.status is RunStatus.PASS:
+                op_day.passed += 1
+            elif run.status is RunStatus.FAIL:
+                op_day.fail += 1
+            else:
+                op_day.error += 1
+
     for (day, key), values in durations.items():
         rollups[(day, key)].p95_duration_ms = _p95(values)
 
@@ -311,7 +346,8 @@ def rollup_delta(
         )
         for api_id, v in watermarks.items()
     ]
-    return list(rollups.values()), cells, marks, list(operators.values())
+    return (list(rollups.values()), cells, marks, list(operators.values()),
+            list(operator_days.values()))
 
 
 def merge_watermark(existing: ApiWatermark | None, batch: ApiWatermark) -> ApiWatermark:

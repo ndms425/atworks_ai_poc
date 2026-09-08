@@ -69,7 +69,7 @@ def fold(runs: list[RunResult], seed: int):
         start += size
         batches += 1
         touched = {c: state[c] for c in {cell_key(r) for r in batch} if c in state}
-        rows, cells, watermarks, ops = rollup_delta(batch, touched)
+        rows, cells, watermarks, ops, op_days = rollup_delta(batch, touched)
         for row in rows:
             key = (row.day, *row.cell)
             existing = rollups.get(key)
@@ -196,17 +196,17 @@ def test_transitions_are_seeded_by_the_previous_state_not_by_the_batch_edge():
     second = RunResult(run_id="r2", api_id="api-001", executed_at=BASE + timedelta(hours=1),
                        target_env="dev", status=RunStatus.FAIL, day="2026-08-20")
 
-    rows, cells, _marks, _ops = rollup_delta([first], {})
+    rows, cells, _marks, _ops, _od = rollup_delta([first], {})
     assert rows[0].transitions == 0 and cells[0].transitions_total == 0   # a cell's first run never flips
 
-    rows2, cells2, _m, _o = rollup_delta([second], {cell: cells[0]})
+    rows2, cells2, _m, _o, _od2 = rollup_delta([second], {cell: cells[0]})
     assert rows2[0].transitions == 1                       # pass -> fail across the batch boundary
     assert cells2[0].transitions_total == 1                # and it accumulates onto the prior total
 
     # non-pass -> non-pass is not a transition (fail and error are the same side of the line)
     third = second.model_copy(update={"run_id": "r3", "status": RunStatus.ERROR,
                                       "executed_at": BASE + timedelta(hours=2)})
-    rows3, cells3, _m, _o = rollup_delta([third], {cell: cells2[0]})
+    rows3, cells3, _m, _o, _od3 = rollup_delta([third], {cell: cells2[0]})
     assert rows3[0].transitions == 0 and cells3[0].transitions_total == 1
 
 
@@ -221,7 +221,7 @@ def test_failed_rule_counts_mirror_the_failed_rule_grouping():
         RunResult(run_id="r4", api_id="api-001", executed_at=BASE + timedelta(minutes=3),
                   target_env="dev", status=RunStatus.PASS, day="2026-08-20"),
     ]
-    rows, _cells, _marks, _ops = rollup_delta(runs, {})
+    rows, _cells, _marks, _ops, _od4 = rollup_delta(runs, {})
     assert len(rows) == 1
     # a rule named twice in one run counts once (the same dedup aggregate() does), a pass run
     # contributes nothing, and a rule-less non-pass falls back to the synthetic HTTP bucket
@@ -245,7 +245,7 @@ def test_p95_and_operator_deltas_come_from_the_batch_only():
                   executed_by=None if i == 0 else "minseong", day="2026-08-20")
         for i in range(1, 21)
     ]
-    rows, _cells, _marks, ops = rollup_delta(runs, {})
+    rows, _cells, _marks, ops, _od5 = rollup_delta(runs, {})
     assert rows[0].p95_duration_ms == 190          # ceil(0.95 * 20) = 19th of 20 -> 190ms
     assert [(o.operator_id, o.run_count) for o in ops] == [("minseong", 20)]
 
@@ -253,8 +253,36 @@ def test_p95_and_operator_deltas_come_from_the_batch_only():
 def test_unattributed_runs_produce_no_operator_rows():
     runs = [RunResult(run_id="r1", api_id="api-001", executed_at=BASE, target_env="dev",
                       status=RunStatus.PASS, executed_by=None, day="2026-08-20")]
-    _rows, _cells, _marks, ops = rollup_delta(runs, {})
+    _rows, _cells, _marks, ops, op_days = rollup_delta(runs, {})
     assert ops == []
+    assert op_days == []          # ...and no (day, operator) row either -- same rule
+
+
+def test_operator_day_deltas_split_the_batch_by_day_and_operator():
+    """``rollup_operator_day``'s increment (self-growth spec §11): one row per (day, operator),
+    with the verdict split, and nothing at all for an unattributed run. It is a DIFFERENT question
+    from ``operator_api`` -- that one has no day in it, so no sum over it can answer "how many did
+    I run yesterday"."""
+    runs = [
+        RunResult(run_id="r1", api_id="api-001", executed_at=BASE, target_env="dev",
+                  status=RunStatus.PASS, executed_by="minseong", day="2026-08-20"),
+        RunResult(run_id="r2", api_id="api-002", executed_at=BASE + timedelta(minutes=1),
+                  target_env="dev", status=RunStatus.FAIL, executed_by="minseong", day="2026-08-20"),
+        RunResult(run_id="r3", api_id="api-001", executed_at=BASE + timedelta(days=1),
+                  target_env="dev", status=RunStatus.ERROR, executed_by="minseong", day="2026-08-21"),
+        RunResult(run_id="r4", api_id="api-001", executed_at=BASE + timedelta(minutes=2),
+                  target_env="dev", status=RunStatus.PASS, executed_by="jiwon", day="2026-08-20"),
+        RunResult(run_id="r5", api_id="api-001", executed_at=BASE + timedelta(minutes=3),
+                  target_env="dev", status=RunStatus.FAIL, executed_by=None, day="2026-08-20"),
+    ]
+    _rows, _cells, _marks, _ops, op_days = rollup_delta(runs, {})
+    got = {(d.day, d.operator_id): (d.count, d.passed, d.fail, d.error) for d in op_days}
+    assert got == {
+        ("2026-08-20", "minseong"): (2, 1, 1, 0),
+        ("2026-08-21", "minseong"): (1, 0, 0, 1),
+        ("2026-08-20", "jiwon"): (1, 1, 0, 0),
+    }
+    assert sum(d.count for d in op_days) == 4      # the unattributed run belongs to nobody
 
 
 def test_merge_watermark_keeps_the_extremes_and_the_later_status():
