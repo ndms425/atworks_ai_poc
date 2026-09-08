@@ -193,3 +193,37 @@ def test_build_atworks_insight_narration_env_switch(monkeypatch, tmp_path):
     monkeypatch.setenv("ATWORKS_INSIGHT_NARRATION", "1")
     main.build()
     assert captured_configs[-1].enable_insight_narration is True
+
+
+def test_build_gates_the_promoter_on_enable_growth(monkeypatch, tmp_path):
+    """Growth 뷰가 꺼진 배포에는 저장 질문을 볼 라우트가 없다 — 그런데도 승격기를 달아 두면 아무도
+    열어 볼 수 없는 카드를 하루 한 번 만들어 쌓는다(T7 리뷰 minor)."""
+    monkeypatch.setattr("atworks_host.main.ROOT", tmp_path)
+    (tmp_path / ".env").write_text("")
+    monkeypatch.setenv("ATWORKS_TRUST_OS_CA", "0")
+
+    captured = []
+
+    import atworks_host.main as main
+
+    monkeypatch.setattr("atworks_host.main.AtworksAgent", lambda **kwargs: type('MockAgent', (), {'client': None})())
+    monkeypatch.setattr("atworks_host.main.MockAtworks", lambda *args, **kwargs: type('MockBackend', (), {})())
+    monkeypatch.setattr("atworks_host.main.create_app", lambda **kwargs: type('FastAPI', (), {})())
+    monkeypatch.setattr(
+        "atworks_host.main.Scheduler",
+        lambda *args, **kwargs: captured.append(kwargs.get("promoter")) or type('Scheduler', (), {})(),
+    )
+
+    main.build()
+    assert captured[-1] is not None            # 기본값: enable_growth=True
+
+    monkeypatch.setattr("atworks_host.main.AtworksAgentConfig",
+                        lambda **kwargs: _config_with_growth_off(kwargs))
+    main.build()
+    assert captured[-1] is None
+
+
+def _config_with_growth_off(kwargs):
+    from atworks_agent import AtworksAgentConfig
+
+    return AtworksAgentConfig(**{**kwargs, "enable_growth": False})

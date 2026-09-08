@@ -216,6 +216,11 @@ async def enrich_query_table(payload: PresentQueryTablePayload, context: Enrichm
         "compare": compare,
         "compare_note": COMPARE_NOTE if compare else None,
         "turn_id": result.turn_id or context.state.current_turn_id,
+        # 👍/👎의 자리(자가발전 §9). 카드가 방금 그려질 때는 언제나 비어 있다 — 표는 이 턴이 끝난
+        # 뒤 사람이 누르는 것이고, 웹은 누른 뒤의 상태를 스스로 들고 있다. 슬롯을 payload에 두는
+        # 이유는 하나: 표가 페이로드의 일부라는 것을 스키마가 말해야, 나중에 저장된 카드를 다시
+        # 그리는 화면이 이 키를 발명하지 않는다.
+        "feedback": None,
         # The confirmation the card asks for (self-growth §7): THIS turn's newest propose_alias,
         # or nothing. Per-turn scratch, so a card rendered in a later turn never re-asks a
         # question already answered — and a pending alias never travels outside the session that

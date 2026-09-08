@@ -5,7 +5,7 @@
 
 import { useState } from "react";
 import { AskButton, formatDate, GenCard, GenCardHeader, Pill } from "web-shared";
-import { actOnVocabulary } from "@/lib/api";
+import { actOnVocabulary, sendFeedback } from "@/lib/api";
 import { QUERY_SOURCE_LABEL } from "@/lib/kinds";
 import type { AttachedItem, QueryTableColumn, QueryTablePayload, QueryTableRow } from "@/lib/types";
 
@@ -66,6 +66,37 @@ function PendingAliasRow({ alias }: { alias: { term: string; fragment_summary: s
         <AskButton label="아니오" onClick={() => void act("reject")} />
       </span>
       {state === "failed" ? <span className="ml-1.5 text-(--danger)">저장하지 못했습니다.</span> : null}
+    </p>
+  );
+}
+
+/**
+ * 👍/👎 한 줄 (spec §9). 표는 이 답 하나에 대한 평가지 승인이 아니다 — 감사 로그도, 승인 마크도,
+ * 원장도 움직이지 않는다. 서버 쪽에서 👍는 답한 턴을 회귀 eval 케이스로 만들고, 👎는 그 턴이
+ * 실제로 썼던 어휘에 거부를 센다. 마음이 바뀌면 다시 누를 수 있고, 마지막 표만 남는다.
+ */
+function FeedbackRow({ turnId, initial }: { turnId: string; initial?: "up" | "down" | null }) {
+  const [vote, setVote] = useState<"up" | "down" | null>(initial ?? null);
+  const [failed, setFailed] = useState(false);
+  const cast = async (next: "up" | "down") => {
+    setFailed(false);
+    // 낙관적으로 먼저 칠한다 — 실패하면 되돌리고 한 줄로 말한다.
+    const previous = vote;
+    setVote(next);
+    const data = await sendFeedback(turnId, next);
+    if (!data?.ok) {
+      setVote(previous);
+      setFailed(true);
+    }
+  };
+  return (
+    <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">
+      이 답이 도움이 됐나요?
+      <span className="ml-1.5 inline-flex gap-1.5">
+        <AskButton label={vote === "up" ? "👍 도움됨" : "👍"} onClick={() => void cast("up")} />
+        <AskButton label={vote === "down" ? "👎 아쉬움" : "👎"} onClick={() => void cast("down")} />
+      </span>
+      {failed ? <span className="ml-1.5 text-(--danger)">저장하지 못했습니다.</span> : null}
     </p>
   );
 }
@@ -150,8 +181,10 @@ export default function QueryTableCard({
       ) : null}
       {payload.note ? <p className="px-3.5 pb-2 text-[12px] text-(--ink-soft)">{payload.note}</p> : null}
       {/* 어휘 확인 (spec §7). 확정은 오직 이 클릭에서 일어난다 — 채팅에 "그래"라고 써도 아무것도
-          저장되지 않는다. T8이 이 아래에 👍/👎를 붙인다. */}
+          저장되지 않는다. 바로 아래가 이 답에 대한 표(spec §9)로, 서로 다른 것을 묻는다:
+          위는 "이 용어를 이렇게 읽는 게 맞나", 아래는 "이 답이 도움이 됐나". */}
       {payload.pending_alias ? <PendingAliasRow alias={payload.pending_alias} /> : null}
+      {payload.turn_id ? <FeedbackRow turnId={payload.turn_id} initial={payload.feedback} /> : null}
       <div className="px-3.5 pb-3 text-[12px] text-(--ink-soft)">
         <p>
           {payload.spec_summary}

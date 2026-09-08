@@ -321,6 +321,11 @@ CREATE TABLE IF NOT EXISTS ask_log (
     tool_calls INTEGER NOT NULL DEFAULT 0,
     cards INTEGER NOT NULL DEFAULT 0,
     feedback TEXT,
+    -- The confirmed vocabulary terms this turn's context actually carried (spec §7 step 3),
+    -- as a JSON array. Stored ON THE ROW because a 👎 (spec §9) arrives long after the turn
+    -- ended: session scratch already belongs to a later turn, and re-matching the message
+    -- would answer with today's confirmed set, not the one the answer was built on.
+    vocabulary_terms JSON,
     cluster_key TEXT NOT NULL,
     turn_id TEXT NOT NULL UNIQUE
 );
@@ -732,7 +737,8 @@ class Store:
                                     ("rollup_key_day", "p95_duration_ms", "INTEGER"),
                                     ("apis", "path_segment_1", "TEXT"),
                                     ("apis", "path_segment_2", "TEXT"),
-                                    ("apis", "path_prefix_2", "TEXT")):
+                                    ("apis", "path_prefix_2", "TEXT"),
+                                    ("ask_log", "vocabulary_terms", "JSON")):
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
@@ -2456,6 +2462,8 @@ class Store:
             intent=row["intent"], spec=QuerySpec.model_validate_json(spec_json) if spec_json else None,
             outcome=row["outcome"], unmet_reason=row["unmet_reason"], wanted=row["wanted"],
             tool_calls=row["tool_calls"], cards=row["cards"], feedback=row["feedback"],
+            # NULL on a row written before the column existed -- an empty list, never a guess.
+            vocabulary_terms=json.loads(row["vocabulary_terms"] or "[]"),
             cluster_key=row["cluster_key"], turn_id=row["turn_id"],
         )
 
@@ -2467,11 +2475,12 @@ class Store:
         deterministic classifier, and re-writing it would let a retry silently change history."""
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO ask_log (at, session_id, operator, role, question, intent, spec_json, "
-            "outcome, unmet_reason, wanted, tool_calls, cards, feedback, cluster_key, turn_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "outcome, unmet_reason, wanted, tool_calls, cards, feedback, vocabulary_terms, cluster_key, turn_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (_iso(entry.at), entry.session_id, entry.operator, entry.role, entry.question, entry.intent,
              entry.spec.model_dump_json() if entry.spec is not None else None, entry.outcome,
              entry.unmet_reason, entry.wanted, entry.tool_calls, entry.cards, entry.feedback,
+             json.dumps(entry.vocabulary_terms, ensure_ascii=False),
              entry.cluster_key, entry.turn_id),
         )
         self._conn.commit()
@@ -2554,6 +2563,12 @@ class Store:
                 "wanted": newest["wanted"] if newest is not None else None,
             })
         return clusters
+
+    def ask_by_turn(self, turn_id: str) -> AskEntry | None:
+        """한 턴의 행. 투표 라우트가 404를 가르고(없는 turn_id), 👍일 때 eval 케이스를 쓸 재료를
+        얻는 유일한 읽기다 -- `list_asks` 페이지를 훑어 찾는 대신 UNIQUE 인덱스를 그대로 친다."""
+        row = self._conn.execute("SELECT * FROM ask_log WHERE turn_id = ?", (turn_id,)).fetchone()
+        return self._row_to_ask(row) if row is not None else None
 
     def set_feedback(self, turn_id: str, vote: str | None) -> bool:
         """👍/👎 on a card's footer (spec §9). Re-voting the same turn OVERWRITES; ``None`` clears

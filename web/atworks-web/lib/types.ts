@@ -293,8 +293,11 @@ export interface QueryTablePayload {
   spec_summary: string;
   compare: boolean;
   compare_note?: string | null;
-  /** T4가 채운다. T8의 👍/👎가 이 값으로 ask_log 행을 찾는다. */
+  /** T4가 채운다. 👍/👎가 이 값으로 ask_log 행을 찾는다 — 없으면 카드에 투표 줄이 없다. */
   turn_id?: string | null;
+  /** 서버가 카드를 그릴 때는 언제나 null이다(표는 턴이 끝난 뒤에 눌린다). 슬롯이 스키마에 있는
+   *  이유는 하나: 나중에 저장된 카드를 다시 그리는 화면이 이 키를 발명하지 않게 하려고. */
+  feedback?: "up" | "down" | null;
   /** 이번 턴 propose_alias가 낸 제안. 카드 푸터가 [예]/[아니오]를 묻는다(spec §7). */
   pending_alias?: { term: string; fragment_summary: string } | null;
 }

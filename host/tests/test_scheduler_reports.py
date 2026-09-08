@@ -259,6 +259,10 @@ class RecordingBackend(AtworksBackend):
     async def list_asks(self, session, outcome=None, cursor=None, limit=50):
         return Page[AskEntry](items=list(self.asks), next_cursor=None, total=len(self.asks))
 
+    async def set_feedback(self, session, turn_id, vote):
+        # 스케줄러 경로에는 카드도, 사람도, 표도 없다 -- 불리면 테스트가 그걸 본다.
+        raise NotImplementedError
+
     async def growth_summary(self, session, since):
         return GrowthSummary(asks_total=len(self.asks))
 

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -179,10 +180,15 @@ def classify_turn(
     session: Any,
     turn_id: str,
     now: datetime,
+    vocabulary_terms: Sequence[str] = (),
 ) -> AskEntry:
     """한 턴 → ``ask_log`` 한 행. 호출자는 그 턴의 도구 이름 목록, 카드 수, ``note_unmet_ask``가
     남긴 삼중항, (있다면) 이 턴이 실행한 ``QuerySpec``만 넘긴다. 숫자도 판정도 전부 여기서
-    결정론으로 나온다."""
+    결정론으로 나온다.
+
+    ``vocabulary_terms``는 호스트가 이 턴의 컨텍스트에 실제로 실은 확정 용어들이다(§7 단계 3).
+    행에 같이 남는 이유는 하나뿐이다: 👎(§9)는 턴이 끝나고 한참 뒤에 오고, 그때 "이 답에 어떤
+    용어가 관여했나"를 답할 수 있는 곳이 이 행 말고 없다."""
     masked = mask_question(question, policy)
     outcome = decide_outcome(tool_names=tool_names, cards=cards, unmet=unmet)
     intent = decide_intent(tool_names=tool_names, unmet=unmet, spec=spec)
@@ -202,6 +208,7 @@ def classify_turn(
         wanted=(unmet[2] or None) if unmet is not None else None,
         tool_calls=len(tool_names),
         cards=cards,
+        vocabulary_terms=list(vocabulary_terms),
         cluster_key=cluster_key,
         turn_id=turn_id,
     )

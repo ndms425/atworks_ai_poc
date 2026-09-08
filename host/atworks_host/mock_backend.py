@@ -543,6 +543,14 @@ class MockAtworks(AtworksBackend):
     async def list_asks(self, session, outcome=None, cursor=None, limit=50) -> Page[AskEntry]:
         return self.store.list_asks(outcome, cursor, limit)
 
+    async def set_feedback(self, session, turn_id: str, vote) -> AskEntry | None:
+        # 덮어쓰기 UPDATE 하나 + 갱신된 행 읽기 하나. 감사 로그는 건드리지 않는다 -- 표는 공유
+        # 상태의 변경이 아니다(§9). 없는 turn_id면 None이고, 404는 라우트가 낸다.
+        del session
+        if not self.store.set_feedback(turn_id, vote):
+            return None
+        return self.store.ask_by_turn(turn_id)
+
     async def growth_summary(self, session, since: datetime) -> GrowthSummary:
         # COUNTs and one GROUP BY, never a row list this method then counts.
         counts = self.store.ask_counts(since)

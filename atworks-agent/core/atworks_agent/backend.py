@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from .jobs import JobDraft
 from .profiles import ProfileDraft
@@ -485,6 +485,23 @@ class AtworksBackend(ABC):
         """질문 기록을 최신순으로 읽는다. REST 구현 의무: ``at`` DESC, ``seq`` DESC 순서,
         ``cursor``는 서버가 만든 불투명 문자열, ``Page.total``은 ``outcome`` 필터를 적용한 뒤의
         건수이고 ``limit``과 무관하다."""
+
+    @abstractmethod
+    async def set_feedback(
+        self, session: AtworksSessionContext, turn_id: str, vote: Literal["up", "down"] | None
+    ) -> AskEntry | None:
+        """카드 푸터의 👍/👎 한 번(자가발전 spec §9). 사람의 클릭만 닿는다 — 모델에게 열린 도구는
+        없다.
+
+        REST 구현 의무:
+        * **덮어쓴다.** 같은 턴을 다시 투표하면 마지막 표만 남는다 — 표가 쌓이면 한 사람이 한 턴을
+          여러 번 눌러 Growth 뷰의 비율을 움직일 수 있다.
+        * 없는 ``turn_id``면 ``None``이다(예외가 아니다). 라우트가 404로 옮긴다 — 아무 행도 받지
+          않은 표를 조용히 성공으로 돌려주면 화면은 저장됐다고 말하고 원장은 비어 있다.
+        * 돌려주는 것은 **갱신된 행 전체**다. 호출자는 이어서 ``outcome``/``spec``/
+          ``vocabulary_terms``를 읽어 eval 케이스를 쓰거나 어휘 거부를 세므로, 두 번째 읽기를
+          만들면 그 사이에 행이 바뀔 수 있다.
+        * 감사 로그에 남기지 않는다. 표는 공유 상태의 변경이 아니다(승인도, 원장도 아니다)."""
 
     @abstractmethod
     async def growth_summary(

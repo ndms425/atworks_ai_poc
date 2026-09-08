@@ -21,3 +21,8 @@ scripts/scale/out/
 *.sqlite-wal
 *.sqlite-shm
 scripts/smoke/shots/
+.venv-pw/
+# 👍가 만든 eval 케이스는 데이터다 (self-growth §9): 배포에서 생기고, 그 배포의 질문을 담는다.
+# CI가 재생할 손으로 쓴 시드 케이스만 커밋한다.
+evals/cases/*.json
+!evals/cases/seed-*.json

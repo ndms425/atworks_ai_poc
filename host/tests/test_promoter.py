@@ -113,6 +113,29 @@ async def test_an_even_split_still_promotes():
     assert (await Promoter(store, _config()).run(T0))["promoted"] == 1
 
 
+async def test_a_cluster_whose_stored_spec_the_catalogue_now_rejects_is_skipped_alone():
+    """카탈로그가 바뀌기 전에 저장된 스펙은 지금의 pydantic이 거부한다. 그 군집 하나만 `invalid`로
+    건너뛰고, 같은 실행의 다른 군집은 그대로 승격돼야 한다 — 하루치 승격 전체를 예외 하나로 날리면
+    카탈로그를 넓힌 날 아무 질문도 올라오지 않는다."""
+    store = Store(":memory:")
+    stale = _seed(store, users=3, asks=5)
+    other = QuerySpec(dimensions=["method"], measures=["runs"],
+                      filters=QueryFilters(window_days=7))
+    for i in range(5):
+        store.insert_ask(_ask(f"ok-{i}", operator=f"op-{i % 3}", spec=other))
+    # 저장된 JSON을 직접 낡게 만든다 — AskEntry로는 만들 수 없는 상태(그때는 유효했던 차원)다.
+    store._conn.executemany(
+        "UPDATE ask_log SET spec_json = ? WHERE turn_id = ?",
+        [('{"dimensions": ["retired_dimension"], "measures": ["non_pass"], "filters": {}}', t)
+         for t in stale])
+    store._conn.commit()
+
+    counts = await Promoter(store, _config()).run(T0)
+    assert counts["candidates"] == 2 and counts["invalid"] == 1 and counts["promoted"] == 1
+    survived = store.list_saved_questions().items
+    assert len(survived) == 1 and survived[0].spec.dimensions == ["method"]
+
+
 async def test_no_votes_is_not_a_bad_rating():
     store = Store(":memory:")
     _seed(store, users=3, asks=5)
@@ -337,6 +360,17 @@ async def test_hide_writes_the_audit_pair_and_no_approval_mark(client):
     actions = [r["action"] for r in rows if r["target_id"] == saved_id]
     assert actions == ["saved_question_hide:ok", "saved_question_hide"]
     assert all(r["target_kind"] == "saved_question" for r in rows if r["target_id"] == saved_id)
+
+
+async def test_hiding_an_unknown_question_is_a_404_recorded_as_blocked(client):
+    """404는 `growth_action`의 try 안에서 난다 — 밖에서 던지면 감사 로그에 `:ok`가 먼저 찍히고
+    아무 일도 일어나지 않은 클릭이 성공으로 남는다(어휘 라우트와 같은 자리, T7 리뷰 minor)."""
+    headers = {"X-Session-Id": await _sid(client)}
+    assert (await client.post("/api/atworks/saved-questions/sq-nope/hide",
+                              headers=headers)).status_code == 404
+    rows = (await client.get("/api/atworks/audit", headers=headers)).json()["items"]
+    actions = [r["action"] for r in rows if r["target_id"] == "sq-nope"]
+    assert set(actions) == {"saved_question_hide", "saved_question_hide:blocked"}
 
 
 async def test_running_a_saved_question_computes_it_live_and_bumps_uses(client):

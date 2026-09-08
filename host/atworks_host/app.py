@@ -9,6 +9,7 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal, TypeVar
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from atworks_agent import (
     AtworksSessionState,
     RunsQuery,
     RunStatusFilter,
+    SavedQuestion,
     ScreenState,
     VocabularyEntry,
     classify_turn,
@@ -45,6 +47,7 @@ from atworks_agent.vocabulary import match_terms
 from atworks_agent_runtime import AtworksAgent
 
 from .briefing import Briefings
+from .evals_writer import default_cases_dir, write_case
 from .insights import InsightPanels
 from .mock_backend import MockAtworks
 from .reports import Reports
@@ -150,9 +153,17 @@ class SessionStart(BaseModel):
     operator_id: str | None = None
 
 
+class FeedbackRequest(BaseModel):
+    """카드 푸터의 한 표(자가발전 §9). `vote`는 두 값뿐이라 오타는 422이고, `null`은 표를 지운다
+    — 잘못 누른 사람이 되돌릴 자리가 있어야 한다."""
+    turn_id: str = Field(min_length=1, max_length=64)
+    vote: Literal["up", "down"] | None = None
+
+
 def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Scheduler, reports: Reports,
                briefings: Briefings, insights: InsightPanels | None = None,
                sessions: SessionStore[AtworksSessionState] | None = None,
+               evals_cases_dir: Path | None = None,
                on_startup: Sequence[Callable[[], Awaitable[None]]] = ()) -> FastAPI:
     backend.reports = reports  # lets Mock's apply_profile re-diff the target job's stored report
     if reports.capture_disabled is None:
@@ -164,6 +175,9 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     # rebind this parameter for the rest of create_app. Alias it immediately so the panel
     # routes always see the InsightPanels instance, never the shadowing route function.
     insight_panels = insights
+    # 👍가 쓰는 회귀 케이스의 자리(spec §9). 기본은 `ATWORKS_EVALS_DIR` 또는 `<repo>/evals/cases`;
+    # 테스트는 tmp_path를 넘겨 리포지토리를 건드리지 않는다.
+    evals_cases_dir = evals_cases_dir if evals_cases_dir is not None else default_cases_dir()
     app = build_app("atworks-ai host", on_startup=on_startup)
     # TimestampedSessionStore, not the bare SessionStore: `sessions.py` is identical to the
     # reference host contract modulo line endings, so the idle-TTL stamp and sweep (spec §6) live
@@ -218,7 +232,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             raise HTTPException(status_code=404, detail="growth view disabled")
 
     async def record_ask(record: Record, turn_id: str, failure: BaseException | None,
-                         message: str) -> None:
+                         message: str, vocabulary_terms: Sequence[str] = ()) -> None:
         """The turn-end hook (self-growth spec §6): ONE ask_log row per chat turn, written from
         the per-turn counters the executor filled, classified by `asklog.classify_turn` — a pure
         function of what the turn actually called. The model never writes this row and never sees
@@ -226,7 +240,11 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
         A turn that raised still leaves its row (`failure` is logged, not raised): the questions
         that break a turn are exactly the ones the Growth view must show. The row is written even
-        when the model answered from prose alone — that is what `partial` means."""
+        when the model answered from prose alone — that is what `partial` means.
+
+        `vocabulary_terms` are the confirmed terms this turn's context actually carried: they go
+        ON the row because a 👎 arrives long after the turn ended (spec §9), and by then the
+        session's scratch belongs to a later turn."""
         del failure   # already logged by stream_turn; the row itself records what the turn did
         state = record.state
         spec = (state.last_query_result.spec
@@ -236,6 +254,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             question=message, tool_names=list(state.turn_tool_names), cards=state.turn_cards,
             unmet=state.turn_unmet, spec=spec, policy=policy_from_config(agent.config),
             session=context(record), turn_id=turn_id, now=datetime.now().astimezone(),
+            vocabulary_terms=vocabulary_terms,
         )
         await backend.record_ask(context(record), entry)
 
@@ -266,7 +285,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
         async def on_turn_end(rec: Record, tid: str, failure: BaseException | None) -> None:
             if agent.config.enable_growth:
-                await record_ask(rec, tid, failure, message)
+                await record_ask(rec, tid, failure, message,
+                                 [entry.term for entry in matched])
                 # 집계는 턴이 어떻게 끝났든(성공·예외·중단) 한 번. 어휘가 실제로 실린 턴만 센다.
                 if matched:
                     await backend.note_vocabulary_use(
@@ -298,6 +318,35 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         since = datetime.now(UTC) - timedelta(days=days)
         summary = await backend.growth_summary(context(record), since=since)
         return {**summary.model_dump(mode="json"), "window_days": days}
+
+    # -- 자가발전: 피드백 → eval 케이스 (spec §9) -------------------------------------------
+    @router.post("/feedback")
+    async def feedback(payload: FeedbackRequest, record: CurrentSession) -> dict:
+        """카드 푸터의 👍/👎. 같은 턴을 다시 투표하면 마지막 표만 남고, 없는 턴은 404다.
+
+        **감사 로그에 남기지 않는다.** 감사 2행은 "사람이 공유 상태를 바꿨다"의 증적이고, 표는
+        그런 변경이 아니다 -- 승인 마크도, 원장도, 다른 사람에게 보이는 무엇도 움직이지 않는다.
+        투표까지 감사에 실으면 그 로그는 "무엇이 승인됐나"를 더 이상 한눈에 보여주지 못한다.
+
+        표가 하는 일은 둘뿐이다. 👎면 이 턴의 컨텍스트에 실렸던 어휘가 ``rejections + 1``을 받고
+        (충분히 쌓이면 자동으로 pending으로 강등된다, §7 단계 4), 👍면 -- 그 턴이 실제로 답을
+        했고(``answered``) 실행한 스펙이 남아 있을 때만 -- 회귀 eval 케이스 한 장이 된다(§9).
+        답하지 못한 턴의 👍는 기록만 남는다: 고정할 행동이 없다."""
+        _require_growth()
+        entry = await backend.set_feedback(context(record), payload.turn_id, payload.vote)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown turn: {payload.turn_id!r}")
+        case_path: str | None = None
+        if payload.vote == "down" and entry.vocabulary_terms:
+            await backend.note_vocabulary_use(
+                context(record), list(entry.vocabulary_terms), rejected=True)
+        if payload.vote == "up" and entry.outcome == "answered" and entry.spec is not None:
+            try:
+                case_path = str(write_case(entry, cases_dir=evals_cases_dir))
+            except OSError:
+                # 케이스를 못 쓴 것이 투표를 실패로 만들지는 않는다 -- 표는 이미 원장에 있다.
+                logger.exception("could not write the eval case for turn %s", entry.turn_id)
+        return {"ok": True, "entry": ask_record(entry), "case_path": case_path}
 
     # -- 자가발전: 조직 공용 어휘 (spec §7/§10) --------------------------------------------
     async def growth_action(record: Record, *, action: str, target_kind: str, target_id: str,
@@ -402,13 +451,19 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         움직이지 않는다(저장 질문은 실행 계획이 아니다)."""
         _require_growth()
         status = "hidden" if action == "hide" else "active"
+
+        async def act() -> SavedQuestion:
+            question = await backend.set_saved_question_status(context(record), saved_id, status)
+            if question is None:
+                # 404는 여기, `growth_action`의 try 안이다 -- 밖에서 던지면 감사 로그가 아무 일도
+                # 없었던 클릭을 `:ok`로 기록한다(어휘 라우트와 같은 자리, 같은 이유).
+                raise HTTPException(status_code=404, detail=f"unknown saved question: {saved_id!r}")
+            return question
+
         question = await growth_action(
             record, action=f"saved_question_{action}", target_kind="saved_question",
-            target_id=saved_id,
-            fn=lambda: backend.set_saved_question_status(context(record), saved_id, status),
+            target_id=saved_id, fn=act,
         )
-        if question is None:
-            raise HTTPException(status_code=404, detail=f"unknown saved question: {saved_id!r}")
         record.pending_app_events.append(
             f"Operator {'hid' if action == 'hide' else 'restored'} the saved question "
             f"{question.title!r} on Home."

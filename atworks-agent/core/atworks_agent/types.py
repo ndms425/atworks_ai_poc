@@ -658,6 +658,10 @@ class AskEntry(BaseModel):
     tool_calls: int = 0
     cards: int = 0
     feedback: Literal["up", "down"] | None = None
+    #: 이 턴의 컨텍스트에 실제로 실린 확정 어휘 term들(자가발전 §7 단계 3). 👎가 왔을 때 "어떤
+    #: 용어 때문이었나"를 되짚는 유일한 근거다 -- 투표는 턴이 끝나고 한참 뒤에 오므로 세션 스크래치는
+    #: 이미 다음 턴의 것이고, 메시지를 다시 매칭하면 그 사이 확정/강등된 집합으로 다른 답이 나온다.
+    vocabulary_terms: list[str] = Field(default_factory=list)
     cluster_key: str
     turn_id: str
 

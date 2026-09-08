@@ -82,7 +82,9 @@ def build() -> tuple:
     # create_app, so the idle TTL really reaches the sessions this process serves.
     sessions = TimestampedSessionStore(AtworksSessionState)
     retention = Retention(store, config, insights_dir, sessions)
-    promoter = Promoter(store, config)
+    # Growth 뷰가 꺼진 배포에는 저장 질문을 볼 라우트가 없다 — 그런데도 승격기를 달아 두면
+    # 아무도 열어 볼 수 없는 카드를 하루 한 번 만들어 쌓는다(T7 리뷰 minor).
+    promoter = Promoter(store, config) if config.enable_growth else None
     scheduler = Scheduler(backend, reports, None, briefings=briefings, retention=retention,
                           promoter=promoter)
 

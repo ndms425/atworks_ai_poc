@@ -344,6 +344,14 @@ class InMemoryBackend(AtworksBackend):
         items = sorted(items, key=lambda e: (e.at, e.seq or 0), reverse=True)
         return Page[AskEntry](items=items[:limit], next_cursor=None, total=len(items))
 
+    async def set_feedback(self, session, turn_id, vote):
+        del session
+        for index, entry in enumerate(self.asks):
+            if entry.turn_id == turn_id:
+                self.asks[index] = entry.model_copy(update={"feedback": vote})
+                return self.asks[index]
+        return None
+
     async def growth_summary(self, session, since):
         window = [e for e in self.asks if e.at >= since]
         return GrowthSummary(
