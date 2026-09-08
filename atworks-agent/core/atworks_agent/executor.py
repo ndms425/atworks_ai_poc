@@ -94,7 +94,7 @@ from .types import (
     RunStatus,
     UnmetReason,
 )
-from .vocabulary import MAX_TERM_CHARS, fragment_from_tool
+from .vocabulary import MAX_TERM_CHARS, existing_alias_note_ko, fragment_from_tool
 
 
 def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = None) -> MemoryRuntime:
@@ -990,7 +990,12 @@ class AtworksToolExecutor(BaseToolExecutor):
 
         카드를 직접 내지 않는 이유: 확인 문구는 `query_table` 카드 푸터에 붙는다(그 턴의 숫자를
         보면서 판단하라고). 그래서 여기서는 이번 턴 스크래치에만 적어 두고, 카드 enrichment가
-        읽는다."""
+        읽는다 -- 그리고 **새 pending 행이 실제로 쓰였을 때만** 적는다. 이미 있는 term을 다시
+        제안하면 카드가 이미 답한 질문을 다시 묻게 되므로, 그 경우는 스크래치에 남지 않는다."""
+        if not self._config.enable_growth:
+            # 게이트가 둘(도구 목록에서 빠지는 것과 여기)인 이유: 도구 목록은 이 배포가 무엇을
+            # 부를 수 있는지의 선언이고, 이 줄은 그것이 틀렸을 때의 방어다.
+            return ToolOutcome("이 배포에서는 어휘 제안이 꺼져 있습니다 — 제안하지 마세요.")
         term = self._sanitize(tool_input.get("term"), MAX_TERM_CHARS)
         if not term:
             raise InvalidToolArgument("term", kind="schema", detail="term must be the operator's word")
@@ -998,17 +1003,23 @@ class AtworksToolExecutor(BaseToolExecutor):
             fragment = fragment_from_tool(tool_input.get("fragment"))
         except ValueError as invalid:
             raise InvalidToolArgument("fragment", kind="schema", detail=str(invalid)) from invalid
-        entry = await self._backend.propose_alias(
+        proposal = await self._backend.propose_alias(
             self._session, term=term, fragment=fragment,
             note=self._sanitize(tool_input.get("note"), 120) or None,
         )
-        if entry is None:
-            # 왜 거절됐는지는 두 가지뿐이고, 둘 다 모델이 고쳐 쓸 수 있는 종류가 아니다 -- 다시
-            # 제안하지 말고 설명 없이 넘어가라는 뜻이다.
+        if proposal.outcome == "refused":
+            # 왜 거절됐는지는 모델이 고쳐 쓸 수 있는 종류가 아니다 -- 다시 제안하지 말고 설명
+            # 없이 넘어가라는 뜻이다.
             return ToolOutcome(
                 f"‘{term}’ 별칭은 저장되지 않았습니다 — 개인정보 모양이거나(rejected: looks like "
-                "personal data), 이미 사람이 거부해 쿨다운 중인 용어입니다. 다시 제안하지 마세요."
+                "personal data), 별칭이 될 수 없는 조각(기간·대상)입니다. 다시 제안하지 마세요."
             )
+        entry = proposal.entry
+        if proposal.outcome == "existing" and entry is not None:
+            # 아무것도 쓰이지 않았다: 카드를 띄우지 않고, 팀이 실제로 가진 상태를 그대로 말한다.
+            return ToolOutcome(existing_alias_note_ko(entry))
+        if entry is None:                                    # 계약 위반한 백엔드 -- 조용히 넘어간다
+            return ToolOutcome(f"‘{term}’ 별칭은 저장되지 않았습니다. 다시 제안하지 마세요.")
         self._state.pending_aliases.append(entry)
         return ToolOutcome(
             f"‘{entry.term}’ 별칭을 제안했습니다 — 카드의 [예/아니오]로 확인을 받습니다. "

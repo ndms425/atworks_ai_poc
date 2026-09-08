@@ -258,8 +258,10 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         message = request.message
         # 어휘 주입(자가발전 §7 단계 3): 이번 메시지에 실제로 나온 **확정된** 용어만, 최신순으로
         # `vocabulary_max_inject`개. pending은 여기 오지 않는다 -- 제안한 세션의 카드에서만
-        # 보인다(spec §2 조항 4). 확정본은 프로세스 캐시라 대부분의 턴에서 SQL이 한 번도 돌지
-        # 않고, 맞는 게 없으면 컨텍스트 블록에 키 자체가 생기지 않는다(바이트 동일).
+        # 보인다(spec §2 조항 4). 맞는 게 없으면 컨텍스트 블록에 키 자체가 생기지 않는다(바이트
+        # 동일). 확정본은 프로세스 캐시라 대부분의 턴에서 SQL이 한 번도 돌지 않는다: 턴 끝의
+        # `note_vocabulary_use`는 `uses + 1`이라 confirmed 집합을 바꾸지 않고 캐시를 버리지
+        # 않는다(버리면 어휘가 실린 모든 턴이 캐시 미스가 되어 캐시가 하는 일이 없어진다).
         matched = await matched_vocabulary(record, message)
 
         async def on_turn_end(rec: Record, tid: str, failure: BaseException | None) -> None:
@@ -306,10 +308,17 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         여기서 쓰면 그 단어의 뜻이 흐려진다. 그래도 사람이 눌렀다는 증적은 남는다(spec §10).
 
         `fn`은 백엔드 호출 하나다(실행기를 거치지 않는다): 어휘 라우트가 부르는 것은 모델에게
-        열려 있지 않은 백엔드 메서드라, 도구 이름으로 우회할 표면 자체가 없다."""
+        열려 있지 않은 백엔드 메서드라, 도구 이름으로 우회할 표면 자체가 없다.
+
+        **없는 대상의 404도 `fn` 안에서 난다**(`host_action`의 `blocked`와 같은 자리): 404를
+        헬퍼 바깥에서 던지면 감사 로그에 `:ok`가 먼저 찍히고, 아무 일도 일어나지 않은 클릭이
+        성공으로 남는다."""
         await audit_action(record, action, target_kind, target_id)
         try:
             result = await fn()
+        except HTTPException:
+            await audit_action(record, action, target_kind, target_id, "blocked")
+            raise
         except Exception:
             await audit_action(record, action, target_kind, target_id, "error")
             raise
@@ -332,12 +341,18 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         _require_growth()
         method = {"confirm": backend.confirm_alias, "reject": backend.reject_alias,
                   "delete": backend.delete_alias}[action]
+
+        async def act() -> VocabularyEntry:
+            entry = await method(context(record), term)
+            if entry is None:
+                # 404는 여기, `growth_action`의 try 안이다 -- 밖에서 던지면 감사 로그가 아무 일도
+                # 없었던 클릭을 `:ok`로 기록한다.
+                raise HTTPException(status_code=404, detail=f"unknown term: {term!r}")
+            return entry
+
         entry = await growth_action(
-            record, action=f"vocabulary_{action}", target_kind="vocabulary", target_id=term,
-            fn=lambda: method(context(record), term),
+            record, action=f"vocabulary_{action}", target_kind="vocabulary", target_id=term, fn=act,
         )
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"unknown term: {term!r}")
         record.pending_app_events.append(
             f"Operator {action}ed the term {entry.term!r} on the vocabulary list."
         )
@@ -469,6 +484,15 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.delete("/memory")
     async def delete_memory(record: CurrentSession, ref: dict | None = None) -> dict:
+        """**의도적으로 아무것도 하지 않는다** — `GET /memory`와 같은 이유의 자리표시다.
+        web-shared의 "내 기억" 화면이 이 경로를 찾으므로 라우트는 있어야 하지만, 이 배포에서
+        지울 개인 기억이 없다(`memory_extract_facts=False`).
+
+        `memory_facts`에 있는 것은 **팀의 확정 어휘**뿐이고, 그것을 지우는 자리는 Growth 뷰의
+        `DELETE`(`POST /vocabulary/{term}/delete`)다: 감사 2행을 남기고, 사이드카 행과 fact를
+        함께 지우고, 어느 term이 지워졌는지 target_id에 적는다. 여기서 `memory.store.clear`를
+        부르면 한 사람의 "내 기억 지우기" 한 번이 팀 전체의 어휘를 증적 없이 날린다 — 그래서
+        이 라우트는 200 OK를 돌려주고 아무 테이블도 건드리지 않는다."""
         del record, ref
         return {"ok": True}
 

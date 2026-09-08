@@ -20,6 +20,7 @@ from commerce_common.turn import session_tag
 from atworks_agent import (
     ActorKind,
     AggregateQuery,
+    AliasProposal,
     ApiSpec,
     ApiWatermark,
     AskEntry,
@@ -68,7 +69,11 @@ from atworks_agent import (
 )
 from atworks_agent.fencing import ATWORKS_FENCE
 from atworks_agent.types import Binding, QueryFilters
-from atworks_agent.vocabulary import entry_to_fact, normalize_term
+from atworks_agent.vocabulary import (
+    entry_to_fact,
+    normalize_term,
+    rejected_fragment_fields,
+)
 
 from .memory_store import SqliteMemoryStore
 from .reports import Reports
@@ -580,29 +585,39 @@ class MockAtworks(AtworksBackend):
         )
 
     async def propose_alias(self, session, term: str, fragment: QueryFilters,
-                            note: str | None = None) -> VocabularyEntry | None:
+                            note: str | None = None) -> AliasProposal:
         del note   # 카드에도 컨텍스트에도 실리지 않는다 -- 모델이 남기는 메모일 뿐이라 저장하지 않는다
         normalized = normalize_term(term)
-        if not normalized:
-            return None
+        if not normalized or rejected_fragment_fields(fragment):
+            # 모양 검사는 실행기에도 있지만(툴 입력) 저장하는 쪽에도 있다: "오퍼레이터 id가 팀
+            # 전체의 컨텍스트에 굳는 일은 없다"는 규칙은 오늘의 배선이 아니라 계약이어야 한다.
+            return AliasProposal(outcome="refused")
         now = (session.local_now() if session is not None else None) or datetime.now(UTC)
         existing = self.store.get_vocabulary(normalized)
-        if existing is not None and existing.cooldown_until is not None and existing.cooldown_until > now:
-            # 사람이 거부한 용어를 다음 날 다시 제안하지 않는다. 저장도, 갱신도 없다.
-            return None
+        cooled = (existing is not None and existing.status == "rejected"
+                  and (existing.cooldown_until is None or existing.cooldown_until <= now))
+        if existing is not None and not cooled:
+            # 이미 있는 행은 덮지 않는다 -- 확정된 뜻이 이번 턴의 조각으로 조용히 바뀌면 안 되고,
+            # 냉각 중인 거부를 다음 날 다시 물어도 안 된다. 저장된 행을 그대로 돌려준다.
+            return AliasProposal(outcome="existing", entry=existing)
         candidate = VocabularyEntry(
             term=normalized, fragment=fragment, status="pending",
             proposed_by=session.operator if session is not None else "", proposed_at=now,
         )
         try:
-            fact = self._validated_fact(session, candidate)
+            self._validated_fact(session, candidate)
         except MemoryWriteRejected:
             # 사이드카에도 아무것도 쓰지 않는다: 필터가 막은 값은 어느 테이블에도 남지 않는다.
-            return None
-        stored = self.store.propose_vocabulary(candidate)
-        await self.memory_store.upsert_facts(self._vocabulary_fact_subject(session), [fact])
+            # fact 자체는 여기서 쓰지 않는다(확정이 쓴다) -- 이 호출은 그 문을 통과하는지만 본다.
+            return AliasProposal(outcome="refused")
+        if cooled:
+            # 쿨다운이 끝났다: 같은 행을 fresh pending으로 되살린다(카운터와 이력은 남는다).
+            stored = self.store.repropose_vocabulary(candidate)
+            self._confirmed_cache = None
+            return AliasProposal(outcome="proposed", entry=stored or candidate)
+        stored, inserted = self.store.propose_vocabulary(candidate)
         self._confirmed_cache = None
-        return stored
+        return AliasProposal(outcome="proposed" if inserted else "existing", entry=stored)
 
     async def list_vocabulary(self, session, status=None, cursor=None, limit=50) -> Page[VocabularyEntry]:
         del session
@@ -616,25 +631,40 @@ class MockAtworks(AtworksBackend):
             cooldown_days=self._config.vocabulary_cooldown_days,
         )
         self._confirmed_cache = None
+        if entry is not None:
+            # fact는 **여기서** 쓴다(ABC 의무 4): 사람의 클릭이 그 뜻을 팀의 것으로 만든 순간이다.
+            # 그래서 `memory_facts`가 곧 confirmed 집합이고, 승인되지 않은 뜻이 기억 저장소에
+            # 앉아 있는 상태가 없다. 필터는 제안 때 이미 통과했으므로 여기서 막힐 수 없다.
+            await self.memory_store.upsert_facts(
+                self._vocabulary_fact_subject(session), [self._validated_fact(session, entry)])
         return entry
 
     async def reject_alias(self, session, term: str) -> VocabularyEntry | None:
         now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        normalized = normalize_term(term)
         entry = self.store.set_vocabulary_status(
-            normalize_term(term), "rejected",
+            normalized, "rejected",
             by=session.operator if session is not None else "", now=now,
             cooldown_days=self._config.vocabulary_cooldown_days,
         )
         self._confirmed_cache = None
+        if entry is not None:
+            await self._forget_facts(session, [normalized])
         return entry
+
+    async def _forget_facts(self, session, terms: list[str]) -> None:
+        """확정이 풀린 term의 fact를 지운다(거부·삭제·자동 강등). 사이드카 행은 남을 수 있지만
+        (쿨다운도 이력도 거기 있다) fact는 남지 않는다 -- `memory_facts`는 confirmed 집합이다."""
+        subject = self._vocabulary_fact_subject(session)
+        for term in terms:
+            await self.memory_store.delete_fact(subject, term.replace(" ", "_"))
 
     async def delete_alias(self, session, term: str) -> VocabularyEntry | None:
         normalized = normalize_term(term)
         entry = self.store.delete_vocabulary(normalized)
         if entry is not None:
             # 사이드카와 fact를 함께 지운다 -- 한쪽만 지우면 용어를 반쯤 기억한 저장소가 남는다.
-            await self.memory_store.delete_fact(
-                self._vocabulary_fact_subject(session), normalized.replace(" ", "_"))
+            await self._forget_facts(session, [normalized])
         self._confirmed_cache = None
         return entry
 
@@ -645,16 +675,21 @@ class MockAtworks(AtworksBackend):
         return list(self._confirmed_cache)
 
     async def note_vocabulary_use(self, session, terms: list[str], rejected: bool = False) -> None:
-        del session
         normalized = [normalize_term(t) for t in terms if normalize_term(t)]
         if not normalized:
             return
         if rejected:
-            self.store.note_vocabulary_rejection(
+            demoted = self.store.note_vocabulary_rejection(
                 normalized, auto_demote_rejections=self._config.vocabulary_auto_demote_rejections)
+            if demoted:
+                # 강등된 term만 confirmed 집합에서 빠진다. 강등이 없었던 호출은 집합을 바꾸지
+                # 않으므로 캐시도 그대로 둔다.
+                await self._forget_facts(session, demoted)
+                self._confirmed_cache = None
         else:
+            # `uses + 1`은 순수 집계다 -- confirmed 집합이 그대로이므로 캐시를 버릴 이유가 없다.
+            # (매 턴 버리면 캐시가 하는 일이 없어지고, 어휘가 실린 턴마다 SQL이 한 번 더 돈다.)
             self.store.bump_vocabulary_uses(normalized)
-        self._confirmed_cache = None
 
     # -- 저장 질문 (자가발전 spec §8) --------------------------------------------------------
 

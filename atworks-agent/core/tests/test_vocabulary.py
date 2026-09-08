@@ -11,12 +11,14 @@ from atworks_agent.types import QueryFilters, VocabularyEntry
 from atworks_agent.vocabulary import (
     MAX_TERM_CHARS,
     entry_to_fact,
+    existing_alias_note_ko,
     fact_to_entry,
     fragment_from_tool,
     fragment_json,
     fragment_summary_ko,
     match_terms,
     normalize_term,
+    rejected_fragment_fields,
 )
 
 T0 = datetime(2026, 9, 8, 9, tzinfo=UTC)
@@ -68,11 +70,13 @@ def test_fragment_from_tool_refuses_an_empty_fragment():
     {"since": "2026-09-01T00:00:00Z"},
     {"until": "2026-09-08T00:00:00Z"},
     {"api_ids": ["api-001"]},
+    {"executed_by": ["jihoon"]},
     {"scope_operator": "minseong"},
 ])
 def test_fragment_from_tool_refuses_windows_and_id_lists(rejected):
     # 별칭은 모양에 이름을 붙이는 것이다: "지난주"를 since/until로 굳히면 다음 주에 거짓이 되고,
-    # id 목록은 남의 질문을 남의 대상으로 좁힌다. 조각 안에 섞여 있어도 거절된다.
+    # 대상(api_ids·executed_by·scope_operator)은 남의 질문을 남의 id로 좁힌다 -- 확정된 별칭은
+    # 팀 전체의 컨텍스트에 실리므로 거기 오퍼레이터 id가 굳으면 안 된다. 섞여 있어도 거절된다.
     with pytest.raises(ValueError, match="모양에만"):
         fragment_from_tool({"path_prefix": "/v1/payment", **rejected})
 
@@ -126,3 +130,32 @@ def test_entry_to_fact_and_back():
     assert fact.value == fragment_json(entry.fragment) and fact.source_session_id == "sess"
     back = fact_to_entry(fact, proposed_by="minseong")
     assert back.term == entry.term and back.fragment == entry.fragment
+
+
+# -- 저장하는 쪽의 같은 문 / 재제안 문장 ------------------------------------------------------
+
+@pytest.mark.parametrize("filters", [
+    {"window_days": 30},
+    {"api_ids": ["api-001"]},
+    {"executed_by": ["jihoon"]},
+    {"scope_operator": "minseong"},
+])
+def test_rejected_fragment_fields_names_every_offender(filters):
+    # 백엔드가 저장 직전에 쓰는 같은 규칙(툴 입력이 아니라 이미 만들어진 QueryFilters 위에서).
+    fragment = QueryFilters(path_prefix="/v1/payment", **filters)
+    assert rejected_fragment_fields(fragment) == list(filters)
+    assert rejected_fragment_fields(QueryFilters(path_prefix="/v1/payment")) == []
+
+
+def test_existing_alias_note_names_the_status_and_what_to_do():
+    confirmed = _entry("결제 계열", path_prefix="/v1/payment")
+    assert "confirmed" in existing_alias_note_ko(confirmed)
+    assert "그대로 쓰세요" in existing_alias_note_ko(confirmed)
+    pending = confirmed.model_copy(update={"status": "pending"})
+    assert "확인 대기" in existing_alias_note_ko(pending)
+    rejected = confirmed.model_copy(update={
+        "status": "rejected", "cooldown_until": datetime(2026, 10, 8, tzinfo=UTC)})
+    assert "2026-10-08" in existing_alias_note_ko(rejected) and "냉각" in existing_alias_note_ko(rejected)
+    # 세 문장 모두 "다시 제안하지 마세요"로 끝난다 -- 재제안은 아무것도 쓰지 않는다.
+    for entry in (confirmed, pending, rejected):
+        assert existing_alias_note_ko(entry).endswith("다시 제안하지 마세요.")

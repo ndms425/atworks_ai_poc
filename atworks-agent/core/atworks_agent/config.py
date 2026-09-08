@@ -201,4 +201,10 @@ class AtworksAgentConfig(BaseAgentConfig):
             # These tool names do not exist in the registry yet (Task 3 adds them) -- the gate is
             # data now so later tasks only have to add the tools, never touch this method.
             names |= {"query_runs", "present_query_table", "note_unmet_ask", "propose_alias"}
+        if not self.enable_growth:
+            # `propose_alias` is the only tool that writes to the growth ledgers, and every
+            # surface that would show its result (the card's confirmation row, the Growth view,
+            # the three vocabulary routes) is behind `enable_growth`. Offering the tool with the
+            # feature off would let the model propose into a ledger nobody can ever confirm from.
+            names |= {"propose_alias"}
         return frozenset(names)

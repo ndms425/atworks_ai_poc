@@ -86,6 +86,7 @@ from .serialization import profile_record
 from .types import (
     ActorKind,
     AggregateQuery,
+    AliasProposal,
     ApiSpec,
     ApiWatermark,
     AskEntry,

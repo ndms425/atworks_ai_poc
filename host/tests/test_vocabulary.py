@@ -6,6 +6,7 @@
 사람의 클릭에서만 일어나고 감사 2행을 남긴다.
 """
 import json
+import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -51,11 +52,28 @@ def _backend(config: AtworksAgentConfig | None = None) -> MockAtworks:
 def test_propose_never_overwrites_an_existing_row():
     # 확정된 항목이 새 제안으로 pending이 되면 안 되고, 거부가 남긴 쿨다운도 지워지면 안 된다.
     store = Store(":memory:")
-    store.propose_vocabulary(_entry())
+    _, inserted = store.propose_vocabulary(_entry())
+    assert inserted is True
     store.set_vocabulary_status("결제 계열", "confirmed", by="jihoon", now=T0)
-    again = store.propose_vocabulary(_entry(prefix="/v1/other"))
+    again, inserted = store.propose_vocabulary(_entry(prefix="/v1/other"))
+    # `inserted`가 없으면 재제안과 새 제안이 호출자에게 같은 모양이다 -- 그게 카드가 이미 답한
+    # 질문을 다시 묻고 fact가 미승인 조각으로 덮이던 자리다.
+    assert inserted is False
     assert again.status == "confirmed" and again.fragment.path_prefix == "/v1/payment"
     assert store.list_vocabulary().total == 1
+
+
+def test_repropose_revives_a_cooled_row_but_keeps_its_history():
+    store = Store(":memory:")
+    store.propose_vocabulary(_entry())
+    store.set_vocabulary_status("결제 계열", "rejected", by="jihoon", now=T0, cooldown_days=30)
+    revived = store.repropose_vocabulary(
+        _entry(prefix="/v1/pay").model_copy(update={"proposed_by": "jihye"}))
+    assert revived.status == "pending" and revived.cooldown_until is None
+    assert revived.fragment.path_prefix == "/v1/pay" and revived.proposed_by == "jihye"
+    # 이력은 남는다: Growth 뷰가 "이 용어는 한 번 거부됐다"를 계속 보여줘야 한다.
+    assert revived.rejections == 1
+    assert store.repropose_vocabulary(_entry("없는 용어")) is None
 
 
 def test_confirm_counts_every_operator_that_agrees():
@@ -122,12 +140,18 @@ def test_uses_are_counted_and_new_terms_are_a_count_not_a_list():
     assert store.count_vocabulary_since(T0 + timedelta(days=1)) == 0
 
 
-# -- 백엔드: 쓰기 필터와 쿨다운 -----------------------------------------------------------------
+# -- 백엔드: 쓰기 필터, 쿨다운, 재제안 -----------------------------------------------------------
 
-async def test_a_proposal_stores_both_the_sidecar_row_and_the_fact():
+async def test_a_proposal_stores_the_sidecar_row_and_the_fact_waits_for_the_click():
+    # `memory_facts`는 **확정된** term만 담는다: 제안은 사이드카 1행뿐이고, fact는 사람이 [예]를
+    # 누른 순간 쓰인다. 그래서 `get_facts`가 돌려주는 집합이 곧 confirmed 집합이다.
     backend = _backend()
-    entry = await backend.propose_alias(_session(), "  결제 계열 ", QueryFilters(path_prefix="/v1/payment"))
-    assert entry is not None and entry.term == "결제 계열" and entry.status == "pending"
+    proposal = await backend.propose_alias(_session(), "  결제 계열 ",
+                                           QueryFilters(path_prefix="/v1/payment"))
+    assert proposal.outcome == "proposed"
+    assert proposal.entry.term == "결제 계열" and proposal.entry.status == "pending"
+    assert await backend.memory_store.get_facts("mes-demo") == []
+    await backend.confirm_alias(_session("jihoon"), "결제 계열")
     (fact,) = await backend.memory_store.get_facts("mes-demo")
     assert fact.key == "결제_계열" and json.loads(fact.value) == {"path_prefix": "/v1/payment"}
     assert fact.category.value == "context"
@@ -141,22 +165,66 @@ async def test_a_proposal_stores_both_the_sidecar_row_and_the_fact():
 async def test_a_pii_shaped_term_or_fragment_stores_nothing_anywhere(term, fragment):
     # MemoryWriteFilter가 막으면 fact도, 사이드카 행도 생기지 않는다 -- 반쯤 저장된 상태가 없다.
     backend = _backend()
-    assert await backend.propose_alias(_session(), term, fragment) is None
+    assert (await backend.propose_alias(_session(), term, fragment)).outcome == "refused"
     assert await backend.memory_store.get_facts("mes-demo") == []
     assert (await backend.list_vocabulary(_session())).total == 0
 
 
-async def test_a_rejected_term_cannot_be_re_proposed_until_the_cooldown_passes():
+@pytest.mark.parametrize("fragment", [
+    QueryFilters(path_prefix="/v1/payment", executed_by=["jihoon"]),
+    QueryFilters(executed_by=["jihoon"]),
+    QueryFilters(path_prefix="/v1/payment", scope_operator="jihoon"),
+    QueryFilters(path_prefix="/v1/payment", window_days=30),
+])
+async def test_an_alias_can_never_bind_an_operator_or_a_window(fragment):
+    """확정된 별칭은 팀 전체의 컨텍스트에 실린다 -- 거기 오퍼레이터 id가 굳으면 한 번의 클릭이
+    다른 사람의 질문을 조용히 남의 id로 좁힌다. 실행기의 툴 입력 검사와 **별개로** 저장하는
+    쪽에도 문이 있어야 하므로, 백엔드를 직접 불러도 어느 테이블에도 아무것도 남지 않는다."""
+    backend = _backend()
+    assert (await backend.propose_alias(_session(), "지훈 계열", fragment)).outcome == "refused"
+    assert (await backend.list_vocabulary(_session())).total == 0
+    assert await backend.memory_store.get_facts("mes-demo") == []
+
+
+async def test_re_proposing_a_confirmed_term_changes_nothing_and_asks_nothing():
+    backend = _backend()
+    await backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/payment"))
+    await backend.confirm_alias(_session("jihoon"), "결제 계열")
+    again = await backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/other"))
+    # 카드가 이미 답한 질문을 다시 묻지 않는다: 새 pending 행이 아니라 저장된 행이 돌아온다.
+    assert again.outcome == "existing" and again.entry.status == "confirmed"
+    assert again.entry.fragment.path_prefix == "/v1/payment"
+    # 그리고 fact가 이번 턴의 미승인 조각으로 덮이지 않는다 -- 두 자리가 갈라지지 않는다.
+    (fact,) = await backend.memory_store.get_facts("mes-demo")
+    assert json.loads(fact.value) == {"path_prefix": "/v1/payment"}
+    assert (await backend.list_vocabulary(_session())).total == 1
+
+
+async def test_re_proposing_a_pending_term_does_not_duplicate_it():
+    backend = _backend()
+    await backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/payment"))
+    again = await backend.propose_alias(_session("jihye"), "결제 계열",
+                                        QueryFilters(path_prefix="/v1/other"))
+    assert again.outcome == "existing" and again.entry.proposed_by == "minseong"
+    assert (await backend.list_vocabulary(_session())).total == 1
+    assert await backend.memory_store.get_facts("mes-demo") == []
+
+
+async def test_a_rejected_term_is_refused_in_cooldown_and_proposable_after_it():
     backend = _backend()
     await backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/payment"))
     await backend.reject_alias(_session("jihoon"), "결제 계열")
-    assert await backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/pay")) is None
-    # 쿨다운이 지난 뒤의 세션(= 더 나중의 now)에서는 다시 제안이 통과한다... 는 아니다: 행은
-    # 남아 있고 제안은 저장된 행을 그대로 돌려준다. 상태가 조용히 pending으로 되돌아가지 않는다.
-    later = AtworksSessionContext(session_id="s-2", project_id="mes-demo", operator="minseong",
+    inside = await backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/pay"))
+    assert inside.outcome == "existing" and inside.entry.status == "rejected"
+    assert inside.entry.fragment.path_prefix == "/v1/payment"   # 저장된 뜻은 그대로다
+    # 끝이 없는 쿨다운은 쿨다운이 아니다: 지나고 나면 새 제안이 fresh pending을 만든다.
+    later = AtworksSessionContext(session_id="s-2", project_id="mes-demo", operator="jihye",
                                   now=T0 + timedelta(days=31))
     again = await backend.propose_alias(later, "결제 계열", QueryFilters(path_prefix="/v1/pay"))
-    assert again is not None and again.status == "rejected"
+    assert again.outcome == "proposed" and again.entry.status == "pending"
+    assert again.entry.fragment.path_prefix == "/v1/pay" and again.entry.proposed_by == "jihye"
+    assert again.entry.rejections == 1                          # 이력은 남는다
+    assert (await backend.list_vocabulary(_session())).total == 1
 
 
 async def test_confirmed_vocabulary_is_cached_but_invalidated_by_every_write():
@@ -171,10 +239,28 @@ async def test_confirmed_vocabulary_is_cached_but_invalidated_by_every_write():
     assert await backend.confirmed_vocabulary(session) == []
 
 
+async def test_counting_a_use_keeps_the_cache_and_a_demotion_drops_it():
+    # `uses + 1`은 confirmed 집합을 바꾸지 않는다 -- 그때마다 캐시를 버리면 어휘가 실린 모든 턴이
+    # 캐시 미스가 되어 캐시가 하는 일이 없어진다. 강등은 집합을 바꾸므로 버린다.
+    backend = _backend()
+    session = _session()
+    await backend.propose_alias(session, "결제 계열", QueryFilters(path_prefix="/v1/payment"))
+    await backend.confirm_alias(session, "결제 계열")
+    await backend.confirmed_vocabulary(session)                   # 캐시를 채운다
+    await backend.note_vocabulary_use(session, ["결제 계열"])
+    assert backend._confirmed_cache is not None
+    for _ in range(2):
+        await backend.note_vocabulary_use(session, ["결제 계열"], rejected=True)
+    assert backend._confirmed_cache is not None                   # 강등이 없었던 👎는 그대로
+    await backend.note_vocabulary_use(session, ["결제 계열"], rejected=True)
+    assert backend._confirmed_cache is None
+
+
 async def test_delete_removes_the_fact_as_well_as_the_row():
     backend = _backend()
     session = _session()
     await backend.propose_alias(session, "결제 계열", QueryFilters(path_prefix="/v1/payment"))
+    await backend.confirm_alias(session, "결제 계열")
     assert await backend.delete_alias(session, "결제 계열") is not None
     assert await backend.memory_store.get_facts("mes-demo") == []
     assert await backend.delete_alias(session, "결제 계열") is None
@@ -190,6 +276,39 @@ async def test_note_vocabulary_use_counts_uses_and_demotes_on_repeated_thumbs_do
     for _ in range(3):
         await backend.note_vocabulary_use(session, ["결제 계열"], rejected=True)
     assert backend.store.get_vocabulary("결제 계열").status == "pending"
+    # 강등도 확정을 푸는 일이라 fact가 남지 않는다 -- 아래 속성 테스트의 불변식과 같은 규칙.
+    assert await backend.memory_store.get_facts("mes-demo") == []
+
+
+async def test_memory_facts_are_exactly_the_confirmed_terms():
+    """불변식 하나를 무작위 순서로 흔든다: `memory_facts`의 key 집합 == confirmed인 term의 집합.
+    제안은 아무것도 넣지 않고, 확정이 넣고, 거부·삭제·강등이 민다 -- 그래서 `search_facts`가
+    돌려주는 것이 정의상 팀이 승인한 뜻뿐이다."""
+    rng = random.Random(20260908)
+    backend = _backend()
+    session = _session()
+    terms = [f"용어 {i}" for i in range(6)]
+    for step in range(120):
+        term = rng.choice(terms)
+        action = rng.choice(["propose", "confirm", "reject", "delete", "demote"])
+        now = T0 + timedelta(days=40 * step)      # 쿨다운이 지나는 시간축(재제안도 일어난다)
+        sess = AtworksSessionContext(session_id="s", project_id="mes-demo",
+                                     operator=rng.choice(["minseong", "jihoon"]), now=now)
+        if action == "propose":
+            await backend.propose_alias(sess, term, QueryFilters(path_prefix=f"/v1/{step}"))
+        elif action == "confirm":
+            await backend.confirm_alias(sess, term)
+        elif action == "reject":
+            await backend.reject_alias(sess, term)
+        elif action == "delete":
+            await backend.delete_alias(sess, term)
+        else:
+            await backend.note_vocabulary_use(sess, [term], rejected=True)
+        confirmed = {e.term.replace(" ", "_") for e in await backend.confirmed_vocabulary(session)}
+        stored = {f.key for f in await backend.memory_store.get_facts("mes-demo")}
+        assert stored == confirmed, f"step {step}: {action} {term!r}"
+    # 시퀀스가 실제로 두 상태를 다 지났는지(빈 집합만 보고 통과한 게 아닌지) 확인한다.
+    assert backend.store.list_vocabulary().total > 0
 
 
 # -- 라우트 ----------------------------------------------------------------------------------
@@ -257,10 +376,15 @@ async def test_delete_route_removes_the_term(client):
     assert (await client.get("/api/atworks/vocabulary", headers=headers)).json()["total"] == 0
 
 
-async def test_acting_on_an_unknown_term_is_a_404(client):
+async def test_acting_on_an_unknown_term_is_a_404_recorded_as_blocked(client):
+    # 404는 `growth_action`의 try 안에서 난다: 밖에서 던지면 감사 로그에 `:ok`가 먼저 찍히고
+    # 아무 일도 일어나지 않은 클릭이 성공으로 남는다.
     headers = {"X-Session-Id": await _sid(client)}
     assert (await client.post("/api/atworks/vocabulary/없는 용어/confirm",
                               headers=headers)).status_code == 404
+    rows = (await client.get("/api/atworks/audit", headers=headers)).json()["items"]
+    actions = [r["action"] for r in rows if r["target_kind"] == "vocabulary"]
+    assert set(actions) == {"vocabulary_confirm", "vocabulary_confirm:blocked"}
 
 
 async def test_the_vocabulary_routes_404_when_growth_is_off(tmp_path):
@@ -324,3 +448,26 @@ async def test_a_turn_that_names_no_confirmed_term_carries_no_vocabulary_block(t
         headers = {"X-Session-Id": await _sid(c)}
         await c.post("/api/atworks/chat", headers=headers, json={"message": "계약 실패 보여줘"})
     assert "vocabulary" not in _system_text(agent)
+
+
+# -- 게이트와 인접 라우트 -----------------------------------------------------------------------
+
+def test_propose_alias_is_absent_when_either_gate_is_off():
+    """두 게이트 아래 있다: 질의 도구가 꺼져도, Growth 뷰가 꺼져도 이 도구는 없다. 확인 표면
+    (카드 푸터·Growth 뷰·세 라우트)이 전부 `enable_growth` 뒤에 있으므로, 그것만 꺼 두고 도구를
+    남기면 모델이 아무도 확인할 수 없는 원장에 제안을 쌓는다."""
+    assert "propose_alias" not in AtworksAgentConfig(model="m").absent_tools()
+    assert "propose_alias" in AtworksAgentConfig(model="m", enable_growth=False).absent_tools()
+    assert "propose_alias" in AtworksAgentConfig(model="m", enable_query_runs=False).absent_tools()
+
+
+async def test_delete_memory_is_inert_and_touches_no_vocabulary(client):
+    """`DELETE /memory`는 자리표시다(web-shared가 찾으므로 라우트는 있어야 한다). 어휘를 지우는
+    자리는 Growth 뷰의 삭제고, 거기엔 감사 2행이 있다 -- 여기서 지우면 한 사람의 "내 기억
+    지우기"가 팀 전체의 어휘를 증적 없이 날린다."""
+    headers = {"X-Session-Id": await _sid(client)}
+    await client.backend.propose_alias(_session(), "결제 계열", QueryFilters(path_prefix="/v1/payment"))
+    await client.post("/api/atworks/vocabulary/결제 계열/confirm", headers=headers)
+    assert (await client.request("DELETE", "/api/atworks/memory", headers=headers)).json() == {"ok": True}
+    assert (await client.get("/api/atworks/vocabulary", headers=headers)).json()["total"] == 1
+    assert len(await client.backend.memory_store.get_facts("mes-demo")) == 1

@@ -13,6 +13,7 @@ from .rules import FormatBatchDraft, FormatDefinition, RuleDraft, RuleImpact, Va
 from .types import (
     ActorKind,
     AggregateQuery,
+    AliasProposal,
     ApiSpec,
     ApiWatermark,
     AskEntry,
@@ -500,23 +501,34 @@ class AtworksBackend(ABC):
     #   2) **쓰기 필터를 통과한 값만 저장된다.** term과 fragment는 저장 직전에
     #      ``commerce_common.memory.validate_fact``(펜스 + ``MemoryWriteFilter``)를 지난다.
     #      9자리+ 숫자·IBAN·이메일 모양이면 ``MemoryWriteRejected``이고, 그때 이 계약은 예외를
-    #      밖으로 내보내지 않고 ``None``을 돌려준다 — 거절 사유는 도구 결과의 한 문장이다.
+    #      밖으로 내보내지 않고 거절을 돌려준다 — 거절 사유는 도구 결과의 한 문장이다.
     #   3) **모델의 컨텍스트에는 confirmed만 들어간다.** pending은 제안한 세션의 카드에서만 쓰이고
     #      (spec §2 조항 4), rejected는 쿨다운이 끝나기 전까지 다시 제안되지 않는다.
+    #   4) **``memory_facts``는 확정된 term만 담는다.** fact는 ``confirm_alias``가 쓰고,
+    #      ``reject_alias``/``delete_alias``와 자동 강등이 지운다 — 그래서 ``get_facts`` /
+    #      ``search_facts``가 돌려주는 집합이 곧 confirmed 집합이고, 사람이 승인하지 않은 뜻이
+    #      기억 저장소에 앉아 있는 상태가 존재하지 않는다. pending은 사이드카에만 있다.
     @abstractmethod
     async def propose_alias(
         self, session: AtworksSessionContext, term: str, fragment: QueryFilters,
         note: str | None = None,
-    ) -> VocabularyEntry | None:
+    ) -> AliasProposal:
         """모델이 사용자 용어를 필터 조각으로 해석했을 때 남기는 제안 1건(``status=pending``).
 
-        ``None``을 돌려주는 두 경우 — 그리고 그 둘뿐이다: 쓰기 필터가 거절했을 때(개인정보 모양),
-        그리고 그 term이 아직 **쿨다운** 중일 때(사람이 거부한 용어를 다음 날 다시 제안하지
-        않는다). 두 경우 모두 저장은 전혀 일어나지 않는다 — 사이드카 행도, fact도 남지 않는다.
+        결과는 :class:`AliasProposal`이고 셋 중 하나다. ``proposed``는 **이 호출이 새 행을 썼을
+        때만** — 카드가 확인을 묻는 것도 그때뿐이다. 이미 그 term의 행이 있으면(confirmed든,
+        확인 대기 중인 pending이든, 냉각 중인 rejected든) ``existing``이고 **아무것도 쓰이지
+        않는다**: 저장된 행을 그대로 담아 돌려주므로 도구 결과가 팀이 실제로 가진 것을 말한다.
+        쓰기 필터가 막았거나(개인정보 모양) 조각이 모양이 아닌 대상·기간을 담고 있으면
+        ``refused``이고, 그때도 사이드카 행도 fact도 남지 않는다.
 
         REST 구현 의무: term은 정규형으로 저장한다(``vocabulary.normalize_term``); 이미 있는
         term은 **덮어쓰지 않는다**(확정된 항목이 새 제안으로 pending이 되면 안 되고, 거부가
-        남긴 쿨다운도 지워지면 안 된다) — 저장된 행을 그대로 돌려준다."""
+        남긴 쿨다운도 지워지면 안 된다); 쿨다운이 **지난** rejected 행은 예외로, 새 제안이 그
+        행을 fresh pending으로 되살린다(카운터와 이력은 남는다) — 쿨다운에 끝이 있다는 것이
+        그 필드의 뜻이다. ``fragment``에 ``since``/``until``/``window_days``/``api_ids``/
+        ``executed_by``/``scope_operator``가 있으면 저장하지 않고 거절한다: 확정된 별칭은 팀
+        전체의 컨텍스트에 실리므로 거기 기간이나 남의 오퍼레이터 id가 굳으면 안 된다."""
 
     @abstractmethod
     async def list_vocabulary(
@@ -533,7 +545,10 @@ class AtworksBackend(ABC):
     ) -> VocabularyEntry | None:
         """사람이 [예]를 눌렀다. ``confirmations + 1``, 누른 사람과 시각을 찍고 상태를 confirmed로.
         다른 오퍼레이터가 같은 term을 나중에 확인하면 카운터가 또 오른다 — 그 숫자가 §7의 자동
-        강등 규칙에서 거부 수와 비교된다. 없는 term이면 ``None``(라우트는 404)."""
+        강등 규칙에서 거부 수와 비교된다. 없는 term이면 ``None``(라우트는 404).
+
+        **``memory_facts``의 fact를 쓰는 것은 여기다**(의무 4): 사람의 클릭이 그 뜻을 팀의 것으로
+        만든 순간이지, 모델이 제안한 순간이 아니다."""
 
     @abstractmethod
     async def reject_alias(
@@ -541,7 +556,8 @@ class AtworksBackend(ABC):
     ) -> VocabularyEntry | None:
         """사람이 [아니오]를 눌렀다. ``rejections + 1``, 상태는 rejected, ``cooldown_until``에
         ``now + vocabulary_cooldown_days``를 찍는다. **행은 남긴다**: 쿨다운이 곧 그 거부의
-        기억이고, 행을 지우면 다음 턴에 같은 제안이 다시 올라온다."""
+        기억이고, 행을 지우면 다음 턴에 같은 제안이 다시 올라온다. ``memory_facts``의 fact는
+        **지운다**(의무 4) — 확정이 아닌 뜻은 기억 저장소에 남지 않는다."""
 
     @abstractmethod
     async def delete_alias(
@@ -563,8 +579,11 @@ class AtworksBackend(ABC):
         """이번 턴 컨텍스트가 실제로 실은 term들의 집계. 기본은 ``uses + 1``이고,
         ``rejected=True``(그 턴에 👎, §9)면 ``rejections + 1``에 자동 강등 규칙까지 — 거부가
         ``vocabulary_auto_demote_rejections`` 이상이고 확인 수보다 많으면 상태가 pending으로
-        내려가 아무의 컨텍스트에도 들어가지 않는다. 순수 집계라 어떤 경우에도 턴을 실패시키지
-        않는다."""
+        내려가 아무의 컨텍스트에도 들어가지 않는다(그때 그 term의 fact도 지운다 — 의무 4).
+        순수 집계라 어떤 경우에도 턴을 실패시키지 않는다.
+
+        ``uses + 1``은 confirmed 집합을 바꾸지 않으므로 프로세스 캐시를 무효화하지 **않는다**;
+        강등이 실제로 일어난 호출만 무효화한다."""
 
     # -- 저장 질문 (자가발전 spec §8: 되풀이되는 질문의 승격) ---------------------------------
     # 이 3개 메서드가 공유하는 의무 (REST 구현이 반드시 지킨다):

@@ -2594,14 +2594,19 @@ class Store:
         row = self._conn.execute("SELECT * FROM vocabulary WHERE term = ?", (term,)).fetchone()
         return self._row_to_vocabulary(row) if row is not None else None
 
-    def propose_vocabulary(self, entry: VocabularyEntry) -> VocabularyEntry:
+    def propose_vocabulary(self, entry: VocabularyEntry) -> tuple[VocabularyEntry, bool]:
         """One pending proposal. ``INSERT ... ON CONFLICT DO NOTHING``: a term already in the
         table KEEPS its row -- re-proposing must never reset a confirmed entry to pending, nor
         clear the counters (or the cooldown) a rejection left behind. The stored row is what
         comes back, so the caller shows what the team actually has rather than what this turn
-        tried to write. The cooldown check itself is the backend's (it needs `now`)."""
+        tried to write. The cooldown check itself is the backend's (it needs `now`).
+
+        The second element says whether THIS call wrote the row. Returning only the row made a
+        re-proposal indistinguishable from a fresh one: the card then asked a question the team
+        had already answered, and the caller mirrored the turn's fragment into `memory_facts` on
+        top of the confirmed one. `inserted` is the whole difference, so it is not optional."""
         with self._transaction():
-            self._conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO vocabulary (term, fragment_json, status, proposed_by, proposed_at, "
                 "confirmed_by, confirmed_at, confirmations, uses, rejections, cooldown_until) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(term) DO NOTHING",
@@ -2611,8 +2616,29 @@ class Store:
                  entry.confirmations, entry.uses, entry.rejections,
                  _iso(entry.cooldown_until) if entry.cooldown_until else None),
             )
+            inserted = cur.rowcount > 0
         stored = self.get_vocabulary(entry.term)
-        return stored if stored is not None else entry
+        return (stored if stored is not None else entry), inserted
+
+    def repropose_vocabulary(self, entry: VocabularyEntry) -> VocabularyEntry | None:
+        """Revive a row whose rejection cooldown has run out: the new fragment and proposer, the
+        status back to pending, the cooldown cleared. The **counters and the confirmation history
+        stay** -- the Growth view must still show that this term was once rejected three times,
+        and the auto-demotion rule reads the same numbers.
+
+        The caller (the backend, which has `now`) decides that the cooldown has passed; this
+        method only writes. A cooldown with no end is not a cooldown, so re-proposal after it
+        expires has to be able to produce a fresh pending row rather than a permanent refusal."""
+        if self.get_vocabulary(entry.term) is None:
+            return None
+        with self._transaction():
+            self._conn.execute(
+                "UPDATE vocabulary SET fragment_json = ?, status = 'pending', proposed_by = ?, "
+                "proposed_at = ?, cooldown_until = NULL WHERE term = ?",
+                (fragment_json(entry.fragment), entry.proposed_by, _iso(entry.proposed_at),
+                 entry.term),
+            )
+        return self.get_vocabulary(entry.term)
 
     def list_vocabulary(self, status: str | None = None, cursor: str | None = None,
                         limit: int = 50) -> Page[VocabularyEntry]:

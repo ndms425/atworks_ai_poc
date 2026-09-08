@@ -683,6 +683,21 @@ class VocabularyEntry(BaseModel):
     cooldown_until: datetime | None = None
 
 
+class AliasProposal(BaseModel):
+    """``propose_alias`` 한 번의 결과. ``VocabularyEntry | None``만 돌려주면 "**새로 쓰인** pending
+    행"과 "이미 있던 행"이 같은 모양이라, 재제안이 새 제안처럼 보이고 카드가 이미 답한 질문을 다시
+    묻는다(그리고 그 사이 저장된 뜻은 모델이 이번 턴에 낸 조각으로 조용히 덮인다).
+
+    - ``proposed``: 이 호출이 pending 행 **하나를 새로 썼다**. ``entry``가 그 행이고, 카드가 확인을
+      묻는 것은 이 경우뿐이다.
+    - ``existing``: 그 term은 이미 행이 있다(confirmed / pending / 냉각 중인 rejected). **아무것도
+      쓰이지 않았다** -- ``entry``는 저장된 행 그대로이고, 도구 결과는 그 상태를 말한다.
+    - ``refused``: 쓰기 필터(개인정보 모양)나 모양 검사가 막았다. 어느 테이블에도 아무것도 없고
+      ``entry``는 None이다."""
+    outcome: Literal["proposed", "existing", "refused"]
+    entry: VocabularyEntry | None = None
+
+
 #: 저장 질문의 두 상태. hidden은 사람이 Home에서 치운 것이고, 행은 남는다 -- cluster_key가
 #: UNIQUE라 지우면 같은 군집이 다음 승격에서 새 카드로 되살아난다(self-growth spec §8).
 SavedQuestionStatus = Literal["active", "hidden"]

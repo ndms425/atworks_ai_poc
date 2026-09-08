@@ -17,6 +17,7 @@ from atworks_agent.profiles import ProfileLedger
 from atworks_agent.rules import FormatBatchLedger, FormatLibrary, RuleImpact, RuleLedger
 from atworks_agent.types import (
     ActorKind,
+    AliasProposal,
     ApiSpec,
     ApiWatermark,
     AskEntry,
@@ -34,7 +35,11 @@ from atworks_agent.types import (
     ScopeSummary,
     VocabularyEntry,
 )
-from atworks_agent.vocabulary import entry_to_fact, normalize_term
+from atworks_agent.vocabulary import (
+    entry_to_fact,
+    normalize_term,
+    rejected_fragment_fields,
+)
 
 T0 = datetime(2026, 9, 1, 9, tzinfo=UTC)
 
@@ -366,25 +371,30 @@ class InMemoryBackend(AtworksBackend):
     async def propose_alias(self, session, term, fragment, note=None):
         del note
         normalized = normalize_term(term)
-        if not normalized:
-            return None
+        if not normalized or rejected_fragment_fields(fragment):
+            return AliasProposal(outcome="refused")
         now = (session.local_now() if session is not None else None) or datetime.now(UTC)
         existing = self.vocabulary.get(normalized)
-        if existing is not None and existing.cooldown_until is not None and existing.cooldown_until > now:
-            return None
+        cooled = (existing is not None and existing.status == "rejected"
+                  and (existing.cooldown_until is None or existing.cooldown_until <= now))
+        if existing is not None and not cooled:
+            # 이미 있는 행은 덮지 않고 그대로 돌려준다 -- 재제안은 새 제안이 아니다.
+            return AliasProposal(outcome="existing", entry=existing)
         entry = VocabularyEntry(
             term=normalized, fragment=fragment, status="pending",
             proposed_by=session.operator if session is not None else "", proposed_at=now,
+            confirmations=existing.confirmations if existing else 0,
+            uses=existing.uses if existing else 0,
+            rejections=existing.rejections if existing else 0,
         )
         fact = entry_to_fact(entry)
         try:
             validate_fact(fact.key, fact.value, fact.category.value, fence=ATWORKS_FENCE,
                           write_filter=write_filter_for(()))
         except MemoryWriteRejected:
-            return None
-        stored = existing or entry
-        self.vocabulary[normalized] = stored
-        return stored
+            return AliasProposal(outcome="refused")
+        self.vocabulary[normalized] = entry
+        return AliasProposal(outcome="proposed", entry=entry)
 
     async def list_vocabulary(self, session, status=None, cursor=None, limit=50):
         items = [e for e in self.vocabulary.values() if status is None or e.status == status]

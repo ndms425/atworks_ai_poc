@@ -243,8 +243,10 @@ def build_tools(
                             "team; the card then asks the operator [예]/[아니오], and once someone confirms it, every "
                             "operator's later turns carry that term and you stop asking. Propose the SHAPE the word "
                             "names — a path, a method, a group, a target env, a rule, a status code — never a time "
-                            "window and never a list of ids (those are true today and false next month, and the tool "
-                            "refuses them). Do not propose catalogue words that already mean themselves, and do not "
+                            "window, never a list of ids and never an operator (a window is true today and false next "
+                            "month; an operator id bound into a confirmed term would silently narrow everyone else's "
+                            "questions to one person — the tool refuses all three). Do not propose catalogue words "
+                            "that already mean themselves, and do not "
                             "propose a person's or a customer's name. It stores nothing until a person clicks; it "
                             "renders no card of its own. / 사용자 용어를 필터로 해석했으면 그 해석을 제안한다. 사람이 "
                             "한 번 확인하면 팀 전체의 컨텍스트에 들어간다."),
@@ -253,7 +255,8 @@ def build_tools(
                          "description": "The operator's own word, as they wrote it (≤40 chars)."},
                 "fragment": {**_query_filters_schema(),
                              "description": ("What the word means, as QueryFilters fields. At least one; "
-                                             "since/until/window_days/api_ids/scope_operator are refused.")},
+                                             "since/until/window_days/api_ids/executed_by/scope_operator "
+                                             "are refused.")},
                 "note": {"type": "string", "maxLength": 120,
                          "description": "Optional: one line on why you read it this way."}},
                 "required": ["term", "fragment"], "additionalProperties": False},

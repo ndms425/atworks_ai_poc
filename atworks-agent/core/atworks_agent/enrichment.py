@@ -223,7 +223,8 @@ async def enrich_query_table(payload: PresentQueryTablePayload, context: Enrichm
         # model sentence, exactly like every other figure on this card.
         "pending_alias": (
             {"term": alias.term, "fragment_summary": fragment_summary_ko(alias.fragment)}
-            if (alias := (context.state.pending_aliases[-1] if context.state.pending_aliases else None))
+            if context.config.enable_growth
+            and (alias := (context.state.pending_aliases[-1] if context.state.pending_aliases else None))
             else None
         ),
     }

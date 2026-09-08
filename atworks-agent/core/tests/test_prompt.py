@@ -75,7 +75,8 @@ def test_dynamic_context_carries_matched_vocabulary_and_nothing_when_there_is_no
     assert '"term": "결제 계열"' in text and '"means": "경로 접두사 /v1/payment"' in text
     assert '"path_prefix": "/v1/payment"' in text
     # Byte stability: no matched term, no key at all -- an ordinary turn's context is unchanged.
-    assert build_dynamic_context(atworks_context=None, attached_items=[], vocabulary=[]) ==            build_dynamic_context(atworks_context=None, attached_items=[])
+    assert (build_dynamic_context(atworks_context=None, attached_items=[], vocabulary=[])
+            == build_dynamic_context(atworks_context=None, attached_items=[]))
     assert "vocabulary" not in build_dynamic_context(atworks_context=None, attached_items=[])
 
 

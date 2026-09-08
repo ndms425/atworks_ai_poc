@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from commerce_common.types import PROVENANCE_CAP
 
 from atworks_agent.config import AtworksAgentConfig
@@ -1312,11 +1313,26 @@ async def test_propose_alias_records_a_pending_entry_for_this_turn(backend, conf
     assert list(backend.vocabulary) == ["결제 계열"]
 
 
-async def test_propose_alias_refuses_a_time_window_or_an_id_list(backend, config, skills, session, state):
+async def test_propose_alias_refuses_a_time_window_an_id_list_or_an_operator(
+        backend, config, skills, session, state):
     ex = _exec(backend, config, skills, session, state)
-    for fragment in ({"window_days": 7}, {"api_ids": ["api-1"]}, {"scope_operator": "minseong"}):
+    for fragment in ({"window_days": 7}, {"api_ids": ["api-1"]}, {"executed_by": ["jihoon"]},
+                     {"scope_operator": "minseong"}):
         out = await ex.execute("propose_alias", {"term": "지난주", "fragment": fragment})
         assert out.refused and "fragment" in out.result_text
+    assert state.pending_aliases == [] and backend.vocabulary == {}
+
+
+async def test_propose_alias_is_absent_when_growth_is_off(backend, config, skills, session, state):
+    """두 겹의 게이트. (1) 도구가 목록에서 빠지므로 `execute`가 absent-tool로 거절한다.
+    (2) 그래도 핸들러가 불리면 -- 게이트 표가 틀렸을 때 -- 백엔드를 부르지 않고 돌아온다."""
+    off = config.model_copy(update={"enable_growth": False})
+    assert "propose_alias" in off.absent_tools()
+    ex = _exec(backend, off, skills, session, state)
+    out = await ex.execute("propose_alias", {"term": "결제 계열", "fragment": {"path_prefix": "/v1/payment"}})
+    assert out.refused and "not something this deployment does" in out.result_text
+    direct = await ex._propose_alias({"term": "결제 계열", "fragment": {"path_prefix": "/v1/payment"}})
+    assert "꺼져 있습니다" in direct.result_text
     assert state.pending_aliases == [] and backend.vocabulary == {}
 
 
@@ -1343,7 +1359,25 @@ async def test_propose_alias_is_silent_while_the_term_is_in_cooldown(backend, co
     await backend.reject_alias(session, "결제 계열")
     state.pending_aliases.clear()
     out = await ex.execute("propose_alias", {"term": "결제 계열", "fragment": {"path_prefix": "/v1/pay"}})
-    assert not out.refused and "저장되지 않았습니다" in out.result_text
+    # 카드는 뜨지 않고, 도구 결과가 저장된 상태를 그대로 말한다("제안했습니다"가 아니라).
+    assert not out.refused and "이미 rejected 상태입니다" in out.result_text
+    assert "냉각" in out.result_text and "제안했습니다" not in out.result_text
     assert state.pending_aliases == []
     # The rejected row keeps its own fragment: a re-proposal may not quietly rewrite it.
+    assert backend.vocabulary["결제 계열"].fragment.path_prefix == "/v1/payment"
+
+
+@pytest.mark.parametrize("status", ["pending", "confirmed"])
+async def test_re_proposing_an_existing_term_asks_nothing_and_writes_nothing(
+        backend, config, skills, session, state, status):
+    """재제안이 새 제안처럼 보이면 카드가 이미 답한 질문을 다시 묻는다 -- 이번 턴 스크래치에는
+    **새로 쓰인** pending 행만 들어간다."""
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("propose_alias", {"term": "결제 계열", "fragment": {"path_prefix": "/v1/payment"}})
+    if status == "confirmed":
+        await backend.confirm_alias(session, "결제 계열")
+    state.pending_aliases.clear()
+    out = await ex.execute("propose_alias", {"term": "결제 계열", "fragment": {"path_prefix": "/v1/other"}})
+    assert not out.refused and f"이미 {status} 상태입니다" in out.result_text
+    assert state.pending_aliases == []
     assert backend.vocabulary["결제 계열"].fragment.path_prefix == "/v1/payment"

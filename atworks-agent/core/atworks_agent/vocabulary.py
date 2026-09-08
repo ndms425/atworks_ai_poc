@@ -3,9 +3,12 @@
 확정된 항목을 이번 턴 메시지에 맞춰 고르는 순수 함수들만 있다. 저장은 host의
 ``SqliteMemoryStore``(commerce_common.memory 계약)와 ``vocabulary`` 사이드카가 한다.
 
-한 줄 규칙: **별칭은 모양에 이름을 붙이는 것이지 기간이나 id 목록에 붙이는 게 아니다.** "결제 계열"이
+한 줄 규칙: **별칭은 모양에 이름을 붙이는 것이지 기간이나 대상에 붙이는 게 아니다.** "결제 계열"이
 ``path_prefix=/v1/payment``이면 그건 다음 달에도 참이지만, "지난주"를 ``since/until``로 굳히면 다음
-주에 거짓이 된다 -- 그래서 시간 창과 id 목록은 ``fragment_from_tool``이 거부한다."""
+주에 거짓이 된다 -- 그래서 시간 창은 ``fragment_from_tool``이 거부한다. 대상(``api_ids``,
+``executed_by``, ``scope_operator``)도 같은 이유로 거부한다: 한 번의 클릭으로 확정된 별칭은 **팀
+전체의** 컨텍스트에 실리므로, 거기 오퍼레이터 id가 굳어 있으면 다른 사람의 질문이 조용히 남의
+id로 좁혀진다."""
 
 from __future__ import annotations
 
@@ -28,10 +31,10 @@ MAX_FRAGMENT_JSON_CHARS = 200
 DEFAULT_INJECT_CAP = 8
 
 #: 별칭이 이름 붙일 수 없는 필터. 시간 창(``since``/``until``/``window_days``)은 오늘만 참인 값이고,
-#: id 목록(``api_ids``)과 ``scope_operator``는 모양이 아니라 대상이다 -- 조직 전체 컨텍스트에 실리면
-#: 다른 오퍼레이터의 질문을 남의 id로 좁힌다.
+#: id 목록(``api_ids``)과 오퍼레이터(``executed_by``/``scope_operator``)는 모양이 아니라 대상이다 --
+#: 조직 전체 컨텍스트에 실리면 다른 오퍼레이터의 질문을 남의 id로 좁힌다.
 REJECTED_FRAGMENT_FIELDS: tuple[str, ...] = (
-    "since", "until", "window_days", "api_ids", "scope_operator",
+    "since", "until", "window_days", "api_ids", "executed_by", "scope_operator",
 )
 
 
@@ -54,7 +57,7 @@ def normalize_term(term: str) -> str:
 
 def fragment_from_tool(tool_fragment: object) -> QueryFilters:
     """모델이 ``propose_alias(fragment=...)``로 낸 딕트를 ``QueryFilters`` 조각으로 검증한다.
-    ``ValueError``로 거절하는 세 경우: 빈 조각, 시간 창·id 목록(:data:`REJECTED_FRAGMENT_FIELDS`),
+    ``ValueError``로 거절하는 세 경우: 빈 조각, 시간 창·대상(:data:`REJECTED_FRAGMENT_FIELDS`),
     직렬화가 200자를 넘는 조각. pydantic(``extra="forbid"``)이 나머지를 본다."""
     if not isinstance(tool_fragment, dict):
         raise ValueError("fragment must be an object of QueryFilters fields")
@@ -68,8 +71,9 @@ def fragment_from_tool(tool_fragment: object) -> QueryFilters:
     offending = [name for name in REJECTED_FRAGMENT_FIELDS if name in given]
     if offending:
         raise ValueError(
-            f"별칭은 모양에만 붙입니다 -- {', '.join(offending)}는 기간이거나 id 목록이라 "
-            "다음 달에는 다른 것을 뜻합니다. 경로·메서드·그룹·계·규칙·상태코드로 적으세요."
+            f"별칭은 모양에만 붙입니다 -- {', '.join(offending)}는 기간이거나 대상(id·오퍼레이터)이라 "
+            "다음 달에는 다른 것을 뜻하거나 남의 질문을 남의 id로 좁힙니다. "
+            "경로·메서드·그룹·계·규칙·상태코드로 적으세요."
         )
     fragment = QueryFilters.model_validate(given)
     if len(fragment_json(fragment)) > MAX_FRAGMENT_JSON_CHARS:
@@ -77,6 +81,31 @@ def fragment_from_tool(tool_fragment: object) -> QueryFilters:
             f"fragment가 너무 큽니다(JSON {MAX_FRAGMENT_JSON_CHARS}자 이하) -- 값 목록을 줄이세요."
         )
     return fragment
+
+
+def rejected_fragment_fields(fragment: QueryFilters) -> list[str]:
+    """이미 만들어진 ``QueryFilters``에서 별칭이 이름 붙일 수 없는 필드를 고른다 -- 백엔드가 저장
+    직전에 한 번 더 서는 문이다(:func:`fragment_from_tool`은 툴 입력에서만 선다). 두 자리에 같은
+    규칙을 두는 이유: 저장 경로가 툴 하나뿐이라는 보장은 이 계약이 아니라 오늘의 배선일 뿐이라,
+    "오퍼레이터 id가 팀 전체의 컨텍스트에 굳는 일은 없다"는 규칙은 저장하는 쪽에도 있어야 한다."""
+    given = fragment.model_dump(mode="json", exclude_none=True)
+    return [name for name in REJECTED_FRAGMENT_FIELDS if name in given]
+
+
+def existing_alias_note_ko(entry: VocabularyEntry) -> str:
+    """이미 있는 term을 다시 제안했을 때 도구 결과가 말하는 **서버 문장**. 재제안은 아무것도 쓰지
+    않으므로 카드도 뜨지 않는다 -- 모델이 "제안했습니다"라고 말하면 그건 거짓이 된다. 상태마다 다음
+    행동이 다르기 때문에 상태를 그대로 말한다."""
+    if entry.status == "confirmed":
+        tail = "팀이 이미 확인한 뜻입니다 -- 그대로 쓰세요."
+    elif entry.status == "rejected":
+        until = entry.cooldown_until.date().isoformat() if entry.cooldown_until else "당분간"
+        tail = f"사람이 거부해 {until}까지 냉각 중입니다."
+    else:
+        tail = "확인 대기 중입니다 -- 카드의 [예/아니오]를 기다리세요."
+    return (
+        f"‘{entry.term}’은 이미 {entry.status} 상태입니다 — {tail} 다시 제안하지 마세요."
+    )
 
 
 def fragment_json(fragment: QueryFilters) -> str:
