@@ -158,14 +158,20 @@ def cluster_key_for(
     spec: QuerySpec | None,
     unmet: tuple[UnmetReason, str, str] | None,
 ) -> str:
-    """"같은 질문"의 유일한 판정 기준(§6). 스펙이 있으면 값을 뺀 정규화 스펙 키
-    (``catalog.cluster_key_for_spec`` -- 필터 **값**은 절대 들어가지 않는다). 스펙이 없는
-    unmet은 사유 + 질문 토큰, 그 밖은 outcome:intent다. 어느 갈래에서도 사용자 값(운영자 id,
-    API 경로 값, 마스킹된 개인정보)이 키에 실리지 않는다."""
+    """"같은 질문"의 유일한 판정 기준(§6). **unmet이 먼저다**: 답하지 못한 턴은 사유 + 질문
+    토큰으로 묶는다 — 그 턴이 스펙 하나를 돌려 보고 나서 "이건 못 한다"고 말했더라도(첫 시도가
+    빗나가고 `note_unmet_ask`로 끝나는 흔한 모양) 그 스펙은 **답이 아니라 실패한 시도**라,
+    같은 스펙을 실제로 답한 군집과 한 열쇠로 묶으면 승격기가 답한 질문 5건 안에 못 답한 질문을
+    섞어 세고 미충족 군집은 사라진다. 그다음이 스펙: 값을 뺀 정규화 스펙 키
+    (``catalog.cluster_key_for_spec`` -- 필터 **값**은 절대 들어가지 않는다). 그 밖은
+    outcome:intent다. 어느 갈래에서도 사용자 값(운영자 id, API 경로 값, 마스킹된 개인정보)이
+    키에 실리지 않는다."""
+    # `outcome == "unmet"`이 아니면서 삼중항이 있는 경우는 `action` 턴 하나뿐이고(action이
+    # unmet보다 앞선다), 그때 스펙이 있으면 그건 실제로 돌아간 질의다 -- 스펙 키를 쓴다.
+    if unmet is not None and (outcome == "unmet" or spec is None):
+        return f"unmet:{unmet[0]}|" + ",".join(normalized_tokens(question))
     if spec is not None:
         return catalog.cluster_key_for_spec(spec)
-    if unmet is not None:
-        return f"unmet:{unmet[0]}|" + ",".join(normalized_tokens(question))
     return f"{outcome}:{intent}"
 
 

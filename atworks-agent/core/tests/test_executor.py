@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from commerce_common.types import PROVENANCE_CAP
 
+from atworks_agent.asklog import classify_turn
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.executor import AtworksToolExecutor
+from atworks_agent.masking import policy_from_config
 from atworks_agent.rules import RuleDraft
 from atworks_agent.types import ApiSpec, RunResult, RunStatus
 
@@ -1294,6 +1296,26 @@ async def test_a_refused_card_does_not_increment_turn_cards(backend, config, ski
         "title": "실패", "items": [{"kind": "fail", "ref_id": "run-never-seen", "headline": "x"}],
     })
     assert out.refused and state.turn_cards == 0
+
+
+async def test_chips_and_screen_directives_are_not_cards(backend, config, skills, session, state):
+    """칩은 모든 턴의 마지막 호출이고, 화면 지시어는 클라이언트가 **실행**하는 것이라 그릴
+    카드조차 없다(웹의 GenerativeBlock이 null을 돌려준다). 이 셋을 카드로 세면 `partial`
+    — "도구는 돌았는데 보여 준 게 없다" — 이 영영 나오지 않고, Growth 뷰의 비율이 틀리며
+    👍가 답하지 않은 턴에서 회귀 케이스를 만든다."""
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("list_runs", {})               # 데이터 도구는 돌았다
+    assert not (await ex.execute("navigate_screen", {"view": "runs"})).refused
+    assert not (await ex.execute("highlight_screen", {
+        "targets": [{"kind": "run", "ref_id": "run-1"}]})).refused
+    assert not (await ex.execute("present_suggestions", {"suggestions": ["다음"]})).refused
+    assert state.turn_cards == 0
+    entry = classify_turn(
+        question="어디 봐야 해?", tool_names=list(state.turn_tool_names), cards=state.turn_cards,
+        unmet=None, spec=None, policy=policy_from_config(config), session=session,
+        turn_id="t-chips", now=T0,
+    )
+    assert entry.outcome == "partial" and entry.cards == 0
 
 
 # -- propose_alias (self-growth spec §7) -------------------------------------------------

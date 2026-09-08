@@ -177,11 +177,24 @@ def test_two_unmet_questions_with_the_same_words_in_another_order_share_a_cluste
     assert one.cluster_key == two.cluster_key
 
 
-def test_a_spec_wins_over_the_unmet_branch():
-    # A turn that queried AND reported a gap clusters with the query it actually ran.
+def test_an_unmet_turn_clusters_on_the_unmet_form_even_when_it_ran_a_spec():
+    """spec §6: unmet은 `reason|토큰`이다 — 그 턴이 스펙 하나를 돌려 보고 나서 "이건 못 한다"고
+    말했더라도. 그 스펙은 답이 아니라 **빗나간 시도**라, 같은 스펙을 실제로 답한 군집과 한 열쇠로
+    묶으면 승격기가 답한 질문 5건 안에 못 답한 질문을 섞어 세고 미충족 군집은 사라진다."""
     entry = _classify(tools=["query_runs", "note_unmet_ask"], cards=1, spec=_spec(),
                       unmet=("no_evidence", "…", "…"))
-    assert entry.cluster_key.startswith("dims=")
+    assert entry.outcome == "unmet"
+    assert entry.cluster_key.startswith("unmet:no_evidence|")
+    # 같은 스펙을 실제로 **답한** 턴과 열쇠가 다르다.
+    answered = _classify(tools=["query_runs"], cards=1, spec=_spec(), turn_id="t-2")
+    assert answered.cluster_key.startswith("dims=") and answered.cluster_key != entry.cluster_key
+
+
+def test_an_action_turn_that_also_ran_a_spec_still_clusters_on_the_spec():
+    # `action`이 `unmet`보다 앞선다(§6). 그 턴에서 스펙은 실제로 돌아갔으므로 스펙 키가 맞다.
+    entry = _classify(tools=["query_runs", "note_unmet_ask", "stage_job"], cards=1, spec=_spec(),
+                      unmet=("refused", "…", "…"))
+    assert entry.outcome == "action" and entry.cluster_key.startswith("dims=")
 
 
 def test_a_spec_less_turn_clusters_on_outcome_and_intent():

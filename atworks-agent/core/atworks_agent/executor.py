@@ -10,7 +10,11 @@ from typing import Any, get_args
 
 from commerce_common.execution import BaseToolExecutor, Handler, clamp_limit, parse_argument
 from commerce_common.memory import MemoryRuntime
-from commerce_common.presentation import PresentationComponent, PresentationExtension
+from commerce_common.presentation import (
+    CHIPS_COMPONENT,
+    PresentationComponent,
+    PresentationExtension,
+)
 from commerce_common.skills import SkillRegistry
 from commerce_common.streaming import AgentEvent, ToolOutcome
 from commerce_common.types import PROVENANCE_CAP
@@ -101,6 +105,14 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
     return MemoryRuntime.build(config, store, fence=ATWORKS_FENCE,
                                extraction_prompt=ATWORKS_MEMORY_EXTRACTION_PROMPT, write_filter=write_filter)
 
+
+#: Components that ride the `ui` event but are NOT a card the operator can read an answer off.
+#: The chips end every turn, and the two screen directives are EXECUTED by the client (a view
+#: switch, a scroll, a red-box overlay) rather than rendered. `asklog.decide_outcome` asks "did a
+#: card come out"; counting these three makes that question unanswerable — `partial` becomes
+#: unreachable, so the Growth view's answered ratio is wrong and a 👍 on a turn that showed
+#: nothing mints a regression case with no behaviour in it.
+NON_CARD_COMPONENTS = frozenset({CHIPS_COMPONENT, "screen_navigate", "screen_highlight"})
 
 RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
 # The four reasons note_unmet_ask accepts, read off the Literal so the tool schema, the executor's
@@ -320,7 +332,14 @@ class AtworksToolExecutor(BaseToolExecutor):
             # ask_log's "카드가 나왔나" (asklog.decide_outcome). Counted here, at the one place a
             # component's `ui` event is born, so a refused or held presentation never counts as
             # an answer -- the operator saw nothing.
-            if any(event.type == "ui" for event in outcome.events):
+            #
+            # 칩과 화면 지시어는 카드가 아니다. 칩은 모든 턴의 마지막 호출이고, 화면 지시어는
+            # 클라이언트가 **실행**하는 것이라 그릴 카드조차 없다(GenerativeBlock이 null을
+            # 돌려준다). 이것들을 세면 `partial`(도구는 돌았는데 보여 준 게 없다)이 영영 나오지
+            # 않고, 그러면 Growth 뷰의 비율이 틀리고 👍가 답하지 않은 턴에서 eval 케이스를 만든다.
+            if spec.component not in NON_CARD_COMPONENTS and any(
+                event.type == "ui" for event in outcome.events
+            ):
                 self._state.turn_cards += 1
             if spec.name == QUESTION_TOOL:
                 self._asked_form = True
