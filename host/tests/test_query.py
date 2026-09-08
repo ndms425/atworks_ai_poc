@@ -579,6 +579,51 @@ def test_window_alignment_is_whole_local_days_and_the_previous_window_does_not_o
     assert align_days(*resolve_window(explicit, NOW, DEFAULT_DAYS), TZ) == ("2026-09-01", "2026-09-04")
 
 
+HOT_DAYS = 180
+
+
+def test_resolve_window_clamps_since_to_the_hot_partition():
+    """`window_days`는 이미 `le=180`이라 이 선을 넘을 수 없다 — 명시적 `since`만 넘는다.
+    클램프하지 않으면 롤업(영구)과 `runs` arm(보존이 archive로 옮긴다)이 같은 질문에 다른 답을
+    낸다. `until`은 건드리지 않는다: 미래를 자르는 규칙은 여기 없다."""
+    ancient = QuerySpec(measures=["runs"], filters=QueryFilters(
+        since=NOW - timedelta(days=4 * 365), until=NOW))
+    since, until = resolve_window(ancient, NOW, DEFAULT_DAYS, HOT_DAYS)
+    assert since == NOW - timedelta(days=HOT_DAYS) and until == NOW
+    # 이미 지평선 안이면 그대로 둔다.
+    recent = QuerySpec(measures=["runs"], filters=QueryFilters(since=NOW - timedelta(days=3)))
+    assert resolve_window(recent, NOW, DEFAULT_DAYS, HOT_DAYS)[0] == NOW - timedelta(days=3)
+    # 클램프를 끄면(hot_days=None) 옛 동작 그대로 — 오라클 300케이스가 이 경로를 쓴다.
+    assert resolve_window(ancient, NOW, DEFAULT_DAYS)[0] == NOW - timedelta(days=4 * 365)
+
+
+@pytest.mark.parametrize("label,dimensions,filters_extra", [
+    ("rollup_day", ["api"], {}),
+    ("rollup_key_day", ["failed_rule"], {}),
+    ("runs", ["api"], {"executed_by": ["minseong"]}),
+])
+def test_a_window_reaching_past_the_hot_horizon_answers_the_clamped_window_on_every_arm(
+        synthetic, label, dimensions, filters_extra):
+    """4년 전부터 물어도 답은 hot 파티션(180일)까지다 — **모든 arm에서 같은 창으로**. 이 클램프가
+    없으면 롤업 arm은 4년을 답하고 run arm과 증거 표본은 180일을 답한다: 같은 질문, 소스에 따라
+    다른 답. `QueryResult.window`는 클램프된 쌍을 보고하므로 답이 자기가 덮은 창을 말한다."""
+    ancient = QuerySpec(dimensions=dimensions, measures=["runs", "non_pass"], limit=20,
+                        filters=QueryFilters(since=NOW - timedelta(days=4 * 365), **filters_extra))
+    bounded = QuerySpec(dimensions=dimensions, measures=["runs", "non_pass"], limit=20,
+                        filters=QueryFilters(since=NOW - timedelta(days=HOT_DAYS), **filters_extra))
+    got = synthetic.query(ancient, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS,
+                          hot_days=HOT_DAYS)
+    want = synthetic.query(bounded, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS,
+                           hot_days=HOT_DAYS)
+    assert got.source == select_source(ancient) == label
+    assert got.window == want.window
+    assert got.window[0] == day_bounds(*align_days(NOW - timedelta(days=HOT_DAYS), NOW, TZ), TZ)[0]
+    assert got.total_groups == want.total_groups and got.population == want.population
+    assert [(r.keys, r.measures) for r in got.rows] == [(r.keys, r.measures) for r in want.rows]
+    # 증거 표본은 이 창 안의 실제 run이다 — 클램프가 표본을 말려 죽이지 않는다.
+    assert got.rows and any(r.run_ids for r in got.rows)
+
+
 def test_an_empty_window_answers_nothing_rather_than_scanning(synthetic):
     spec = QuerySpec(measures=["runs"], dimensions=["api"], filters=QueryFilters(
         since=datetime(2026, 9, 1, 1, tzinfo=KST), until=datetime(2026, 9, 1, 2, tzinfo=KST)))

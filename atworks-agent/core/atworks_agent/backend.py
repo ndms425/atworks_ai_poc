@@ -148,6 +148,12 @@ class AtworksBackend(ABC):
         * **창**: ``filters.window_days``가 있으면 ``[now - window_days, now]``, ``since``/
           ``until``이 있으면 그대로, 둘 다 없으면 서버의 기본 창(``max_aggregate_window_days``).
           ``day``/``week``와 창 경계는 서버의 ``briefing_tz`` 기준 로컬 날짜다.
+        * **창의 하한은 hot 파티션이다.** ``since``는 ``now - retention_hot_days``로 **클램프**
+          한다(``window_days``는 이미 180일로 제한되므로 명시적 ``since``만 이 선을 넘을 수 있다).
+          클램프하지 않으면 같은 질문이 소스에 따라 다른 답을 낸다 -- 롤업은 영구라 답하고,
+          run 테이블 arm과 모든 증거 표본은 보존 작업이 ``runs_archive``로 옮긴 행을 못 본다.
+          ``QueryResult.window``는 **클램프된** 쌍을 보고해야 한다: 답은 물어본 창이 아니라
+          실제로 덮은 창을 말한다. 더 옛날을 읽는 자리는 ``RunsQuery(archived=True)``다.
         * **정렬과 절단은 집계 질의 안에서** (``ORDER BY … LIMIT``). 애플리케이션이 전체 그룹을
           받아 정렬하면 셀 축에서 프로젝트 크기만큼 행이 넘어온다 -- scale 브랜치의 상시 규칙.
         * ``total_groups``는 **LIMIT 전** 그룹 수, ``population``은 필터를 적용한 run COUNT.

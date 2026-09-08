@@ -97,20 +97,34 @@ def path_segments(path: str) -> tuple[str | None, str | None, str | None, str | 
     return seg1, seg2, seg3, "/" + "/".join(parts[:2])
 
 
-def resolve_window(spec: QuerySpec, now: datetime, default_days: int) -> tuple[datetime, datetime]:
+def resolve_window(spec: QuerySpec, now: datetime, default_days: int,
+                   hot_days: int | None = None) -> tuple[datetime, datetime]:
     """Spec §3's window rule, verbatim and timezone-free: ``window_days`` means
     ``[now - window_days, now]``; an explicit ``since``/``until`` wins over it (they cannot be
     combined -- ``QueryFilters`` rejects that) and whichever half is missing falls back to
     ``now - default_days`` / ``now``; nothing at all means ``default_days``.
+
+    ``hot_days`` (the deployment's ``retention_hot_days``) CLAMPS ``since`` to
+    ``now - hot_days``. ``window_days`` is already capped at 180 by ``QueryFilters``, so only an
+    explicit ``since`` can reach further back -- and past the hot horizon the arms stop agreeing:
+    the rollups are permanent and would answer, while the ``runs`` arm and every evidence sample
+    read a table the retention job has moved to ``runs_archive``. The same question would then
+    give two different answers depending on which source ``select_source`` happened to pick. The
+    clamped pair is what ``QueryResult.window`` reports, so the answer says which window it
+    actually covers rather than the one that was asked for. Reading further back is what
+    ``RunsQuery(archived=True)`` is for.
 
     The result is the RAW pair. Day alignment (``align_days``) needs a timezone and happens in
     ``compile_query``; keeping the two apart is what lets the alignment rule be stated -- and
     tested -- in one place."""
     filters = spec.filters
     if filters.window_days is not None:
-        return now - timedelta(days=filters.window_days), now
-    since = filters.since if filters.since is not None else now - timedelta(days=default_days)
-    until = filters.until if filters.until is not None else now
+        since, until = now - timedelta(days=filters.window_days), now
+    else:
+        since = filters.since if filters.since is not None else now - timedelta(days=default_days)
+        until = filters.until if filters.until is not None else now
+    if hot_days is not None:
+        since = max(since, now - timedelta(days=hot_days))
     return since, until
 
 
@@ -388,13 +402,18 @@ def _status_of(spec: QuerySpec) -> str | None:
 
 
 def compile_query(spec: QuerySpec, *, now: datetime, tz: str, previous: bool = False,
-                  default_days: int = 30) -> CompiledQuery:
+                  default_days: int = 30, hot_days: int | None = None) -> CompiledQuery:
     """Compile ``spec`` into one ranked, limited statement plus its totals statement.
 
     ``previous=True`` compiles the SAME spec over the window immediately before it (same length,
-    no shared day) -- ``compare_previous_window`` runs the two and joins them in python.
+    no shared day) -- ``compare_previous_window`` runs the two and joins them in python. The
+    previous window is shifted off the ALREADY-CLAMPED main window, so a comparison never widens
+    what the clamp narrowed; it can still fall entirely below the hot horizon (any long window's
+    previous window does), which the compare join reports as missing rather than as zero.
+
+    ``hot_days`` clamps ``since`` -- see ``resolve_window``.
     """
-    since, until = resolve_window(spec, now, default_days)
+    since, until = resolve_window(spec, now, default_days, hot_days)
     day_from, day_to = align_days(since, until, tz)
     if previous:
         day_from, day_to = shift_days(day_from, day_to)

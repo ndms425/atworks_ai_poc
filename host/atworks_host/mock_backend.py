@@ -309,6 +309,7 @@ class MockAtworks(AtworksBackend):
         return self.store.query(
             spec, now=now or datetime.now(UTC), tz=self._config.briefing_tz,
             default_window_days=self._config.max_aggregate_window_days,
+            hot_days=self._config.retention_hot_days,
         )
 
     async def summarize_insights(self, session, since, until=None, scope_operator=None) -> Insights:
@@ -723,6 +724,7 @@ class MockAtworks(AtworksBackend):
         result = self.store.query(
             saved.spec, now=now or datetime.now(UTC), tz=self._config.briefing_tz,
             default_window_days=self._config.max_aggregate_window_days,
+            hot_days=self._config.retention_hot_days,
         )
         self.store.bump_saved_use(saved_id, now or datetime.now(UTC))
         return result

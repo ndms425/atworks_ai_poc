@@ -77,6 +77,11 @@ class QuerySpec(BaseModel):
 의미 규칙(전부 호스트):
 
 - `window_days`가 있으면 `since = now - window_days`, `until = now`. 둘 다 없으면 `max_aggregate_window_days`.
+- **창의 하한은 hot 파티션이다**(최종 수정 파도에서 확정): `since`는 `now - retention_hot_days`(180)로 클램프한다.
+  `window_days`는 이미 `le=180`이라 명시적 `since`만 이 선을 넘을 수 있고, 넘으면 같은 질문이 소스에 따라 다른 답을
+  낸다 — 롤업은 영구라 답하고, `runs` arm과 증거 표본은 보존 작업이 `runs_archive`로 옮긴 행을 못 본다.
+  `QueryResult.window`는 **클램프된** 쌍을 보고한다(답은 실제로 덮은 창을 말한다). 더 옛날은 `RunsQuery(archived=True)`.
+  `compare_previous_window`의 이전 창은 **클램프된** 창을 기준으로 뒤로 민다 — 비교가 클램프를 넓히지는 못한다.
 - `path_segment_n` = 경로를 `/`로 나눈 n번째 조각(1-base, 선행 `/v1` 같은 버전 조각도 1). `path_prefix_2` = 앞 두 조각.
   `{id}`·숫자만인 조각은 그대로(라벨링 안 함). `n`은 1·2·3 — **세 번째 조각이 T10에서 추가됐다**: 실제 카탈로그는
   `/v1/product/history/001796`처럼 버전 → 도메인 → 액션 순이라 "엔드포인트 계열"이 세 번째 조각에 있다.

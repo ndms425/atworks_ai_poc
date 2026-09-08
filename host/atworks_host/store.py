@@ -2000,15 +2000,20 @@ class Store:
     # -- the self-growth query engine (spec 2026-09-07 §3/§4) ------------------------------------
 
     def query(self, spec: QuerySpec, *, now: datetime, tz: str = "Asia/Seoul",
-              default_window_days: int = 30) -> QueryResult:
+              default_window_days: int = 30, hot_days: int | None = None) -> QueryResult:
         """Execute one ``QuerySpec``. Compilation (and with it source selection, the window rule
         and every measure's arithmetic) lives in ``query_sql``; this method owns only the round
         trips: the ranked page, the totals, the two fills a source cannot answer in SQL, the
         evidence samples, and the previous-window join.
 
+        ``hot_days`` (the deployment's ``retention_hot_days``) clamps the window's ``since`` so no
+        arm reads past the hot partition -- see ``query_sql.resolve_window``. ``QueryResult.window``
+        reports the CLAMPED pair.
+
         Python sees at most ``spec.limit`` rows -- the rank and the cut are in the statement, the
         scale branch's standing rule."""
-        compiled = compile_query(spec, now=now, tz=tz, default_days=default_window_days)
+        compiled = compile_query(spec, now=now, tz=tz, default_days=default_window_days,
+                                 hot_days=hot_days)
         rows, raw_keys = self._query_rows(spec, compiled)
         total_groups, population = self._conn.execute(
             compiled.totals_sql, compiled.totals_params).fetchone()
@@ -2020,7 +2025,7 @@ class Store:
             self._fill_query_samples(rows, raw_keys, spec, compiled, tz)
         if spec.compare_previous_window:
             previous = compile_query(spec, now=now, tz=tz, previous=True,
-                                     default_days=default_window_days)
+                                     default_days=default_window_days, hot_days=hot_days)
             self._join_previous_window(rows, raw_keys, spec, previous)
         return QueryResult(
             spec=spec, rows=rows, total_groups=total_groups, population=population,
