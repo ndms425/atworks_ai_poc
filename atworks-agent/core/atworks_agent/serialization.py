@@ -81,8 +81,14 @@ def audit_record(entry: AuditEntry) -> dict[str, Any]:
 
 def ask_record(entry: AskEntry) -> dict[str, Any]:
     """ask_log 1행. ``question``은 저장 시점에 이미 마스킹된 요약이라 여기서 더 손대지 않는다 --
-    한 번 더 마스킹하면 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽힌다. 파생 필드도 별칭도 없다."""
-    return entry.model_dump(mode="json")
+    한 번 더 마스킹하면 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽힌다.
+
+    ``session_id``만 **빠진다.** ``/ask-log``는 세션 범위가 아니라 팀 전체를 보여 주는 읽기라
+    (Growth 뷰), 그 응답에 세션 id가 실리면 한 사람의 브라우저 탭에서 다른 사람의 살아 있는
+    세션 식별자를 읽을 수 있다 -- 그 자체로 요청에 붙일 수 있는 값이다(``X-Session-Id``). 저장
+    자체는 그대로다(``AskEntry.session_id``는 원장에 남아 조사에 쓰인다); 나가지 않을 뿐이다.
+    그 밖에는 파생 필드도 별칭도 없다."""
+    return entry.model_dump(mode="json", exclude={"session_id"})
 
 
 def vocabulary_record(entry: VocabularyEntry) -> dict[str, Any]:

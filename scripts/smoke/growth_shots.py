@@ -468,8 +468,10 @@ def _unmet_rows(session_id: str, before_seq: int) -> list[dict[str, Any]]:
     page = api_get("/ask-log?outcome=unmet&limit=50", session_id)
     check("6. /ask-log?outcome=unmet 라우트가 봉투를 돌려준다",
           set(page) >= {"items", "total", "next_cursor"})
-    return [row for row in page["items"]
-            if row.get("session_id") == session_id and (row.get("seq") or 0) > before_seq]
+    # `seq` alone, not `session_id`: the wire record deliberately carries no session id
+    # (`/ask-log` is a team read, and a live session id there is a header someone can replay).
+    # A monotonic seq taken before the turn is the same fence for a smoke that owns the host.
+    return [row for row in page["items"] if (row.get("seq") or 0) > before_seq]
 
 
 def step_6(page: Page, state: dict[str, Any], session_id: str) -> None:
@@ -510,11 +512,14 @@ def step_6(page: Page, state: dict[str, Any], session_id: str) -> None:
 
 def step_7(session_id: str, asked: int) -> None:
     log = api_get("/ask-log?limit=200", session_id)
-    rows = [row for row in log["items"] if row.get("session_id") == session_id]
+    # The wire record carries no session id on purpose (a team read must not hand out another
+    # operator's live header), so this smoke -- which owns the host and is the only chatter --
+    # counts the whole log instead of filtering to itself.
+    rows = log["items"]
     outcomes = {row.get("outcome") for row in rows}
-    print(f"\n[7] /ask-log: total={log['total']} 이 세션 {len(rows)}행 "
+    print(f"\n[7] /ask-log: total={log['total']} {len(rows)}행 "
           f"outcomes={sorted(o for o in outcomes if o)}")
-    check(f"7. 이 세션 ask_log ≥ {asked}행 (본 것: {len(rows)})", len(rows) >= asked)
+    check(f"7. ask_log ≥ {asked}행 (본 것: {len(rows)})", len(rows) >= asked)
     check("7. outcome이 answered/partial/unmet/action 안에 있다",
           bool(outcomes) and outcomes <= {"answered", "partial", "unmet", "action"})
     # 라우트의 total은 필터 뒤의 참 개수라 outcome별 total 4개가 곧 모집단의 분해다.
@@ -525,12 +530,14 @@ def step_7(session_id: str, asked: int) -> None:
           sum(per_outcome.values()) == log["total"])
     summary = api_get("/growth/summary?days=7", session_id)
     print(f"    /growth/summary: {json.dumps(summary, ensure_ascii=False)}")
-    # GrowthSummary는 타일 셋(answered/partial/unmet)만 센다 -- action은 타일이 아니므로 합은
-    # asks_total에서 action 개수만큼 모자란다. 창(7일) 안에 로그가 오늘치뿐일 때 성립한다.
-    tiles = {k: summary.get(k, 0) for k in ("answered", "partial", "unmet")}
-    check(f"7. growth/summary 합이 맞는다 ({tiles} + action {per_outcome['action']} "
-          f"vs asks_total {summary.get('asks_total')})",
-          sum(tiles.values()) + per_outcome["action"] == summary.get("asks_total"))
+    # GrowthSummary now carries all FOUR outcomes, so the tiles are the population's whole
+    # decomposition -- their sum must be `asks_total` with nothing borrowed from another read.
+    tiles = {k: summary.get(k, 0) for k in ("answered", "partial", "unmet", "action")}
+    check(f"7. growth/summary 타일 합 = asks_total ({tiles} vs {summary.get('asks_total')})",
+          sum(tiles.values()) == summary.get("asks_total"))
+    # 이 비교는 창(7일) 안에 로그가 이 실행분뿐일 때 성립한다 -- per_outcome은 창이 없는 total이다.
+    check(f"7. summary.action = /ask-log?outcome=action의 total ({tiles['action']} vs "
+          f"{per_outcome['action']})", tiles["action"] == per_outcome["action"])
 
 
 def step_8(session_id: str, before: dict[str, Any]) -> None:
@@ -818,8 +825,11 @@ def step_growth_view(page: Page, state: dict[str, Any], session_id: str) -> None
               state["term"] in seen["배운 어휘"])
     unmet = summary.get("unmet_clusters") or []
     check(f"G. /growth/summary가 미충족 군집을 갖고 있다 (본 것: {len(unmet)}개)", bool(unmet))
+    check(f"G. 군집 총계가 목록 길이가 아니라 서버가 센 값이다 "
+          f"({summary.get('unmet_clusters_total')} >= {len(unmet)})",
+          summary.get("unmet_clusters_total", 0) >= len(unmet))
     week = seen.get("이번 주", "")
-    tiles = {name: summary.get(name, 0) for name in ("answered", "partial", "unmet")}
+    tiles = {name: summary.get(name, 0) for name in ("answered", "partial", "unmet", "action")}
     check(f"G. ‘이번 주’ 탭 숫자가 /growth/summary와 같다 (기대 {tiles})",
           all(str(value) in week for value in tiles.values()))
 

@@ -364,7 +364,17 @@ function UnmetTab({ refreshKey, days, onDays }: { refreshKey: number; days: numb
   return (
     <div className="flex flex-col gap-3">
       <DaysPicker days={days} onDays={onDays} />
-      <Panel title="답하지 못한 질문 군집" subtitle={`최근 ${days}일 · 큰 군집부터`}>
+      {/* 이 표는 상위 N개이고 커서가 없다(서버가 그렇게 답한다) — 그러니 "N개"라고만 쓰면 한
+          페이지를 다 읽은 사람이 그것이 전부인지 알 길이 없다. 총계는 목록의 길이가 아니라
+          서버가 센 서로 다른 군집 수(`unmet_clusters_total`)다. */}
+      <Panel
+        title="답하지 못한 질문 군집"
+        subtitle={
+          summary.unmet_clusters_total > clusters.length
+            ? `최근 ${days}일 · 큰 군집부터 · 상위 ${formatNumber(clusters.length)} / 총 ${formatNumber(summary.unmet_clusters_total)}`
+            : `최근 ${days}일 · 큰 군집부터 · 총 ${formatNumber(summary.unmet_clusters_total)}`
+        }
+      >
         {clusters.length === 0 ? (
           <div className="px-[18px] py-3 text-[12.5px] text-(--ink-soft)">이 창에서 답하지 못한 질문이 없습니다.</div>
         ) : (
@@ -481,12 +491,18 @@ function WeekTab({ refreshKey, days, onDays }: { refreshKey: number; days: numbe
           두 줄이 한 줄처럼 이어져 보인다. web-shared는 두 역할이 함께 쓰는 코드라 여기서
           고치지 않는다 — 부르는 쪽이 4개씩 부른다. 나뉜 자리도 뜻이 있다: 위는 질문의 결말,
           아래는 그 결과 시스템이 배운 것. */}
-      <Panel title={`최근 ${windowDays}일`} subtitle="전부 서버가 센 건수입니다 (비율 없음)">
+      <Panel
+        title={`최근 ${windowDays}일`}
+        subtitle={`질문 ${formatNumber(data.asks_total)}건 · 전부 서버가 센 건수입니다 (비율 없음)`}
+      >
+        {/* 위 네 칸은 `ask_log.outcome`의 네 값 전부다 — 셋만 찍던 앞 판에서는 세 타일의 합이
+            부제의 질문 수보다 작았고, 조치 턴(스테이징으로 이어진 질문)이 그 차이인데 화면에
+            그렇게 적힌 데가 없었다. */}
         <StatStrip>
-          <StatTile label="질문 수" value={formatNumber(data.asks_total)} />
           <StatTile label="답변" value={formatNumber(data.answered)} />
           <StatTile label="부분" value={formatNumber(data.partial)} />
           <StatTile label="미충족" value={formatNumber(data.unmet)} />
+          <StatTile label="조치" value={formatNumber(data.action)} />
         </StatStrip>
         <div className="border-t border-(--line)">
           <StatStrip>

@@ -361,10 +361,12 @@ export type UnmetReason = "no_dimension" | "no_evidence" | "out_of_scope" | "ref
  * `GET /ask-log` 한 행 (`AskEntry`). `question`은 **저장 시점에 이미 마스킹된** 요약이라 화면이
  * 다시 손대지 않는다 — 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽히면 기록이 아니다.
  */
+/** `GET /ask-log`의 한 행. `session_id`는 **없다** — 이 라우트는 팀 전체를 보여 주는 읽기라,
+ *  응답에 남의 살아 있는 세션 식별자를 실으면 그것이 곧 `X-Session-Id`에 붙일 수 있는 값이 된다.
+ *  행은 원장에 세션과 함께 남지만, 나가지는 않는다(`serialization.ask_record`). */
 export interface AskEntry {
   seq?: number | null;
   at: string;
-  session_id: string;
   operator: string;
   role?: string | null;
   question: string;
@@ -398,11 +400,16 @@ export interface GrowthSummary {
   answered: number;
   partial: number;
   unmet: number;
+  /** `ask_log.outcome`의 네 번째 값. 앞의 셋만 찍으면 타일 합이 `asks_total`에 못 미친다. */
+  action: number;
   up: number;
   down: number;
   new_terms: number;
   new_saved: number;
+  /** 상위 N개, 커서 없음 — 전체 기록은 `GET /ask-log?outcome=unmet`이 커서와 함께 답한다. */
   unmet_clusters: UnmetCluster[];
+  /** 창 안의 서로 다른 군집 수. `unmet_clusters.length`가 아니다. */
+  unmet_clusters_total: number;
   thresholds: { min_users?: number; min_asks?: number; window_days?: number };
   window_days?: number;
 }

@@ -562,13 +562,14 @@ class MockAtworks(AtworksBackend):
         counts = self.store.ask_counts(since)
         return GrowthSummary(
             asks_total=counts["total"], answered=counts["answered"], partial=counts["partial"],
-            unmet=counts["unmet"], up=counts["up"], down=counts["down"],
+            unmet=counts["unmet"], action=counts["action"], up=counts["up"], down=counts["down"],
             # `new_terms` is a COUNT over the vocabulary sidecar (Task 6). Saved questions (§8)
             # land in Task 7; until then that one stays honestly zero rather than a number
             # invented from another table.
             new_terms=self.store.count_vocabulary_since(since),
             new_saved=self.store.count_saved_questions_since(since),
             unmet_clusters=self.store.unmet_clusters(since),
+            unmet_clusters_total=self.store.count_unmet_clusters(since),
             # 승격 문턱은 config의 값이고, 화면은 그것을 읽어 빈 상태 문구를 쓴다 -- 포털에
             # "3명·5회"를 상수로 박으면 config를 바꾼 배포에서 조용히 거짓말이 된다(spec §8).
             thresholds={

@@ -125,6 +125,21 @@ def test_unmet_clusters_ignore_answered_rows():
     store = _store()
     store.insert_ask(_entry("t-1", outcome="answered"))
     assert store.unmet_clusters(T0 - timedelta(days=1)) == []
+    assert store.count_unmet_clusters(T0 - timedelta(days=1)) == 0
+
+
+def test_the_cluster_total_counts_clusters_the_top_n_did_not_show():
+    """The list is a top-N with no cursor, so the total beside it has to be the window's DISTINCT
+    cluster count -- `len(clusters)` would make "상위 N / 총 M" say N == M forever."""
+    store = _store()
+    for i in range(4):
+        store.insert_ask(_entry(f"t-{i}", outcome="unmet", cluster_key=f"unmet:no_dimension|{i}"))
+    assert len(store.unmet_clusters(T0 - timedelta(days=1), limit=2)) == 2
+    assert store.count_unmet_clusters(T0 - timedelta(days=1)) == 4
+    # ...and the window applies to the total exactly as it does to the list.
+    store.insert_ask(_entry("old", at=T0 - timedelta(days=30), outcome="unmet",
+                            cluster_key="unmet:no_dimension|old"))
+    assert store.count_unmet_clusters(T0 - timedelta(days=1)) == 4
 
 
 def test_set_feedback_overwrites_and_reports_a_missing_turn():
@@ -245,7 +260,21 @@ async def test_growth_summary_counts_the_window(client):
     body = (await client.get("/api/atworks/growth/summary?days=7", headers=headers)).json()
     assert body["asks_total"] == 1 and body["partial"] == 1 and body["answered"] == 0
     assert body["window_days"] == 7 and body["new_terms"] == 0 and body["new_saved"] == 0
-    assert body["unmet_clusters"] == []
+    assert body["unmet_clusters"] == [] and body["unmet_clusters_total"] == 0
+    # The four outcomes are all on the wire: three tiles whose sum falls short of `asks_total`
+    # with no fourth number to explain the gap is what the review found.
+    assert body["action"] == 0
+    assert body["answered"] + body["partial"] + body["unmet"] + body["action"] == body["asks_total"]
+
+
+async def test_the_ask_log_wire_carries_no_session_id(client):
+    """`/ask-log` is a TEAM read -- every operator sees every row. A live session id in that
+    payload is a value another tab can put straight into `X-Session-Id`. The ledger keeps it."""
+    headers = {"X-Session-Id": await _sid(client)}
+    await client.post("/api/atworks/chat", headers=headers, json={"message": "질문"})
+    row = (await client.get("/api/atworks/ask-log", headers=headers)).json()["items"][0]
+    assert "session_id" not in row
+    assert row["operator"] and row["turn_id"]
 
 
 async def test_both_growth_routes_404_when_the_feature_is_off(tmp_path):

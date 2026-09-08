@@ -291,7 +291,14 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   one-shot permission here would blur what the word means. A 404 for an unknown target is raised
   INSIDE the wrapped call, so a click that did nothing can never be recorded as `:ok`.
   `enable_query_runs` gates the four tools (`absent_tools` drops all four when off);
-  `enable_growth` gates the routes and the Growth view.
+  `enable_growth` gates the routes, the Growth view **and the recording itself** — off, the
+  turn-end hook writes no `ask_log` row at all, so a deployment that turns the feature off is not
+  quietly accumulating a question ledger nobody can read (and the promoter is not even
+  constructed, `main.py`). `unmet_clusters` is a top-N read with no cursor; `GrowthSummary`
+  carries `unmet_clusters_total` (the window's DISTINCT cluster count, never the list's length)
+  so the view can say "상위 N / 총 M", and the whole record is `GET /ask-log?outcome=unmet`,
+  which does have a cursor. `serialization.ask_record` drops `session_id`: `/ask-log` is a TEAM
+  read, and another operator's live session id is a value that can be put in `X-Session-Id`.
   **REST-adapter obligations** (in the ABC docstrings): `query_runs` must compile the spec
   server-side and return `QueryResult` with the source it read, `population` and `total_groups`
   after the filter and independent of `limit`; `list_asks` orders `at DESC, seq DESC`;

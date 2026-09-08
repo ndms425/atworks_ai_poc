@@ -525,7 +525,13 @@ class AtworksBackend(ABC):
     ) -> GrowthSummary:
         """Growth 뷰 '이번 주' 타일. REST 구현 의무: 전부 **COUNT 질의**로 답한다 — 행 목록을
         받아 애플리케이션에서 세면 안 된다(그 목록엔 상한이 있고, 상한은 곧 틀린 비율이다).
-        ``unmet_clusters``의 예시는 저장된 마스킹 요약 그대로다."""
+        ``unmet_clusters``의 예시는 저장된 마스킹 요약 그대로다.
+
+        * ``outcome`` **네 값을 모두** 낸다: answered/partial/unmet/**action**. 셋만 채우면
+          화면의 세 타일 합이 ``asks_total``보다 작고, 그 차이를 설명할 자리가 없다.
+        * ``unmet_clusters``는 상위 N개이고 커서가 없다. 그러니 ``unmet_clusters_total``은
+          **그 목록의 길이가 아니라** 창 안의 서로 다른 군집 수여야 한다 — 목록 길이를 되돌려
+          주면 화면의 "상위 N / 총 M"이 언제나 N == M이라고 거짓말한다."""
 
     # -- 어휘 (자가발전 spec §7: commerce_common.memory 위의 조직 공용 어휘) ------------------
     # 이 6개 메서드가 공유하는 세 가지 의무 (REST 구현이 반드시 지킨다):

@@ -363,8 +363,12 @@ class InMemoryBackend(AtworksBackend):
             answered=sum(1 for e in window if e.outcome == "answered"),
             partial=sum(1 for e in window if e.outcome == "partial"),
             unmet=sum(1 for e in window if e.outcome == "unmet"),
+            action=sum(1 for e in window if e.outcome == "action"),
             up=sum(1 for e in window if e.feedback == "up"),
             down=sum(1 for e in window if e.feedback == "down"),
+            # 군집 총계는 목록의 길이가 아니라 서로 다른 cluster_key의 수다 -- 이 더블도 그
+            # 계약을 지킨다(목록 길이로 답하면 화면의 "상위 N / 총 M"이 늘 N == M이 된다).
+            unmet_clusters_total=len({e.cluster_key for e in window if e.outcome == "unmet"}),
         )
 
     # -- 어휘 (self-growth §7). In-memory dicts: the same three gates as the Mock (normalize,

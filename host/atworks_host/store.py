@@ -2615,10 +2615,22 @@ class Store:
                 counts[row["feedback"]] = row["n"]
         return counts
 
-    def unmet_clusters(self, since: datetime, limit: int = 20) -> list[dict[str, Any]]:
+    def count_unmet_clusters(self, since: datetime) -> int:
+        """How many DISTINCT unmet clusters the window holds, as one COUNT. `unmet_clusters`
+        returns the top N and has no cursor, so without this the view could only say "N개" and
+        an operator reading a full page had no way to know whether it was all of them."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM ask_log WHERE outcome = 'unmet' AND at >= ? "
+            "GROUP BY cluster_key)", (_iso(since),)).fetchone()[0]
+
+    def unmet_clusters(self, since: datetime, limit: int = 50) -> list[dict[str, Any]]:
         """The "미충족 질문" tab: one row per cluster, biggest first, with ONE example -- the
         cluster's newest masked question summary. The example is a stored `question` value, which
-        was masked before it ever reached this table, so nothing here re-exposes a raw message."""
+        was masked before it ever reached this table, so nothing here re-exposes a raw message.
+
+        The top N, and deliberately WITHOUT a cursor: this is a triage list read biggest-first,
+        not a ledger to page through -- the whole record is `GET /ask-log?outcome=unmet`, which
+        does have one. `count_unmet_clusters` is the honest total beside it."""
         rows = self._conn.execute(
             "SELECT cluster_key, COUNT(*) AS n, MAX(at) AS last_at FROM ask_log "
             "WHERE outcome = 'unmet' AND at >= ? GROUP BY cluster_key ORDER BY n DESC, last_at DESC LIMIT ?",

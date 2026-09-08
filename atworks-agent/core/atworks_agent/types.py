@@ -729,11 +729,19 @@ class GrowthSummary(BaseModel):
     answered: int = 0
     partial: int = 0
     unmet: int = 0
+    #: ``ask_log.outcome``의 **네 번째** 값 (spec §6). 앞의 셋만 타일로 내보내던 판에서는
+    #: answered+partial+unmet이 asks_total보다 작았고, 그 차이를 화면에서 설명할 길이 없었다 --
+    #: 조치 턴(스테이징·승인 유도)은 답을 못 한 것이 아니라 다른 결말이다.
+    action: int = 0
     up: int = 0
     down: int = 0
     new_terms: int = 0
     new_saved: int = 0
+    #: 큰 군집부터 최대 ``unmet_clusters(limit=)``개. 커서는 없다 -- 이 목록은 상위 N개를 읽는
+    #: 자리이지 원장을 넘기는 자리가 아니고, 전체 기록은 ``GET /ask-log?outcome=unmet``이
+    #: 커서와 함께 답한다. 화면이 "상위 N / 총 M"이라고 말할 수 있도록 총계를 함께 낸다.
     unmet_clusters: list[dict[str, Any]] = Field(default_factory=list)
+    unmet_clusters_total: int = 0
     #: 승격 기준 그대로 (`promote_min_users`/`promote_min_asks`/`promote_window_days`) -- 저장 질문
     #: 카드의 빈 상태가 "3명 이상이 5회 이상"이라고 말할 때 그 숫자는 **호스트 config에서** 온다.
     #: 화면에 상수로 박아 두면 config를 바꾼 배포에서 조용히 거짓말을 하게 된다(spec §8).

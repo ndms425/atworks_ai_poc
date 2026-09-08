@@ -268,7 +268,12 @@ class RecordingBackend(AtworksBackend):
         raise NotImplementedError
 
     async def growth_summary(self, session, since):
-        return GrowthSummary(asks_total=len(self.asks))
+        window = [e for e in self.asks if e.at >= since]
+        return GrowthSummary(
+            asks_total=len(window),
+            action=sum(1 for e in window if e.outcome == "action"),
+            unmet_clusters_total=len({e.cluster_key for e in window if e.outcome == "unmet"}),
+        )
 
     # 어휘 (self-growth §7): 스케줄러 경로는 채팅 턴이 아니라 어휘를 읽지도 쓰지도 않는다 --
     # 이 여섯은 그것을 그대로 주장하는 빈 구현이다(어느 하나라도 불리면 테스트가 그걸 본다).
