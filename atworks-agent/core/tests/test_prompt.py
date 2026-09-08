@@ -2,6 +2,7 @@ from datetime import datetime
 
 from commerce_common.skills import Skill, SkillRegistry
 
+from atworks_agent.catalog import catalog_hint
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.prompt import build_dynamic_context, build_static_system
 from atworks_agent.types import AttachedItem
@@ -17,6 +18,22 @@ def test_static_prompt_is_byte_stable_and_leads_with_safety():
     assert "never decide pass or fail" in a
     assert "population" in a
     assert "failed-triage" in a
+
+
+def test_static_prompt_carries_the_query_catalogue_and_drops_it_when_switched_off():
+    cfg = AtworksAgentConfig(model="m", enable_query_runs=True)
+    on = build_static_system(cfg, SKILLS)
+    assert on == build_static_system(cfg, SKILLS)  # 카탈로그가 붙어도 바이트 안정
+    assert "# Query catalogue" in on
+    assert catalog_hint() in on                    # 결정론 바이트 그대로
+    assert "query_runs" in on and "present_query_table" in on and "note_unmet_ask" in on
+    assert on.index("# Hard lines") < on.index("# Query catalogue") < on.index("# How you work")
+
+    off = build_static_system(AtworksAgentConfig(model="m", enable_query_runs=False), SKILLS)
+    assert "# Query catalogue" not in off
+    assert "query_runs" not in off and "note_unmet_ask" not in off and "path_segment_2" not in off
+    # 꺼졌을 때의 바이트는 이 기능 이전과 같아야 한다 (섹션 전체가 사라진다).
+    assert off == on.replace(on[on.index("\n\n# Query catalogue"):on.index("\n\n# How you work")], "")
 
 
 def test_static_prompt_drops_job_rules_when_switched_off():

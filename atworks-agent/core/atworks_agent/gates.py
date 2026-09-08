@@ -60,7 +60,8 @@ FIGURES_IN_PROSE_REMINDER = (
     "percentage, or a count of failures). Numbers and statuses go through the cards the "
     "portal fills from records. Reply again with the explanation only — no table, no "
     "percentages, no counts — and put anything numeric on a card (present_run_digest for "
-    "runs, present_run_groups for groups); then end with present_suggestions. Do not mention "
+    "runs, present_run_groups for groups, present_query_table for a query_runs result); then "
+    "end with present_suggestions. Do not mention "
     "this check."
 )
 

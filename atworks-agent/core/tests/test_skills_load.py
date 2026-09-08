@@ -38,6 +38,19 @@ def test_rule_authoring_skill_covers_examples_bulk_add_and_reuse():
     assert "saved format" in body or "library" in body
 
 
+def test_triage_and_lookup_skills_carry_the_beyond_the_fixed_axes_rules():
+    # spec §5 세 규칙: 축 밖이면 query_runs / 카탈로그에도 없으면 note_unmet_ask 먼저 /
+    # 사용자 용어를 필터 값으로 읽었으면 한 절로 말한다.
+    reg = SkillRegistry.from_dir(SKILLS_DIR)
+    for name in ("failed-triage", "api-lookup"):
+        body = reg.get_instructions(name)
+        assert "## Beyond the fixed axes" in body, name
+        assert "query_runs" in body and "present_query_table" in body, name
+        assert "note_unmet_ask(reason, summary, wanted)" in body, name
+        assert "지원하지 않습니다" in body and "rule violation" in body, name
+        assert "path_prefix" in body, name
+
+
 def test_schedule_run_skill_covers_envs_schedules_and_test_data():
     body = SkillRegistry.from_dir(SKILLS_DIR).get_instructions("schedule-run")
     assert "present_question_form" in body

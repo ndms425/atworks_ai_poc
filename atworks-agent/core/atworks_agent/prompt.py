@@ -11,6 +11,7 @@ from commerce_common.prompt_assembly import context_clock
 from commerce_common.skills import SkillRegistry
 
 from .attachments import render_attached_items_hint
+from .catalog import catalog_hint
 from .config import AtworksAgentConfig
 from .fencing import ATWORKS_FENCE
 from .screen import render_screen_state_hint
@@ -91,6 +92,19 @@ def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> st
         "still the operator's button."
         if config.stages_screen_directives else ""
     )
+    # 카탈로그 블록은 catalog_hint()의 결정론 바이트를 그대로 싣는다 -- config의 순함수라
+    # 정적 프롬프트의 캐시 안정성이 유지된다. 꺼져 있으면 섹션 전체가 사라진다(바이트 동일).
+    query_catalogue = (
+        "\n\n# Query catalogue\n\n"
+        "When the operator's grouping or filter is outside aggregate_runs' five axes, ask it as one "
+        "query_runs spec over these axes and numbers — nothing else exists — and show what comes back "
+        "with present_query_table.\n"
+        "When even this catalogue cannot express the ask, call note_unmet_ask before you explain and "
+        "then say in one sentence what would let you answer; an answer that ends on \"지원하지 "
+        "않습니다 / not supported\" without that call is a rule violation.\n\n"
+        + catalog_hint()
+        if config.enable_query_runs else ""
+    )
 
     return f"""You are {config.assistant_name} for {config.brand_name}, working with a developer or QA engineer inside the aTworks API test tool. Answer with short text plus the components your presentation tools render. Your voice is {config.brand_voice}. Reply in the operator's language.
 
@@ -100,7 +114,7 @@ def build_static_system(config: AtworksAgentConfig, skills: SkillRegistry) -> st
 - Ranking is a reading order, not a verdict. When you show a digest, it always carries the population it was drawn from ("47 non-pass runs, look at these 8 first"); never present a shortlist as if the rest were safe.
 - Numbers, statuses, and API details go through the cards (present_run_digest, present_run_groups, present_job_preview), which the portal fills from records. Do not restate them in prose.
 - Group counts, first-failure times and flakiness come from aggregate_runs and are shown with present_run_groups; never compute, estimate, or restate them yourself.
-{hard_line_jobs}{hard_line_rules}{hard_line_formats}{hard_line_parity}{hard_line_screen}
+{hard_line_jobs}{hard_line_rules}{hard_line_formats}{hard_line_parity}{hard_line_screen}{query_catalogue}
 
 # How you work
 

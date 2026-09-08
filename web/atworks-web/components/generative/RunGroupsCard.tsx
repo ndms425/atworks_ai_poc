@@ -22,7 +22,7 @@ export default function RunGroupsCard({
     <GenCard>
       <GenCardHeader title={payload.title ?? "실행 묶음"} meta={<b className="font-semibold text-(--ink)">{scope}</b>} />
       <div className="panel-scroll overflow-x-auto px-3.5 pb-2">
-        <table className="w-full border-collapse text-[12.5px]">
+        <table data-component="run_groups" className="w-full border-collapse text-[12.5px]">
           <thead>
             <tr className="text-left text-[11.5px] font-semibold text-(--ink-soft)">
               <th className="py-1.5 pr-3">그룹</th>

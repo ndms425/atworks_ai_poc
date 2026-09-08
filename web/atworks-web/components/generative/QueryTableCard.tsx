@@ -53,7 +53,8 @@ export default function QueryTableCard({
         {payload.compare ? <span className="ml-1.5"><Pill tone="violet">이전 기간 비교</Pill></span> : null}
       </p>
       <div className="panel-scroll overflow-x-auto px-3.5 pb-2">
-        <table className="w-full border-collapse text-[12.5px]">
+        {/* data-component: 스모크·E2E가 카드를 푸터 문구가 아니라 안정된 훅으로 찾게 한다(표시에는 영향 없음). */}
+        <table data-component="query_table" className="w-full border-collapse text-[12.5px]">
           <thead>
             <tr className="text-left text-[11.5px] font-semibold text-(--ink-soft)">
               {payload.columns.map((column) => (
