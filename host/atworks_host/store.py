@@ -356,6 +356,12 @@ def _label_out(label: str | None) -> str | None:
 #: ``query_sql.KEY_AXES``, re-exported under a local name so this module reads one vocabulary.
 _QUERY_KEY_AXES = QUERY_KEY_AXES
 
+#: Measures that are a LEVEL rather than a counter. A group the previous window did not return
+#: had no runs, which is an honest 0 for a counter -- but "the p95 was 0 ms" and "there were 0
+#: pass/fail flips we can point at" are claims about a measurement that was never taken, so these
+#: two read ``None`` on a missing key (see ``Store._join_previous_window``).
+_LEVEL_MEASURES = ("p95_duration_ms", "transitions")
+
 
 def _measure_out(name: str, value) -> float | int | None:
     """One measure cell, out of SQLite and into ``QueryRow.measures``. ``fail_rate`` is the only
@@ -1991,17 +1997,36 @@ class Store:
         The previous query carries the SAME ``LIMIT``, so a key that exists in both windows but
         ranked below the cut in the earlier one reads ``_prev = 0``. That is the brief's bound --
         two bounded statements per query, never an unbounded second pass -- and it is why the
-        card labels the column as a comparison of the two TOP lists, not of two populations."""
-        before: dict[tuple, dict[str, float | int | None]] = {}
-        for row in self._conn.execute(previous.sql, previous.params).fetchall():
-            key = tuple(row[f"k{i}"] for i in range(len(spec.dimensions)))
-            before[key] = {name: _measure_out(name, row[f"m_{name}"]) for name in spec.measures}
+        card labels the column as a comparison of the two TOP lists, not of two populations.
+
+        **The previous window goes through the SAME fills as the current one** (fix round 1). The
+        earlier code read the raw statement, whose ``m_apis`` is a literal ``NULL`` on the two
+        arms that have no api column -- so on the key arm every ``apis_prev`` came back 0 and
+        every ``apis_delta`` equalled the current count, a fabricated "the previous window touched
+        no API". ``rollup_key_day``'s ``apis`` is filled in python from the stored ``api_ids``
+        union and the ``runs`` arm's p95 by its own statement, and both now run on the previous
+        rows before the join. Whatever is left ``NULL`` after that is left ``NULL``:
+        ``previous.unavailable_measures`` names the measures this source never measured, and they
+        get ``None``/``None`` rather than a comparison against a number nobody computed."""
+        prev_rows, prev_keys = self._query_rows(spec, previous)
+        if previous.p95_sql:
+            self._fill_query_p95(prev_rows, prev_keys, previous)
+        if previous.apis_from_key_rows:
+            self._fill_query_key_apis(prev_rows, prev_keys, spec, previous)
+        before = {key: row.measures for row, key in zip(prev_rows, prev_keys, strict=True)}
+        unavailable = set(previous.unavailable_measures)
         for row, key in zip(rows, raw_keys, strict=True):
-            other = before.get(key, {})
+            other = before.get(key)
             for name in spec.measures:
                 current = row.measures.get(name)
-                prior = other.get(name)
-                if name in ("p95_duration_ms", "transitions") and prior is None:
+                prior = None if other is None else other.get(name)
+                # None for three different reasons, all of them "no number": the source cannot
+                # measure this at all; the previous window returned this key but no value for it;
+                # or the key is absent and the measure is a LEVEL, where 0 would be a claim about
+                # a duration nobody timed. A count on an absent key is a real 0.
+                if (name in unavailable
+                        or (prior is None
+                            and (other is not None or name in _LEVEL_MEASURES))):
                     row.measures[f"{name}_prev"] = None
                     row.measures[f"{name}_delta"] = None
                     continue

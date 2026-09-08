@@ -17,14 +17,19 @@ data / day / week, or none at all)                                      ``day`` 
 api-scoped filter
 ``failed_rule``/``http_status`` otherwise        ``rollup_day`` +       exact under a scope, and
                                                  ``json_each``          merely slower
-``executed_by`` alone or with ``day``/``week``   ``rollup_operator_day``the only table that knows
-                                                                        who ran what, per day
-``executed_by`` x anything else, or ANY          ``runs``               the one run-table path
-``executed_by`` FILTER
+``executed_by`` alone or with ``day``/``week``,  ``rollup_operator_day``the only table that knows
+INCLUDING under an ``executed_by`` filter                                who ran what, per day
+``executed_by`` x anything else, or an           ``runs``               the one run-table path
+``executed_by`` FILTER under other dimensions
 ===============================================  =====================  =========================
 
 The last row is the documented concession: ``rollup_day`` does not carry ``executed_by`` at all,
 so "그 사람이 돌린 run만" cannot be expressed as a predicate over it -- there is nothing to filter.
+``rollup_operator_day`` IS the exception (fix round 1): its key column *is* the operator, so an
+``executed_by`` filter is ``operator_id IN (...)`` on the very axis the query already groups by --
+"이 두 사람 최근에 얼마나 돌렸나" reads (days x operators) rows instead of the run table. It is a
+refinement of the table's last row, not a new rule: every OTHER ``executed_by`` filter (one that
+lands under a dimension the operator rollup does not carry) still falls to ``runs``.
 The same reasoning generalizes to every source: a source is only chosen when EVERY filter of the
 spec is exactly expressible over its columns (a filter on ``target_env`` cannot ride
 ``rollup_key_day``; a filter on ``http_status`` while grouping by ``failed_rule`` cannot ride
@@ -205,6 +210,25 @@ class CompiledQuery:
     #: on every other source, whose p95 is the rollups' documented max-merge level.
     p95_sql: str = ""
     p95_params: list = field(default_factory=list)
+    #: requested measures whose SQL expression is the literal ``NULL`` on this source -- before
+    #: the python fills below are taken into account. Use ``unavailable_measures``.
+    null_measures: tuple[str, ...] = ()
+
+    @property
+    def unavailable_measures(self) -> tuple[str, ...]:
+        """The requested measures this source cannot produce AT ALL -- ``NULL`` in SQL and not
+        supplied by a python fill either (``apis`` on ``rollup_operator_day``, ``transitions``
+        anywhere but ``rollup_day``, ``p95_duration_ms`` on the operator rollup).
+
+        ``compare_previous_window`` needs exactly this list: a measure the source never measured
+        has no previous value and no delta, and writing 0 there would publish a comparison
+        against a number nobody computed (fix round 1)."""
+        filled = set()
+        if self.apis_from_key_rows:
+            filled.add("apis")
+        if self.p95_sql:
+            filled.add("p95_duration_ms")
+        return tuple(name for name in self.null_measures if name not in filled)
 
 
 def _empty(value: object) -> bool:
@@ -232,15 +256,18 @@ def select_source(spec: QuerySpec) -> str:
     key_dims = dims & set(KEY_AXES)
     key_filters = _key_filter_axes(filters)
 
-    # A run filter on the executor: no rollup carries `executed_by` as a filterable column
-    # (`rollup_operator_day` carries it as the KEY, but the rule stays uniform -- one shape of
-    # question, one source -- and `runs` is exact under every other filter too).
-    if not _empty(filters.executed_by):
-        return "runs"
     if "executed_by" in dims:
+        # `rollup_operator_day` keys on the operator, so an `executed_by` FILTER here is
+        # `operator_id IN (...)` on the axis this query already groups by -- exactly expressible,
+        # therefore the cheap source stays (fix round 1). Everything else about the row is
+        # unchanged: an api-scoped filter, a cell filter or a key filter has no column here.
         if (dims <= {"executed_by", "day", "week"} and not _api_scoped(filters)
                 and not _cell_scoped(filters) and not key_filters):
             return "rollup_operator_day"
+        return "runs"
+    # A run filter on the executor under any OTHER dimension: no other rollup carries
+    # `executed_by` as a column at all, so "그 사람이 돌린 run만" is not a predicate over them.
+    if not _empty(filters.executed_by):
         return "runs"
     # A key filter on an axis this query does NOT group by cannot be applied to either rollup: the
     # two JSON maps are independent projections of the same runs, so "cells whose http_status was
@@ -308,8 +335,13 @@ def _scope_operator_clause(operator_id: str | None, since: datetime | None, colu
     params.append(operator_id)
     sql = f"+{column} IN (SELECT api_id FROM operator_api WHERE operator_id = ?"
     if since is not None:
+        # `_sql_iso`, never `strftime` on the raw moment: `since` is the window's LOCAL midnight
+        # (tz-aware), and `operator_api.last_executed_at` is written by `Store._iso` in UTC. A
+        # local wall clock with a "Z" glued on is nine hours late in Asia/Seoul, which silently
+        # dropped every API whose last run by this operator fell in the window's first tz-offset
+        # hours (fix round 1).
         sql += " AND last_executed_at >= ?"
-        params.append(since.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z")
+        params.append(_sql_iso(since))
     return [sql + ")"]
 
 
@@ -426,6 +458,7 @@ def _finish(spec: QuerySpec, source: str, *, from_sql: str, from_params: list,
         sql=sql, params=[*params, spec.limit], source=source, group_columns=group_columns,
         measure_columns=measure_columns, totals_sql=totals_sql, totals_params=list(params),
         day_from=day_from, day_to=day_to, apis_from_key_rows=apis_from_key_rows,
+        null_measures=tuple(name for name in spec.measures if measure_sql[name] == "NULL"),
     )
 
 
@@ -516,12 +549,19 @@ def _rollup_operator_day(spec: QuerySpec, status: str | None, day_from: str, day
                          tz: str) -> CompiledQuery:
     """"실행자별" without a run scan. The table has no api column and no duration, so ``apis`` and
     ``p95_duration_ms`` come back NULL here -- honestly NULL, rather than a number derived from a
-    different population."""
+    different population.
+
+    An ``executed_by`` FILTER rides the key column itself (``operator_id IN (...)``), which is why
+    "이 두 사람 최근에 얼마나 돌렸나" never has to touch ``runs``."""
     keys = [("o.operator_id" if d == "executed_by" else
              ("o.day" if d == "day" else week_sql("o.day"))) for d in spec.dimensions]
+    where = ["o.day >= ?", "o.day <= ?"]
+    params: list = [day_from, day_to]
+    if not _empty(spec.filters.executed_by):
+        where.append(_in_clause("o.operator_id", spec.filters.executed_by, params))
     return _finish(spec, "rollup_operator_day", from_sql="rollup_operator_day AS o",
-                   from_params=[], where=["o.day >= ?", "o.day <= ?"],
-                   where_params=[day_from, day_to], keys=keys,
+                   from_params=[], where=where,
+                   where_params=params, keys=keys,
                    c='o."count"', p='o."pass"', f="o.fail", e="o.error", t=None, q95=None,
                    api=None, status=status, day_from=day_from, day_to=day_to)
 

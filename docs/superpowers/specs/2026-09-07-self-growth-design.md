@@ -100,6 +100,8 @@ class QuerySpec(BaseModel):
 | `executed_by` × 다른 차원 | `runs` 창 안 GROUP BY (인덱스 `(executed_by, executed_at)`) | 유일한 run 테이블 경로. 창 상한 180일, SLO 행으로 측정 |
 | 필터 `executed_by`(차원 아님) | 위 소스에 `api_id IN (SELECT … FROM runs WHERE executed_by IN (…) AND executed_at ≥ …)`가 아니라 **run 필터가 필요한 경우 `runs` 소스로 강제** | 롤업은 실행자를 모른다 — 문서화 |
 
+- **정제(T2 수정 1라운드):** 필터 `executed_by`가 **`executed_by` 차원 위에**(단독 또는 `day`/`week` 조합) 올라올 때는 `runs`로 강제하지 않는다 — `rollup_operator_day`의 키 컬럼이 곧 실행자이므로 `operator_id IN (…)`로 정확히 표현된다. 그 밖의 모든 `executed_by` 필터(다른 차원 아래)는 표대로 `runs`.
+
 - `measures`가 `apis`를 포함하면 `COUNT(DISTINCT api_id)`; 키 축 소스에서는 `api_ids` 집합 크기.
 - `limit`·`order_by`는 SQL `ORDER BY … LIMIT`. 파이썬은 `limit`행만 본다(스케일 브랜치의 규칙).
 - 표본 채움(`include_samples`): 반환된 그룹마다 `api_ids ≤ 20`, `run_ids ≤ 5`(최신) — 인덱스 쿼리 그룹당 ≤2회.

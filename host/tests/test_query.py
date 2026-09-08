@@ -240,9 +240,12 @@ def _sort_key(value) -> tuple:
 
 
 def _oracle(spec: QuerySpec, runs: list[RunResult], apis: dict[str, ApiSpec], now: datetime,
-            tz: str, previous: bool = False) -> list[dict]:
+            tz: str, previous: bool = False, apply_limit: bool = True) -> list[dict]:
     """Spec §3 in plain python over every run in the store. Returns the rows the engine must
-    return: ``{"keys": (...), "measures": {...}}``, already ordered and cut."""
+    return: ``{"keys": (...), "measures": {...}}``, already ordered and cut.
+
+    ``apply_limit=False`` returns EVERY group instead -- what ``total_groups`` counts and what
+    ``population`` sums, neither of which the limit may touch."""
     since, until = resolve_window(spec, now, DEFAULT_DAYS)
     day_from, day_to = align_days(since, until, tz)
     if previous:
@@ -300,7 +303,7 @@ def _oracle(spec: QuerySpec, runs: list[RunResult], apis: dict[str, ApiSpec], no
             return (head, key_order(row))
 
         rows.sort(key=rank)
-    return rows[:spec.limit]
+    return rows[:spec.limit] if apply_limit else rows
 
 
 def _assert_matches_oracle(store: Store, spec: QuerySpec, runs: list[RunResult],
@@ -320,11 +323,45 @@ def _assert_matches_oracle(store: Store, spec: QuerySpec, runs: list[RunResult],
                 continue
             assert got.measures[measure] == want["measures"][measure], \
                 f"{label}: {measure} at {want['keys']}"
-    # `total_groups` is the group count BEFORE the limit; `population` the summed `runs` measure
-    full = _oracle(spec.model_copy(update={"limit": 50}), runs, apis, NOW, TZ)
-    if len(full) < 50:
-        assert result.total_groups == len(full), f"{label}: total_groups"
-        assert result.population == sum(r["measures"]["runs"] for r in full), f"{label}: population"
+    # `total_groups` is the group count BEFORE the limit and `population` the summed `runs`
+    # measure over ALL of them -- so both are checked against the UNLIMITED oracle, on every case.
+    # (Re-deriving them from a limit-50 oracle and skipping the assert when it filled up meant the
+    # two figures went unverified on exactly the wide specs where they matter -- review minor #6.)
+    full = _oracle(spec, runs, apis, NOW, TZ, apply_limit=False)
+    assert result.total_groups == len(full), f"{label}: total_groups"
+    assert result.population == sum(r["measures"]["runs"] for r in full), f"{label}: population"
+    if spec.compare_previous_window:
+        _assert_compare_matches_oracle(result, spec, runs, apis, label=label)
+
+
+def _assert_compare_matches_oracle(result, spec: QuerySpec, runs: list[RunResult],
+                                   apis: dict[str, ApiSpec], *, label: str) -> None:
+    """``*_prev`` / ``*_delta`` against the oracle run over the SHIFTED window -- computed here
+    from run rows alone, never by importing ``Store._join_previous_window``.
+
+    The previous half carries the same ``limit`` and the same rank as the current one (the
+    implementer's documented decision, accepted at review), so the oracle applies them too. A key
+    the previous half did not return is a real 0 for a counter; a measure the chosen SOURCE cannot
+    produce at all (``apis`` off ``rollup_operator_day``) is ``None`` on both sides -- the fix this
+    assertion exists for, since the raw statement's ``NULL`` used to be read as 0."""
+    before = {row["keys"]: row["measures"]
+              for row in _oracle(spec, runs, apis, NOW, TZ, previous=True)}
+    for got in result.rows:
+        key = tuple(got.keys[d] for d in spec.dimensions)
+        prior = before.get(key)
+        for measure in spec.measures:
+            if measure not in ORACLE_MEASURES:
+                continue
+            where = f"{label}: {measure} at {key}"
+            if measure == "apis" and result.source == "rollup_operator_day":
+                assert got.measures[measure] is None, where
+                assert got.measures[f"{measure}_prev"] is None, where
+                assert got.measures[f"{measure}_delta"] is None, where
+                continue
+            expected = 0 if prior is None else prior[measure]
+            assert got.measures[f"{measure}_prev"] == pytest.approx(expected), where
+            assert got.measures[f"{measure}_delta"] == pytest.approx(
+                round(got.measures[measure] - expected, 4)), where
 
 
 # -- the spec matrix -----------------------------------------------------------------------------
@@ -376,6 +413,17 @@ def _specs() -> list[tuple[str, QuerySpec]]:
             cases.append((f"filter:{name}/{dimension}", QuerySpec(
                 dimensions=[dimension], filters=filters,
                 measures=["runs", "fail", "error", "fail_rate", "apis"], order_by="runs")))
+    # `compare_previous_window` on ONE spec per source: the prev/delta join is a different code
+    # path per arm (a python `apis` fill on the key rollup, a NULL `apis` column on the operator
+    # rollup, a real COUNT(DISTINCT) on the other two), and it was the arm-specific halves that
+    # were wrong.
+    for dimensions, order in ((["failed_rule"], "runs"), (["executed_by"], "runs"),
+                              (["executed_by", "api"], "runs"),
+                              (["path_segment_2", "target_env"], "non_pass")):
+        cases.append((f"compare:{'+'.join(dimensions)}", QuerySpec(
+            dimensions=dimensions, measures=["runs", "non_pass", "fail_rate", "apis"],
+            order_by=order, limit=15, compare_previous_window=True,
+            filters=QueryFilters(window_days=7))))
     for order in ("runs", "pass", "fail", "error", "non_pass", "fail_rate", "apis", "key"):
         for descending in (True, False):
             cases.append((f"order:{order}/{descending}", QuerySpec(
@@ -441,6 +489,17 @@ def test_every_source_is_actually_reached_by_the_matrix():
     (QuerySpec(dimensions=["api"], measures=["runs"],
                filters=QueryFilters(executed_by=["minseong"])), "runs"),
     (QuerySpec(measures=["runs"], filters=QueryFilters(executed_by=["minseong"])), "runs"),
+    (QuerySpec(dimensions=["executed_by", "api"], measures=["runs"],
+               filters=QueryFilters(executed_by=["minseong"])), "runs"),
+    # ...except ON the operator axis itself, where the filter IS `operator_id IN (...)` on the
+    # key column the query already groups by (fix round 1's refinement of the §4 table)
+    (QuerySpec(dimensions=["executed_by"], measures=["runs"],
+               filters=QueryFilters(executed_by=["minseong"])), "rollup_operator_day"),
+    (QuerySpec(dimensions=["executed_by", "day"], measures=["runs"],
+               filters=QueryFilters(executed_by=["minseong", "jiwon"])), "rollup_operator_day"),
+    # ...and an api-scoped filter alongside it still has no column there
+    (QuerySpec(dimensions=["executed_by"], measures=["runs"],
+               filters=QueryFilters(executed_by=["minseong"], api_group=["payment"])), "runs"),
     # a key filter on an axis this query does not group by is not derivable from either map
     (QuerySpec(dimensions=["api"], measures=["runs"],
                filters=QueryFilters(http_status=[500])), "runs"),
@@ -610,6 +669,130 @@ def test_compare_previous_window_reads_a_window_that_shares_no_day(synthetic):
     assert row.measures["runs_prev"] > 0 and "runs_delta" in row.measures
 
 
+def _mirrored_store() -> Store:
+    """A store whose previous 7-day window is an exact copy of its current one: 4 APIs x
+    (one pass, one fail, one error) on 2026-09-01 and again on 2026-08-25.
+
+    Every ``*_prev`` must therefore equal its own measure and every ``*_delta`` must be 0 -- a
+    statement about the compare column that does not restate the engine's arithmetic."""
+    apis = [
+        ApiSpec(api_id=f"api-{i:03d}", method="GET", path=f"/v1/items/{i}", name=f"api {i}",
+                group="payment", updated_at=datetime(2026, 8, 1, tzinfo=UTC), has_rules=True,
+                params=["amount"])
+        for i in range(4)
+    ]
+    runs: list[RunResult] = []
+    for days_back, tag in ((0, "cur"), (7, "prev")):
+        base = datetime(2026, 9, 1, 10, 0, tzinfo=KST) - timedelta(days=days_back)
+        for i in range(4):
+            for j, status in enumerate((RunStatus.PASS, RunStatus.FAIL, RunStatus.ERROR)):
+                runs.append(RunResult(
+                    run_id=f"run-{tag}-{i}-{j}", api_id=f"api-{i:03d}",
+                    executed_at=base + timedelta(minutes=j), target_env="dev",
+                    test_data_label="S1", status=status,
+                    failed_rules=["amount >= 0"] if status is RunStatus.FAIL else [],
+                    http_status={0: 200, 1: 500}.get(j), duration_ms=100 + j,
+                    executed_by="minseong", job_id="job-0001"))
+    store = Store(":memory:")
+    store.load_apis(apis)
+    store.ingest(sorted(runs, key=lambda r: r.executed_at), TZ)   # ingest is order-dependent
+    return store
+
+
+def test_compare_on_the_key_axis_reports_a_real_previous_api_count():
+    """The critical fix. ``rollup_key_day`` has no api column, so ``m_apis`` is a literal ``NULL``
+    on that arm and the current window fills it in python from the rows' stored ``api_ids``. The
+    join used to read the RAW previous statement, so ``apis_prev`` came back 0 and ``apis_delta``
+    equalled the whole current count -- a fabricated "the previous week touched no API", on a
+    store where the two windows are identical."""
+    store = _mirrored_store()
+    spec = QuerySpec(dimensions=["http_status"], measures=["runs", "apis"], order_by="runs",
+                     filters=QueryFilters(window_days=7), compare_previous_window=True, limit=20)
+    result = store.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    assert result.source == "rollup_key_day" and result.rows
+    for row in result.rows:
+        assert row.measures["apis"] == 4, row.keys
+        assert row.measures["apis_prev"] == row.measures["apis"], row.keys
+        assert row.measures["apis_delta"] == 0, row.keys
+        assert row.measures["runs_prev"] == row.measures["runs"], row.keys
+        assert row.measures["runs_delta"] == 0, row.keys
+
+
+def test_compare_on_the_operator_axis_reports_no_api_count_at_all(synthetic):
+    """``rollup_operator_day`` never had an api column, and no fill can invent one. So ``apis``
+    is ``None`` on BOTH sides and there is no delta -- not a 0, which would read as "these two
+    windows touched the same APIs"."""
+    spec = QuerySpec(dimensions=["executed_by"], measures=["runs", "apis"], order_by="runs",
+                     filters=QueryFilters(window_days=7), compare_previous_window=True, limit=20)
+    result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    assert result.source == "rollup_operator_day" and result.rows
+    for row in result.rows:
+        assert row.measures["apis"] is None
+        assert row.measures["apis_prev"] is None
+        assert row.measures["apis_delta"] is None
+        assert row.measures["runs_prev"] > 0 and row.measures["runs_delta"] is not None
+
+
+def test_compare_on_the_runs_arm_reports_real_values(synthetic):
+    """The arm that CAN count APIs still does, on both sides -- the None-guard must not have
+    swallowed a measure the source actually measures."""
+    spec = QuerySpec(dimensions=["executed_by", "api"], measures=["runs", "apis"],
+                     order_by="runs", filters=QueryFilters(window_days=7),
+                     compare_previous_window=True, limit=20)
+    result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    assert result.source == "runs" and result.rows
+    assert any(row.measures["apis_prev"] for row in result.rows)
+    for row in result.rows:
+        # one row is one (operator, api) pair, so the api count is 1 here and 0 or 1 before
+        assert row.measures["apis"] == 1
+        assert row.measures["apis_prev"] in (0, 1)
+        assert row.measures["apis_delta"] == 1 - row.measures["apis_prev"]
+
+
+# -- scope_operator's threshold --------------------------------------------------------------------
+
+
+def test_scope_operator_threshold_is_utc_not_a_local_wall_clock():
+    """``operator_api.last_executed_at`` is written by ``Store._iso`` in UTC; the window start is
+    a LOCAL midnight. Formatting that local wall clock and gluing a "Z" on put the threshold nine
+    hours late in Asia/Seoul, so every API whose last run by the operator fell in the window's
+    first nine hours silently dropped out of scope.
+
+    ``api-000``'s only run by ``minseong`` is at 03:00 KST on the window's FIRST day -- inside the
+    window by any honest reading, and excluded by the bug."""
+    apis = [
+        ApiSpec(api_id=f"api-{i:03d}", method="GET", path=f"/v1/items/{i}", name=f"api {i}",
+                group="payment", updated_at=datetime(2026, 8, 1, tzinfo=UTC), has_rules=True,
+                params=["amount"])
+        for i in range(2)
+    ]
+    runs = [
+        RunResult(run_id="run-0", api_id="api-000",
+                  executed_at=datetime(2026, 8, 29, 3, 0, tzinfo=KST), target_env="dev",
+                  test_data_label="S1", status=RunStatus.FAIL, failed_rules=["amount >= 0"],
+                  http_status=500, duration_ms=120, executed_by="minseong", job_id="job-0001"),
+        RunResult(run_id="run-1", api_id="api-001",
+                  executed_at=datetime(2026, 9, 1, 12, 0, tzinfo=KST), target_env="dev",
+                  test_data_label="S1", status=RunStatus.PASS, failed_rules=[],
+                  http_status=200, duration_ms=90, executed_by="jiwon", job_id="job-0002"),
+    ]
+    store = Store(":memory:")
+    store.load_apis(apis)
+    store.ingest(runs, TZ)
+
+    spec = QuerySpec(dimensions=["api"], measures=["runs"], order_by="runs",
+                     filters=QueryFilters(window_days=7, scope_operator="minseong"))
+    result = store.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    # the window opens at 2026-08-29 00:00 KST == 2026-08-28 15:00Z, and the run is 18:00Z
+    assert compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS).day_from == "2026-08-29"
+    assert [row.keys["api"] for row in result.rows] == ["api-000"]
+    assert result.population == 1
+    # ...and the oracle, which compares real datetimes, says exactly the same thing
+    _assert_matches_oracle(store, spec, store.fetch_runs(),
+                           {a.api_id: a for a in store.search_apis(limit=10).items},
+                           label="scope-threshold")
+
+
 # -- limit, tie-break, samples --------------------------------------------------------------------
 
 
@@ -724,6 +907,18 @@ def test_the_operator_day_rollup_reads_its_own_index(synthetic):
     # the (day, operator_id) primary key IS the day-range access path here
     assert "SEARCH o USING INDEX sqlite_autoindex_rollup_operator_day_1" in detail, detail
     assert not re.search(r"\b(SCAN|SEARCH) runs\b", detail), detail
+
+    # ...and an `executed_by` FILTER on this axis stays here too (fix round 1): the filter is
+    # `operator_id IN (...)` on the table's own key column, so "이 사람 최근 얼마나 돌렸나"
+    # reads (days x operators) rows rather than the run table.
+    filtered = compile_query(
+        QuerySpec(dimensions=["executed_by"], measures=["runs"], order_by="runs",
+                  filters=QueryFilters(executed_by=["minseong", "jiwon"])),
+        now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
+    detail = _plan(synthetic, filtered.sql, filtered.params)
+    assert filtered.source == "rollup_operator_day"
+    assert not re.search(r"\b(SCAN|SEARCH) runs\b", detail), detail
+    assert "o.operator_id IN (?,?)" in filtered.sql
 
 
 # -- the operator-day rollup is what makes the executed_by axis cheap ------------------------------
