@@ -8,6 +8,7 @@ import { Button, Notice, PageHeader, Panel, plural, Skeleton, StatStrip, StatTil
 import { fetchHomeSummary } from "@/lib/api";
 import BriefingCard from "@/components/BriefingCard";
 import InsightPanel from "@/components/InsightPanel";
+import SavedQuestionsCard from "@/components/SavedQuestionsCard";
 import type { ScreenFilter, ScreenTarget } from "@/lib/types";
 
 export default function HomeView({
@@ -38,6 +39,10 @@ export default function HomeView({
       <PageHeader title="Home" subtitle="오늘 봐야 할 것" />
 
       <InsightPanel refreshKey={refreshKey} operatorId={operatorId} onAskAssistant={onAskAssistant} />
+
+      {/* 승격된 저장 질문 (자가발전 §8) — 인사이트 패널과 브리핑 사이. 성장 기능이 꺼진
+          배포에서는 라우트가 404라 카드가 아무것도 그리지 않는다. */}
+      <SavedQuestionsCard refreshKey={refreshKey} />
 
       <BriefingCard refreshKey={refreshKey} onAskAssistant={onAskAssistant} />
 

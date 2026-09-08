@@ -299,6 +299,61 @@ export interface QueryTablePayload {
   pending_alias?: { term: string; fragment_summary: string } | null;
 }
 
+/**
+ * `GET /saved-questions/{id}/run`이 돌려주는 `QueryResult` 그대로 — 카드 payload가 아니라 실행
+ * 결과 자체다. 열은 클라이언트가 `spec`에서 만들고(라벨은 lib/kinds.ts), 숫자는 하나도 만들지
+ * 않는다: rows·population·total_groups·window는 서버가 계산한 값이다.
+ */
+export interface QueryResultSpec {
+  dimensions: QueryDimension[];
+  measures: QueryMeasure[];
+  compare_previous_window?: boolean;
+  limit?: number;
+  [key: string]: unknown;
+}
+
+export interface QueryResult {
+  spec: QueryResultSpec;
+  rows: QueryTableRow[];
+  total_groups: number;
+  population: number;
+  /** [since, until] — 서버가 실제로 조회한 창. */
+  window: [string, string];
+  source: QuerySource;
+  turn_id?: string | null;
+}
+
+/** 승격된 저장 질문 1건 (`GET /saved-questions`). `title`은 서버가 카탈로그 라벨로 만든 결정론
+ *  문장이고, `source_users`/`source_asks`는 이 질문이 화면에 올라온 근거다(spec §8). */
+export interface SavedQuestion {
+  id: string;
+  cluster_key: string;
+  spec: QueryResultSpec;
+  title: string;
+  created_at: string;
+  status: "active" | "hidden";
+  uses: number;
+  last_used_at?: string | null;
+  source_users: number;
+  source_asks: number;
+}
+
+/** `GET /growth/summary` — 전부 COUNT다. `thresholds`는 호스트 config의 승격 문턱이라, 빈 상태
+ *  문구가 "3명·5회"를 상수로 박지 않고 실제 설정을 읽는다. */
+export interface GrowthSummary {
+  asks_total: number;
+  answered: number;
+  partial: number;
+  unmet: number;
+  up: number;
+  down: number;
+  new_terms: number;
+  new_saved: number;
+  unmet_clusters: Record<string, unknown>[];
+  thresholds: { min_users?: number; min_asks?: number; window_days?: number };
+  window_days?: number;
+}
+
 /** 조직 공용 어휘 1항목 (`GET /vocabulary`, `POST /vocabulary/{term}/confirm|reject|delete`).
  *  `fragment_summary`는 서버가 카탈로그 라벨로 만든 한 줄이다 — 포털이 필터 이름을 번역하지 않는다. */
 export interface VocabularyEntry {

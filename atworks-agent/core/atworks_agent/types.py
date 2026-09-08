@@ -683,6 +683,11 @@ class VocabularyEntry(BaseModel):
     cooldown_until: datetime | None = None
 
 
+#: 저장 질문의 두 상태. hidden은 사람이 Home에서 치운 것이고, 행은 남는다 -- cluster_key가
+#: UNIQUE라 지우면 같은 군집이 다음 승격에서 새 카드로 되살아난다(self-growth spec §8).
+SavedQuestionStatus = Literal["active", "hidden"]
+
+
 class SavedQuestion(BaseModel):
     """승격된 저장 질문 1건 -- Promoter가 만들고, title은 catalog.title_for_spec()의 결정론
     산출물이다(모델이 쓴 문장이 아니다)."""
@@ -691,7 +696,7 @@ class SavedQuestion(BaseModel):
     spec: QuerySpec
     title: str = Field(max_length=120)
     created_at: datetime
-    status: Literal["active", "hidden"] = "active"
+    status: SavedQuestionStatus = "active"
     uses: int = 0
     last_used_at: datetime | None = None
     source_users: int = 0
@@ -710,6 +715,10 @@ class GrowthSummary(BaseModel):
     new_terms: int = 0
     new_saved: int = 0
     unmet_clusters: list[dict[str, Any]] = Field(default_factory=list)
+    #: 승격 기준 그대로 (`promote_min_users`/`promote_min_asks`/`promote_window_days`) -- 저장 질문
+    #: 카드의 빈 상태가 "3명 이상이 5회 이상"이라고 말할 때 그 숫자는 **호스트 config에서** 온다.
+    #: 화면에 상수로 박아 두면 config를 바꾼 배포에서 조용히 거짓말을 하게 된다(spec §8).
+    thresholds: dict[str, int] = Field(default_factory=dict)
 
 
 # -- 화면→채팅 첨부 (open-design ChatCommentAttachment 계약) ---------------------------

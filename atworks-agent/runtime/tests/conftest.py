@@ -30,6 +30,7 @@ from atworks_agent.types import (
     RuleRecommendation,
     RunResult,
     RunStatus,
+    SavedQuestion,
     ScopeSummary,
     VocabularyEntry,
 )
@@ -122,6 +123,7 @@ class InMemoryBackend(AtworksBackend):
         self.executed: list[str] = []
         self.asks: list[AskEntry] = []
         self.vocabulary: dict[str, VocabularyEntry] = {}
+        self.saved_questions: dict[str, SavedQuestion] = {}
 
     async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
                           path_prefix=None):
@@ -426,6 +428,33 @@ class InMemoryBackend(AtworksBackend):
             else:
                 entry = entry.model_copy(update={"uses": entry.uses + 1})
             self.vocabulary[entry.term] = entry
+
+    # -- 저장 질문 (self-growth §8). An in-memory dict: the promoter itself is a host job, so what
+    # these doubles owe the ABC is the READ side -- list in `uses` order, run the stored spec
+    # through this double's own `query_runs`, hide/unhide.
+    async def list_saved_questions(self, session, status=None, cursor=None, limit=50):
+        del session, cursor
+        items = [q for q in self.saved_questions.values() if status is None or q.status == status]
+        items = sorted(items, key=lambda q: (q.uses, q.created_at, q.id), reverse=True)
+        return Page[SavedQuestion](items=items[:limit], next_cursor=None, total=len(items))
+
+    async def run_saved_question(self, session, saved_id):
+        saved = self.saved_questions.get(saved_id)
+        if saved is None or saved.status != "active":
+            return None
+        result = await self.query_runs(session, saved.spec)
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        self.saved_questions[saved_id] = saved.model_copy(
+            update={"uses": saved.uses + 1, "last_used_at": now})
+        return result
+
+    async def set_saved_question_status(self, session, saved_id, status):
+        del session
+        saved = self.saved_questions.get(saved_id)
+        if saved is None:
+            return None
+        self.saved_questions[saved_id] = saved.model_copy(update={"status": status})
+        return self.saved_questions[saved_id]
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind):
         return self.ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)

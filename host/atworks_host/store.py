@@ -56,6 +56,7 @@ from atworks_agent import (
     RunResult,
     RunsQuery,
     RunStatus,
+    SavedQuestion,
     VocabularyEntry,
     decode_cursor,
     encode_cursor,
@@ -368,6 +369,28 @@ CREATE TABLE IF NOT EXISTS vocabulary (
     cooldown_until TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_vocabulary_status_at ON vocabulary(status, proposed_at DESC);
+
+-- 승격된 저장 질문 (self-growth spec §8). One row per RECURRING question cluster: the promoter
+-- folds a week of `ask_log` by `cluster_key` and writes the ones enough different people asked
+-- often enough. `cluster_key` is UNIQUE, which is the whole re-promotion rule -- the daily job is
+-- an `INSERT OR IGNORE`, so a cluster that keeps recurring never grows a second card and a
+-- question a person hid never comes back tomorrow as a new row. `spec_json` is the cluster's
+-- NEWEST spec, `title` is `catalog.title_for_spec` (deterministic, no model sentence), and
+-- `source_users`/`source_asks` are the evidence that promoted it, kept so the card can say why
+-- this question is on the screen.
+CREATE TABLE IF NOT EXISTS saved_questions (
+    id TEXT PRIMARY KEY,
+    cluster_key TEXT NOT NULL UNIQUE,
+    spec_json TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    uses INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    source_users INTEGER NOT NULL DEFAULT 0,
+    source_asks INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_saved_questions_status_uses ON saved_questions(status, uses DESC);
 
 -- One row per retention STEP per local day (spec §3/§6): `partition_key` is `<step>:<YYYY-MM-DD>`
 -- (plus the `daily:<YYYY-MM-DD>` guard row that makes the tick-tail job run once a day), and
@@ -2711,6 +2734,135 @@ class Store:
         return self._conn.execute(
             "SELECT COUNT(*) FROM vocabulary WHERE status = ? AND COALESCE(confirmed_at, proposed_at) >= ?",
             (status, _iso(since)),
+        ).fetchone()[0]
+
+    # -- 저장 질문 (자가발전 spec §8: 되풀이되는 군집의 승격) ---------------------------------
+
+    @staticmethod
+    def _row_to_saved(row: sqlite3.Row) -> SavedQuestion:
+        return SavedQuestion(
+            id=row["id"], cluster_key=row["cluster_key"],
+            spec=QuerySpec.model_validate_json(row["spec_json"]), title=row["title"],
+            created_at=_parse_iso(row["created_at"]), status=row["status"], uses=row["uses"],
+            last_used_at=_parse_iso(row["last_used_at"]) if row["last_used_at"] else None,
+            source_users=row["source_users"], source_asks=row["source_asks"],
+        )
+
+    def promote_candidates(self, since: datetime, min_users: int, min_asks: int) -> list[dict[str, Any]]:
+        """승격 후보 -- **한 문장**의 ``GROUP BY cluster_key``(spec §12: 승격기는 하루 1회 이 질의
+        하나다). 답이 나온(``answered``) 행 중 스펙이 남아 있는 것만 세고, 서로 다른 operator 수와
+        건수가 둘 다 문턱을 넘은 군집을 돌려준다.
+
+        ``spec_json``은 그 군집의 **최신 행**의 스펙이다: SQLite는 ``MAX(at)``과 함께 고른 맨몸
+        컬럼을 그 최댓값 행에서 가져온다고 보장하므로, 대표 스펙을 뽑으려고 군집마다 두 번째 질의를
+        낼 필요가 없다(같은 ``at``이 둘이면 그 둘 중 하나 -- 같은 cluster_key라 차원·측정값·필터
+        종류는 어차피 동일하고 필터 VALUE만 다르다).
+
+        ``down_ratio``는 투표가 있는 행 중 👎의 비율이고, 투표가 없으면 0.0이다 -- 승격기가
+        "반응이 나빴던 군집"을 거르는 유일한 근거이고, 무투표를 나쁜 평가로 읽지 않는다."""
+        rows = self._conn.execute(
+            "SELECT cluster_key, spec_json, MAX(at) AS newest_at, "
+            "       COUNT(DISTINCT operator) AS users, COUNT(*) AS asks, "
+            "       SUM(CASE WHEN feedback = 'down' THEN 1 ELSE 0 END) AS downs, "
+            "       SUM(CASE WHEN feedback IS NOT NULL THEN 1 ELSE 0 END) AS votes "
+            "  FROM ask_log "
+            " WHERE outcome = 'answered' AND spec_json IS NOT NULL AND at >= ? "
+            " GROUP BY cluster_key "
+            "HAVING COUNT(DISTINCT operator) >= ? AND COUNT(*) >= ? "
+            " ORDER BY asks DESC, cluster_key",
+            (_iso(since), min_users, min_asks),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            votes = row["votes"] or 0
+            candidates.append({
+                "cluster_key": row["cluster_key"],
+                "spec_json": row["spec_json"],
+                "users": row["users"],
+                "asks": row["asks"],
+                "down_ratio": (row["downs"] or 0) / votes if votes else 0.0,
+            })
+        return candidates
+
+    def insert_saved_question(self, question: SavedQuestion) -> bool:
+        """``INSERT OR IGNORE`` on the UNIQUE ``cluster_key`` -- True means this call created the
+        row. 재승격이 없다는 규칙이 여기 한 줄로 들어 있다: 같은 군집이 다음 주에도 문턱을 넘으면
+        이 호출은 조용히 아무것도 하지 않는다(숨긴 질문이 내일 새 행으로 되살아나지 않는 이유)."""
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO saved_questions "
+            "(id, cluster_key, spec_json, title, created_at, status, uses, last_used_at, "
+            " source_users, source_asks) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (question.id, question.cluster_key, question.spec.model_dump_json(), question.title,
+             _iso(question.created_at), question.status, question.uses,
+             _iso(question.last_used_at) if question.last_used_at else None,
+             question.source_users, question.source_asks),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_saved_questions(self, status: str | None = None, cursor: str | None = None,
+                             limit: int = 50) -> Page[SavedQuestion]:
+        """가장 많이 쓰인 것부터, keyset ``(uses DESC, created_at DESC, id DESC)``. Home 카드가
+        "≤5, uses 순"(spec §8)이라서 정렬 자체가 제품 요구사항이고, 그래서 커서는 ``uses``를
+        타임스탬프 옆의 id 성분에 zero-pad해 실어 나른다(커서 코덱은 그대로 쓴다).
+
+        ``uses``는 실행할 때마다 바뀌는 값이라, 페이지를 넘기는 도중 누군가 저장 질문을 실행하면
+        그 행이 한 번 더 보이거나 건너뛰어질 수 있다 -- 승격된 질문은 수십 개 규모이고 Home 카드는
+        첫 페이지만 읽으므로 그 대가로 '많이 쓰는 순'을 택했다. ``total``은 ``status`` 필터를
+        적용한 뒤의 건수이고 ``limit``과 무관하다."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        total_sql = f"SELECT COUNT(*) FROM saved_questions{' WHERE ' + ' AND '.join(clauses) if clauses else ''}"
+        total = self._conn.execute(total_sql, params).fetchone()[0]
+        keyset, keyset_params = list(clauses), list(params)
+        if cursor:
+            after_created, after_id = decode_cursor(cursor)
+            after_uses, _, after_row_id = after_id.partition(":")
+            keyset.append("(uses < ? OR (uses = ? AND (created_at < ? OR (created_at = ? AND id < ?))))")
+            keyset_params += [int(after_uses), int(after_uses),
+                              _iso(after_created), _iso(after_created), after_row_id]
+        where_sql = f"WHERE {' AND '.join(keyset)}" if keyset else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM saved_questions {where_sql} ORDER BY uses DESC, created_at DESC, id DESC LIMIT ?",
+            [*keyset_params, limit + 1],
+        ).fetchall()
+        items = [self._row_to_saved(r) for r in rows[:limit]]
+        next_cursor = (
+            encode_cursor(items[-1].created_at, f"{items[-1].uses:012d}:{items[-1].id}")
+            if len(rows) > limit else None
+        )
+        return Page(items=items, next_cursor=next_cursor, total=total)
+
+    def get_saved_question(self, saved_id: str) -> SavedQuestion | None:
+        """id로 한 건 -- 목록 페이지를 훑어 찾지 않는다(get_rule과 같은 이유)."""
+        row = self._conn.execute(
+            "SELECT * FROM saved_questions WHERE id = ?", (saved_id,)).fetchone()
+        return self._row_to_saved(row) if row is not None else None
+
+    def set_saved_status(self, saved_id: str, status: str) -> SavedQuestion | None:
+        """숨기기/복원. None이면 그런 id가 없다는 뜻이고 라우트는 404로 답한다 -- 아무것도 없는
+        곳을 누른 클릭을 조용히 성공으로 삼지 않는다."""
+        cur = self._conn.execute(
+            "UPDATE saved_questions SET status = ? WHERE id = ?", (status, saved_id))
+        self._conn.commit()
+        return self.get_saved_question(saved_id) if cur.rowcount > 0 else None
+
+    def bump_saved_use(self, saved_id: str, now: datetime) -> SavedQuestion | None:
+        """실행 1회의 집계(``uses + 1`` + 마지막 실행 시각). 실행 결과 자체는 저장하지 않는다 --
+        저장 질문은 **질문**이지 스냅샷이 아니라서, 열 때마다 그때의 데이터로 다시 계산된다."""
+        cur = self._conn.execute(
+            "UPDATE saved_questions SET uses = uses + 1, last_used_at = ? WHERE id = ?",
+            (_iso(now), saved_id))
+        self._conn.commit()
+        return self.get_saved_question(saved_id) if cur.rowcount > 0 else None
+
+    def count_saved_questions_since(self, since: datetime) -> int:
+        """Growth 뷰의 "새 저장 질문" 타일 -- COUNT다."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM saved_questions WHERE created_at >= ?", (_iso(since),)
         ).fetchone()[0]
 
     # -- commerce_common.memory 계약의 SQL 뒷면 (SqliteMemoryStore가 감싼다) ------------------

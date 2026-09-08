@@ -38,6 +38,7 @@ from atworks_agent.serialization import (
     profile_record,
     rule_record,
     run_record,
+    saved_question_record,
     vocabulary_record,
 )
 from atworks_agent.vocabulary import match_terms
@@ -67,6 +68,11 @@ LedgerStatusFilter = Literal["staged", "applied", "discarded"]
 #: Literal so FastAPI 422s a typo instead of letting it reach the backend, match nothing and come
 #: back as an empty page indistinguishable from "no terms in that state" (the M18 lesson).
 VocabularyStatusFilter = Literal["pending", "confirmed", "rejected"]
+
+#: `GET /saved-questions?status=` — the sidecar's two states plus an explicit `all`. The default
+#: is `active` (Home's card asks for exactly that), and "everything, hidden included" has to be
+#: SAID rather than being what an omitted parameter happens to mean.
+SavedQuestionStatusFilter = Literal["active", "hidden", "all"]
 
 T = TypeVar("T")
 
@@ -348,6 +354,59 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/vocabulary/{term:path}/delete")
     async def delete_vocabulary(term: str, record: CurrentSession) -> dict:
         return await vocabulary_action(term, "delete", record)
+
+    # -- 자가발전: 저장 질문 (spec §8/§10) --------------------------------------------------
+    # `/changes/` 도 `/rules/` 도 아니다 — 저장 질문은 job 승인이 아니고, 승인 마크와는 아무
+    # 관계가 없다(어휘와 같은 자리, 같은 이유). 사람이 눌렀다는 증적만 감사 2행으로 남는다.
+    @router.get("/saved-questions")
+    async def saved_questions(record: CurrentSession, status: SavedQuestionStatusFilter = "active",
+                              cursor: str | None = None,
+                              limit: int = Query(50, ge=1, le=200)) -> dict:
+        """승격된 저장 질문(많이 쓰는 순, keyset 커서). 기본은 active — Home 카드가 읽는 목록이고,
+        숨긴 질문까지 보려면 `?status=all`을 **적어야** 한다."""
+        _require_growth()
+        page = await _paged(backend.list_saved_questions(
+            context(record), status=None if status == "all" else status,
+            cursor=cursor, limit=limit))
+        return {"items": [saved_question_record(q) for q in page.items],
+                "next_cursor": page.next_cursor, "total": page.total}
+
+    @router.get("/saved-questions/{saved_id}/run")
+    async def run_saved_question(saved_id: str, record: CurrentSession) -> dict:
+        """저장 질문 1건을 지금 실행한다 — 승격 당시의 답이 아니라 지금의 창으로 다시 계산한 결과다.
+        모델은 이 경로에 없다: 저장된 QuerySpec을 그대로 실행할 뿐이라 질문이 도중에 바뀌지 않는다.
+        없는 id도, 숨긴 질문도 404 — 숨김이 링크 하나로 무력해지면 숨김이 아니다."""
+        _require_growth()
+        result = await backend.run_saved_question(context(record), saved_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"unknown saved question: {saved_id!r}")
+        return result.model_dump(mode="json")
+
+    async def saved_question_action(saved_id: str, action: str, record: Record) -> dict:
+        """숨기기/복원 — 사람의 클릭만 닿는다. `growth_action`이라 감사 2행은 남고 승인 마크는
+        움직이지 않는다(저장 질문은 실행 계획이 아니다)."""
+        _require_growth()
+        status = "hidden" if action == "hide" else "active"
+        question = await growth_action(
+            record, action=f"saved_question_{action}", target_kind="saved_question",
+            target_id=saved_id,
+            fn=lambda: backend.set_saved_question_status(context(record), saved_id, status),
+        )
+        if question is None:
+            raise HTTPException(status_code=404, detail=f"unknown saved question: {saved_id!r}")
+        record.pending_app_events.append(
+            f"Operator {'hid' if action == 'hide' else 'restored'} the saved question "
+            f"{question.title!r} on Home."
+        )
+        return {"ok": True, "saved_question": saved_question_record(question)}
+
+    @router.post("/saved-questions/{saved_id}/hide")
+    async def hide_saved_question(saved_id: str, record: CurrentSession) -> dict:
+        return await saved_question_action(saved_id, "hide", record)
+
+    @router.post("/saved-questions/{saved_id}/unhide")
+    async def unhide_saved_question(saved_id: str, record: CurrentSession) -> dict:
+        return await saved_question_action(saved_id, "unhide", record)
 
     # Every list route answers in ONE shape: the paged envelope {items, next_cursor, total}
     # (Task 10 — the legacy `apis` / `runs` + `population` keys are gone, and the 500-row default

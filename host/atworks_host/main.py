@@ -19,6 +19,7 @@ from .briefing import Briefings
 from .insights import InsightPanels
 from .memory_store import SqliteMemoryStore
 from .mock_backend import MockAtworks
+from .promoter import Promoter
 from .reports import Reports
 from .retention import Retention, TimestampedSessionStore
 from .scheduler import Scheduler
@@ -81,7 +82,9 @@ def build() -> tuple:
     # create_app, so the idle TTL really reaches the sessions this process serves.
     sessions = TimestampedSessionStore(AtworksSessionState)
     retention = Retention(store, config, insights_dir, sessions)
-    scheduler = Scheduler(backend, reports, None, briefings=briefings, retention=retention)
+    promoter = Promoter(store, config)
+    scheduler = Scheduler(backend, reports, None, briefings=briefings, retention=retention,
+                          promoter=promoter)
 
     async def loop() -> None:
         while True:

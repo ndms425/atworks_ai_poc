@@ -19,6 +19,7 @@ from atworks_agent import (
 )
 
 from .briefing import Briefings
+from .promoter import Promoter
 from .reports import Reports
 from .retention import Retention
 
@@ -36,12 +37,14 @@ def due_at(schedule: JobSchedule, index: int) -> datetime | None:
 
 class Scheduler:
     def __init__(self, backend: AtworksBackend, reports: Reports, session: AtworksSessionContext | None,
-                 briefings: Briefings | None = None, retention: Retention | None = None):
+                 briefings: Briefings | None = None, retention: Retention | None = None,
+                 promoter: Promoter | None = None):
         self.backend = backend
         self.reports = reports
         self.session = session or AtworksSessionContext(session_id="scheduler", project_id="default", operator="scheduler")
         self.briefings = briefings
         self.retention = retention
+        self.promoter = promoter
         self._lock = asyncio.Lock()
 
     async def tick(self, now: datetime) -> list[str]:
@@ -94,6 +97,15 @@ class Scheduler:
                     await self.retention.maybe_run(now)
                 except Exception:
                     logger.exception("retention job failed")
+            if self.promoter is not None:
+                try:
+                    # 보존 다음, tick의 맨 끝(spec §8). 하루 1회 가드는 maybe_run 안에 있고, 이
+                    # 경로에도 LLM은 없다 -- 되풀이된 질문을 세어 저장 질문 행을 만들 뿐이다.
+                    # 보존 뒤에 두는 이유는 순서가 의미를 갖기 때문이다: 오늘 만료된 ask_log 행은
+                    # 오늘의 승격 창에 들어오지 않는다.
+                    await self.promoter.maybe_run(now)
+                except Exception:
+                    logger.exception("question promotion failed")
             return executed
 
     async def _execute_one(self, job_id: str, schedule_index: int | None, report: bool) -> bool:

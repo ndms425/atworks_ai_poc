@@ -8,11 +8,14 @@ import type {
   ComparisonProfile,
   FormatBatch,
   FormatDefinition,
+  GrowthSummary,
   HomeSummary,
   InsightPanelData,
   JobSpec,
   OperatorProfile,
+  QueryResult,
   RunResult,
+  SavedQuestion,
   ValidationRule,
   VocabularyEntry,
 } from "./types";
@@ -61,6 +64,17 @@ export const actOnVocabulary = (term: string, action: "confirm" | "reject" | "de
   api.post<{ ok: boolean; entry: VocabularyEntry }>(`/vocabulary/${encodeURIComponent(term)}/${action}`, {});
 export const fetchVocabulary = (status?: string, cursor: string | null = null) =>
   api.getPage<VocabularyEntry>("/vocabulary", { status, cursor, limit: PAGE_SIZE });
+
+// /changes/ 도 /rules/ 도 아니다 — 저장 질문도 job 승인이 아니라서 자기 네임스페이스를 쓴다
+// (spec §8). 목록은 서버가 `uses` 순으로 정렬해 보내고, 실행은 지금의 창으로 다시 계산한다.
+export const fetchSavedQuestions = (status?: string, cursor: string | null = null, limit = PAGE_SIZE) =>
+  api.getPage<SavedQuestion>("/saved-questions", { status, cursor, limit });
+export const runSavedQuestion = (savedId: string) =>
+  api.get<QueryResult>(`/saved-questions/${encodeURIComponent(savedId)}/run`);
+export const actOnSavedQuestion = (savedId: string, action: "hide" | "unhide") =>
+  api.post<{ ok: boolean; saved_question: SavedQuestion }>(`/saved-questions/${encodeURIComponent(savedId)}/${action}`, {});
+/** 성장 요약 — 저장 질문 카드는 빈 상태 문구의 숫자(승격 문턱)만 여기서 읽는다. */
+export const fetchGrowthSummary = (days = 7) => api.get<GrowthSummary>("/growth/summary", { days: String(days) });
 
 /** Home's whole above-the-fold state in ONE call — counts, insight flags and the briefing header.
  * It replaced four parallel reads, two of which downloaded a run page only to count it. */

@@ -19,6 +19,7 @@ from atworks_agent import (
     Page,
     RunResult,
     RunStatus,
+    SavedQuestion,
     TestDataSet,
     VocabularyEntry,
 )
@@ -282,6 +283,17 @@ class RecordingBackend(AtworksBackend):
         return []
 
     async def note_vocabulary_use(self, session, terms, rejected=False):
+        raise NotImplementedError
+
+    # 저장 질문 (self-growth §8): 승격기는 Store를 직접 읽고 쓴다 -- 스케줄러의 백엔드는 이
+    # 경로에 관여하지 않으므로, 셋 다 불리면 테스트가 그것을 본다.
+    async def list_saved_questions(self, session, status=None, cursor=None, limit=50):
+        return Page[SavedQuestion](items=[], next_cursor=None, total=0)
+
+    async def run_saved_question(self, session, saved_id):
+        raise NotImplementedError
+
+    async def set_saved_question_status(self, session, saved_id, status):
         raise NotImplementedError
 
     async def active_jobs(self, session):

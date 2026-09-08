@@ -51,6 +51,7 @@ from atworks_agent import (
     RunResult,
     RunsQuery,
     RunStatus,
+    SavedQuestion,
     ScopeSummary,
     SelectWhere,
     TestDataSet,
@@ -546,8 +547,16 @@ class MockAtworks(AtworksBackend):
             # `new_terms` is a COUNT over the vocabulary sidecar (Task 6). Saved questions (§8)
             # land in Task 7; until then that one stays honestly zero rather than a number
             # invented from another table.
-            new_terms=self.store.count_vocabulary_since(since), new_saved=0,
+            new_terms=self.store.count_vocabulary_since(since),
+            new_saved=self.store.count_saved_questions_since(since),
             unmet_clusters=self.store.unmet_clusters(since),
+            # 승격 문턱은 config의 값이고, 화면은 그것을 읽어 빈 상태 문구를 쓴다 -- 포털에
+            # "3명·5회"를 상수로 박으면 config를 바꾼 배포에서 조용히 거짓말이 된다(spec §8).
+            thresholds={
+                "min_users": self._config.promote_min_users,
+                "min_asks": self._config.promote_min_asks,
+                "window_days": self._config.promote_window_days,
+            },
         )
 
     # -- 어휘 (자가발전 spec §7) -------------------------------------------------------------
@@ -646,6 +655,31 @@ class MockAtworks(AtworksBackend):
         else:
             self.store.bump_vocabulary_uses(normalized)
         self._confirmed_cache = None
+
+    # -- 저장 질문 (자가발전 spec §8) --------------------------------------------------------
+
+    async def list_saved_questions(self, session, status=None, cursor=None, limit=50) -> Page[SavedQuestion]:
+        del session
+        return self.store.list_saved_questions(status, cursor, limit)
+
+    async def run_saved_question(self, session, saved_id: str) -> QueryResult | None:
+        saved = self.store.get_saved_question(saved_id)
+        if saved is None or saved.status != "active":
+            # 숨긴 질문은 링크로도 돌지 않는다 -- 그러지 않으면 '숨김'이 아무 뜻도 없다.
+            return None
+        # 저장 질문은 스냅샷이 아니라 질문이다: 승격 당시의 행이 아니라 지금의 창 규칙으로 다시
+        # 계산한다. 실행기는 `query_runs`가 쓰는 바로 그것이라 카드와 저장 질문이 같은 숫자를 본다.
+        now = session.local_now() if session is not None else None
+        result = self.store.query(
+            saved.spec, now=now or datetime.now(UTC), tz=self._config.briefing_tz,
+            default_window_days=self._config.max_aggregate_window_days,
+        )
+        self.store.bump_saved_use(saved_id, now or datetime.now(UTC))
+        return result
+
+    async def set_saved_question_status(self, session, saved_id: str, status) -> SavedQuestion | None:
+        del session
+        return self.store.set_saved_status(saved_id, status)
 
     def _audit(self, session, action: str, target_kind: str, target_id: str) -> None:
         """Append-only audit row (spec §2). Every `apply_*` below writes one the moment the

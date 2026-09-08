@@ -34,6 +34,8 @@ from .types import (
     RunGroup,
     RunResult,
     RunsQuery,
+    SavedQuestion,
+    SavedQuestionStatus,
     ScopeSummary,
     VocabularyEntry,
     VocabularyStatus,
@@ -563,6 +565,46 @@ class AtworksBackend(ABC):
         ``vocabulary_auto_demote_rejections`` 이상이고 확인 수보다 많으면 상태가 pending으로
         내려가 아무의 컨텍스트에도 들어가지 않는다. 순수 집계라 어떤 경우에도 턴을 실패시키지
         않는다."""
+
+    # -- 저장 질문 (자가발전 spec §8: 되풀이되는 질문의 승격) ---------------------------------
+    # 이 3개 메서드가 공유하는 의무 (REST 구현이 반드시 지킨다):
+    #   1) **승격은 호스트의 일이고 모델의 일이 아니다.** 문턱(``promote_window_days`` /
+    #      ``promote_min_users`` / ``promote_min_asks``)은 호스트 config의 값이고, 승격기는 하루
+    #      1회 LLM 없이 돈다. 백엔드는 그 결과를 읽고 쓸 뿐 스스로 승격 규칙을 갖지 않는다.
+    #   2) **id는 군집의 함수다** (``sq-`` + sha1(cluster_key) 앞 12자리): 같은 질문 군집은 어느
+    #      저장소에서 승격되든 같은 id를 갖고, ``cluster_key``는 UNIQUE라 재승격이 없다.
+    #   3) **저장 질문은 스냅샷이 아니라 질문이다.** 실행은 언제나 지금의 창 규칙으로 다시
+    #      계산한다 -- 승격 당시의 행을 되돌려 주면 그건 저장된 답이지 저장된 질문이 아니다.
+    @abstractmethod
+    async def list_saved_questions(
+        self, session: AtworksSessionContext, status: SavedQuestionStatus | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[SavedQuestion]:
+        """저장 질문 목록. REST 구현 의무: 정렬은 ``uses`` DESC, ``created_at`` DESC, ``id`` DESC
+        (Home 카드가 '많이 쓰는 순 ≤5'라 정렬이 곧 제품 요구사항이다), ``cursor``는 서버가 만든
+        불투명 문자열, ``Page.total``은 ``status`` 필터 적용 후의 건수이고 ``limit``과 무관하다."""
+
+    @abstractmethod
+    async def run_saved_question(
+        self, session: AtworksSessionContext, saved_id: str
+    ) -> QueryResult | None:
+        """저장 질문 1건을 **지금** 실행한다 -- ``query_runs``와 같은 실행기, 같은 창 규칙, 같은
+        소스 선택. 승격 당시의 결과를 캐시해 두지 않는다.
+
+        ``None``은 두 경우 -- 그런 id가 없거나, 숨겨진(hidden) 질문이거나. 라우트는 둘 다 404로
+        답한다: 사람이 숨긴 질문이 링크로는 계속 돌아간다면 '숨김'이 아무 뜻도 없게 된다.
+
+        REST 구현 의무: 실행에 성공하면 ``uses + 1``과 ``last_used_at``을 남긴다(그 카운터가
+        목록의 정렬 기준이다). 이 경로에는 모델이 없다 -- 저장된 ``QuerySpec``을 그대로 실행할
+        뿐이라, 저장 질문 하나가 갑자기 다른 질문이 되는 일이 없다."""
+
+    @abstractmethod
+    async def set_saved_question_status(
+        self, session: AtworksSessionContext, saved_id: str, status: SavedQuestionStatus
+    ) -> SavedQuestion | None:
+        """숨기기/복원 -- 사람의 클릭만 닿는 경로다(모델에게 열린 도구가 없다). 행은 남는다:
+        ``cluster_key``가 UNIQUE라, 지웠다면 같은 군집이 내일 새 카드로 되살아난다. 없는 id면
+        ``None``(라우트는 404)."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod

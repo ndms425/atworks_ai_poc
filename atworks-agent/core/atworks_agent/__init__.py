@@ -133,6 +133,7 @@ from .types import (
     RunStatus,
     RunStatusFilter,
     SavedQuestion,
+    SavedQuestionStatus,
     ScopeSummary,
     ScreenFilter,
     ScreenState,

@@ -14,6 +14,7 @@ from .types import (
     JobSpec,
     RuleRecommendation,
     RunResult,
+    SavedQuestion,
     VocabularyEntry,
 )
 from .vocabulary import fragment_summary_ko
@@ -91,6 +92,13 @@ def vocabulary_record(entry: VocabularyEntry) -> dict[str, Any]:
     record = entry.model_dump(mode="json", exclude_none=True)
     record["fragment_summary"] = fragment_summary_ko(entry.fragment)
     return record
+
+
+def saved_question_record(question: SavedQuestion) -> dict[str, Any]:
+    """저장 질문 1행 (자가발전 §8). 파생 필드도 별칭도 없다 -- ``title``은 이미 카탈로그 라벨로
+    만들어진 결정론 문장이고, ``source_users``/``source_asks``는 이 질문을 화면에 올린 증거
+    그대로다. 카드는 여기 없는 숫자를 지어내지 않는다."""
+    return question.model_dump(mode="json", exclude_none=True)
 
 
 def format_batch_record(batch: FormatBatch) -> dict[str, Any]:
