@@ -100,7 +100,7 @@ def _query_spec_schema() -> dict[str, Any]:
             "measures": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "enum": list(get_args(Measure))},
                          "description": "What to compute per group."},
             "order_by": {"type": "string", "enum": [*get_args(Measure), "key"],
-                         "description": "One of the measures you asked for, or 'key' for the group key. Defaults to the first measure."},
+                         "description": "One of the measures you asked for, or 'key' for the group key. Defaults to non_pass when you asked for it, otherwise to the first measure."},
             "descending": {"type": "boolean", "description": "Default true; use false with order_by 'key' for a chronological trend."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "How many groups come back. Default 20."},
             "compare_previous_window": {"type": "boolean",

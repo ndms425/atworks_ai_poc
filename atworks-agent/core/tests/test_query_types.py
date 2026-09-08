@@ -170,3 +170,14 @@ def test_default_order_by_falls_back_to_the_first_measure_when_non_pass_is_absen
     # an EXPLICIT order_by outside the requested measures is still an error
     with pytest.raises(ValidationError):
         QuerySpec(measures=["runs"], order_by="fail")
+
+
+def test_fail_rate_is_refused_under_a_status_filter_but_allowed_with_all_or_none():
+    QuerySpec(measures=["fail_rate"])                                   # no status filter: fine
+    QuerySpec(measures=["fail_rate"], filters={"status": "all"})       # 'all' == no filter
+    with pytest.raises(ValidationError, match="fail_rate"):
+        QuerySpec(measures=["fail_rate"], filters={"status": "non_pass"})
+    with pytest.raises(ValidationError, match="fail_rate"):
+        QuerySpec(measures=["runs", "fail_rate"], filters={"status": "pass"})
+    # the counter measures stay allowed under any status filter
+    QuerySpec(measures=["non_pass", "apis"], filters={"status": "non_pass"})

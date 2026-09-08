@@ -592,6 +592,18 @@ class QuerySpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _fail_rate_needs_an_unfiltered_status(self) -> QuerySpec:
+        # fail_rate is (fail+error)/runs over the rows the filter kept; under status=non_pass it
+        # is 1.0 on every row and under status=pass it is 0.0 -- a denominator nobody asked for.
+        # Refuse the combination with a hint instead of publishing a meaningless ratio.
+        if "fail_rate" in self.measures and self.filters.status not in (None, "all"):
+            raise ValueError(
+                "fail_rate는 status 필터 없이 요청하세요 (전체 run 대비 실패·에러 비율). "
+                "실패 건수만 필요하면 measures에 non_pass를 쓰고 status 필터를 유지하세요."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _order_by_is_key_or_a_requested_measure(self) -> QuerySpec:
         if self.order_by != "key" and self.order_by not in self.measures:
             # The DEFAULT ("non_pass") must never reject a spec whose measures simply omit it --

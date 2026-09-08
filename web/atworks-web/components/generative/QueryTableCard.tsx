@@ -12,9 +12,15 @@ import type { AttachedItem, QueryTableColumn, QueryTablePayload, QueryTableRow }
  * 모집단도, 창도 전부 서버가 QueryResult에서 채워 보낸 payload 그대로다.
  */
 
-function cellText(value: number | null | undefined, kind: QueryTableColumn["kind"]): string {
+/** 비율 측정값(fail_rate와 그 _prev/_delta)은 값이 정수(0, 1)여도 소수 4자리로 고정한다 — 형식은 값이 아니라
+ *  컬럼이 정한다. 나머지 측정값은 정수 카운트라 자릿수 구분만 한다. */
+function isRatioColumn(key: string): boolean {
+  return key === "fail_rate" || key.startsWith("fail_rate_");
+}
+
+function cellText(value: number | null | undefined, kind: QueryTableColumn["kind"], key: string): string {
   if (value === null || value === undefined) return "—";
-  const text = Number.isInteger(value) ? value.toLocaleString() : value.toFixed(4);
+  const text = isRatioColumn(key) ? value.toFixed(4) : Number.isInteger(value) ? value.toLocaleString() : value.toFixed(4);
   return kind === "delta" && value > 0 ? `+${text}` : text;
 }
 
@@ -74,7 +80,7 @@ export default function QueryTableCard({
                       key={column.key}
                       className={`px-2 py-1.5 text-right tabular-nums ${cellTone(row.measures[column.key], column.kind)}`}
                     >
-                      {cellText(row.measures[column.key], column.kind)}
+                      {cellText(row.measures[column.key], column.kind, column.key)}
                     </td>
                   ),
                 )}
