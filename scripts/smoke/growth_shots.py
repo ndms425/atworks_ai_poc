@@ -41,6 +41,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from datetime import time as clock
@@ -128,6 +129,18 @@ def restart_host() -> None:
 
 def api_get(path: str, session_id: str | None = None) -> Any:
     request = urllib.request.Request(f"{HOST}/api/atworks{path}")
+    if session_id:
+        request.add_header("X-Session-Id", session_id)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def api_post(path: str, session_id: str | None = None) -> Any:
+    """스모크가 **직접** 누르는 유일한 라우트 종류는 셋업뿐이다(앞선 실행이 남긴 상태 되돌리기).
+    검증 대상인 승인·숨기기 클릭은 언제나 화면의 버튼으로 한다 — 라우트를 직접 부르면 화면이
+    그 버튼을 정말 갖고 있는지는 아무것도 증명하지 못한다."""
+    request = urllib.request.Request(f"{HOST}/api/atworks{path}", data=b"{}", method="POST")
+    request.add_header("Content-Type", "application/json")
     if session_id:
         request.add_header("X-Session-Id", session_id)
     with urllib.request.urlopen(request, timeout=60) as response:
@@ -617,6 +630,16 @@ def _seed_asks(db: Path, spec: dict[str, Any], cluster_key: str, question: str) 
 def step_v1(page: Page, state: dict[str, Any], session_id: str) -> None:
     """어휘 제안 → 확인 클릭. 확정은 오직 이 클릭에서 일어난다(채팅에 "맞아"라고 써도 아무것도
     저장되지 않는다) — 그래서 감사 로그의 짝도 여기서만 는다."""
+    # 앞선 실행이 이미 확정해 둔 용어라면 `propose_alias`는 `existing`을 돌려주고 카드에 확인 줄이
+    # **붙지 않는 것이 맞다**(확정된 항을 새 제안처럼 다시 띄우지 않는 것이 T6 수정 라운드의 요점).
+    # 그 상태에서 확인 줄을 요구하면 스모크는 옳게 동작한 제품을 모델 미스로 적는다 — 실제로 한 번
+    # 그랬다. 데모 저장소는 실행 사이에 살아 있으므로 여기서 먼저 걷어낸다: 사람이 처음 가르치는
+    # 순간을 보는 것이 이 스텝의 목적이니, 그 상태를 만들어 놓고 시작한다.
+    for row in api_get("/vocabulary?limit=50", session_id)["items"]:
+        if "결제" in (row.get("term") or ""):
+            api_post(f"/vocabulary/{urllib.parse.quote(row['term'])}/delete", session_id)
+            state["clicks"] = state.get("clicks", 0) + 1
+            print(f"  [setup] 앞선 실행이 확정한 용어 ‘{row['term']}’를 지웠다 (감사 2행)")
     ask = "결제 계열 실패만 보여줘"
     turn = send(page, ask)
     shot = shoot(page, 10)
@@ -690,16 +713,34 @@ def step_promotion(page: Page, state: dict[str, Any], session_id: str, db: Path)
     request.add_header("X-Session-Id", session_id)
     with urllib.request.urlopen(request, timeout=180) as response:
         response.read()
-    saved = api_get("/saved-questions?limit=50", session_id)
+    # `?status=all`: 기본값 active로 물으면 **앞선 스모크 실행이 [숨기기]를 누른** 카드가
+    # 안 보인다. 그리고 그것은 다시 승격되지도 않는다 — `cluster_key`가 UNIQUE라 사람이 치운
+    # 질문이 다음 날 새 카드로 되살아나지 않는 것이 제품의 의도다. 그 상태의 데모 저장소에서
+    # active만 읽으면 스모크는 멀쩡한 제품을 FAIL(product)로 보고한다(실제로 한 번 그랬다).
+    saved = api_get("/saved-questions?status=all&limit=50", session_id)
     if not saved["items"]:
         # 하루 1회 가드가 이미 오늘 돌았다면 tick은 승격을 건너뛴다 — 승격기를 직접 돌린다.
         done = _run_in_host_venv(_PROMOTE_CODE, str(db))
         print(f"  [promoter] {(done.stdout or '').strip() or (done.stderr or '').strip()[-400:]}")
-        saved = api_get("/saved-questions?limit=50", session_id)
+        saved = api_get("/saved-questions?status=all&limit=50", session_id)
     titles = [row.get("title") for row in saved["items"]]
-    check(f"P. 저장 질문이 생겼다 (본 것: {titles})", bool(titles))
+    check(f"P. 저장 질문이 있다 (본 것: {titles})", bool(titles))
     if not titles:
         return
+    # 이 스텝이 보려는 것은 Home 카드 → [실행] → [숨기기]의 사람 순서다. 앞선 실행이 이미
+    # 숨겨 놨다면 되돌려 놓고 시작한다 — 그 자체가 [복원] 라우트를 한 번 더 확인하는 셈이다.
+    hidden = [row for row in saved["items"] if row.get("status") == "hidden"]
+    for row in hidden:
+        api_post(f"/saved-questions/{row['id']}/unhide", session_id)
+        # 복원도 호스트 액션이라 감사 2행을 남긴다 — 마지막 안전 검사의 산술이 "액션 1회 = 2행"을
+        # 단언하므로 여기서 세지 않으면 그 검사가 우리 셋업 때문에 틀린다.
+        state["clicks"] = state.get("clicks", 0) + 1
+    if hidden:
+        print(f"  [setup] 앞선 실행이 숨긴 저장 질문 {len(hidden)}개를 복원했다 (감사 {len(hidden)*2}행)")
+        saved = api_get("/saved-questions?status=all&limit=50", session_id)
+    active_before = api_get("/saved-questions?status=active&limit=50", session_id)
+    check(f"P. 저장 질문이 활성 목록에 있다 (본 것: {active_before['total']}개)",
+          active_before["total"] > 0)
     check("P. 제목이 카탈로그 문장이다 (‘기본 기간’이 아니다)",
           all("기본 기간" not in (title or "") for title in titles))
 
@@ -737,8 +778,9 @@ def step_promotion(page: Page, state: dict[str, Any], session_id: str, db: Path)
     page.wait_for_timeout(3000)
     state["clicks"] = state.get("clicks", 0) + 1
     active = api_get("/saved-questions?status=active&limit=50", session_id)
-    check(f"P. 숨긴 질문이 활성 목록에서 빠진다 (남은 {active['total']}개 / 전 {saved['total']}개)",
-          active["total"] < saved["total"])
+    check(f"P. 숨긴 질문이 활성 목록에서 빠진다 "
+          f"(남은 {active['total']}개 / 전 {active_before['total']}개)",
+          active["total"] < active_before["total"])
     actions = [row.get("action") for row in api_get("/audit?limit=10", session_id)["items"]]
     check(f"P. 감사 로그에 saved_question_hide 짝이 남는다 (본 것: {actions[:4]})",
           "saved_question_hide" in actions and "saved_question_hide:ok" in actions)
@@ -840,9 +882,12 @@ def step_safety(session_id: str, before: dict[str, Any], clicks: int) -> None:
     after_jobs = {job["job_id"]: job.get("status") for job in jobs["items"]}
     delta = total - before["audit"]
     print(f"\n[S] jobs={len(after_jobs)} audit total={total} "
-          f"(before {before['audit']}, 승인 클릭 {clicks}회 → 기대 증가 {clicks * 2})")
+          f"(before {before['audit']}, 호스트 액션 {clicks}회 → 기대 증가 {clicks * 2})")
     check("S. job 상태가 스모크 전후로 동일하다", after_jobs == before["jobs"])
-    check(f"S. 감사 로그 증가분이 승인 클릭의 짝과 정확히 같다 ({delta} vs {clicks * 2})",
+    # 액션 1회 = 정확히 2행이고, 채팅 턴은 0행이다. 여기서 세는 액션에는 화면 클릭과 이 스모크
+    # 자신의 셋업 복원(앞선 실행이 숨긴 저장 질문 되돌리기)이 모두 들어간다 — 둘 다 인증된 호스트
+    # 라우트를 지나므로 원장에서 같은 무게를 갖는다. 채팅이 한 줄이라도 쓰면 이 등식이 깨진다.
+    check(f"S. 감사 로그 증가분이 호스트 액션의 짝과 정확히 같다 ({delta} vs {clicks * 2})",
           delta == clicks * 2)
 
 
