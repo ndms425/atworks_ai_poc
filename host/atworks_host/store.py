@@ -69,15 +69,19 @@ from atworks_agent.vocabulary import fragment_json
 
 from .query_sql import (
     API_SAMPLE_CAP,
+    APIS_DIMENSIONS,
     RUN_SAMPLE_CAP,
     CompiledQuery,
-    batched_samples,
+    apis_driven_api_samples,
+    apis_key_predicate,
+    batched_api_samples,
     compile_query,
     day_bounds,
     path_segments,
     row_key_predicates,
     sample_batch,
     sample_predicates,
+    stored_key_apis,
 )
 from .query_sql import KEY_AXES as QUERY_KEY_AXES
 
@@ -111,6 +115,17 @@ CREATE INDEX IF NOT EXISTS idx_apis_seg2 ON apis(path_segment_2);
 CREATE INDEX IF NOT EXISTS idx_apis_seg3 ON apis(path_segment_3);
 CREATE INDEX IF NOT EXISTS idx_apis_prefix2 ON apis(path_prefix_2);
 CREATE INDEX IF NOT EXISTS idx_apis_method ON apis(method);
+-- The other direction of the same story: `query_runs` reaches the catalogue through
+-- `rollup_day ⋈ apis ON api_id`, once per rollup row in the window (168,000 of them in a 30-day
+-- window on the 2M-run set), and only ever to read ONE attribute column. The PK index gets the
+-- row's rowid and then the table b-tree has to be seeked for that column. Carrying the six
+-- attribute columns in the index makes the join index-only: measured on the full set,
+-- `path_segment_2` 197ms -> 127ms and `method x target_env` 219ms -> 147ms for the ranked page,
+-- for 75ms of build time and one small index over 50,000 rows. `_RUNS_KEY`/`_ROLLUP_DAY_KEY`'s
+-- `APIS_DIMENSIONS` are exactly this column list -- adding a seventh attribute dimension means
+-- adding it here too, or the join silently falls back to the PK + table seek.
+CREATE INDEX IF NOT EXISTS idx_apis_attributes ON apis(
+    api_id, method, "group", path_segment_1, path_segment_2, path_segment_3, path_prefix_2);
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
@@ -2047,9 +2062,7 @@ class Store:
         scale branch's standing rule."""
         compiled = compile_query(spec, now=now, tz=tz, default_days=default_window_days,
                                  hot_days=hot_days)
-        rows, raw_keys = self._query_rows(spec, compiled)
-        total_groups, population = self._conn.execute(
-            compiled.totals_sql, compiled.totals_params).fetchone()
+        rows, raw_keys, (total_groups, population) = self._query_rows(spec, compiled)
         if compiled.p95_sql:
             self._fill_query_p95(rows, raw_keys, compiled)
         if compiled.apis_from_key_rows:
@@ -2065,13 +2078,22 @@ class Store:
             window=day_bounds(compiled.day_from, compiled.day_to, tz), source=compiled.source,
         )
 
-    def _query_rows(self, spec: QuerySpec, compiled: CompiledQuery) -> tuple[list[QueryRow], list[tuple]]:
-        """The page, plus the RAW key tuple of each row. The raw tuple is what every follow-up
-        statement matches on: ``QueryRow.keys`` has already mapped the ``''`` label sentinel back
-        to ``None``, and a fill that matched on the mapped value would silently miss that row."""
+    def _query_rows(self, spec: QuerySpec, compiled: CompiledQuery
+                    ) -> tuple[list[QueryRow], list[tuple], tuple[int, int]]:
+        """The page, the RAW key tuple of each row, and ``(total_groups, population)``.
+
+        The raw tuple is what every follow-up statement matches on: ``QueryRow.keys`` has already
+        mapped the ``''`` label sentinel back to ``None``, and a fill that matched on the mapped
+        value would silently miss that row.
+
+        The totals ride the same statement (``CompiledQuery``'s ``t_groups``/``t_population``
+        window columns), which is why there is no second round trip here: they are the same
+        number on every returned row, and an empty page means no groups and no population."""
         rows: list[QueryRow] = []
         raw_keys: list[tuple] = []
+        totals = (0, 0)
         for row in self._conn.execute(compiled.sql, compiled.params).fetchall():
+            totals = (row["t_groups"], row["t_population"] or 0)
             raw = tuple(row[f"k{i}"] for i in range(len(spec.dimensions)))
             raw_keys.append(raw)
             keys = {
@@ -2080,7 +2102,7 @@ class Store:
             }
             rows.append(QueryRow(keys=keys, measures={
                 name: _measure_out(name, row[f"m_{name}"]) for name in spec.measures}))
-        return rows, raw_keys
+        return rows, raw_keys, totals
 
     def _fill_query_p95(self, rows: list[QueryRow], raw_keys: list[tuple],
                         compiled: CompiledQuery) -> None:
@@ -2119,52 +2141,100 @@ class Store:
         """Evidence for each returned row: up to 20 api ids and the 5 newest run ids, from
         ``runs`` under the spec's own filters plus the row's key.
 
-        Two shapes, chosen by ``query_sql.batched_samples`` and for the reason stated there: two
-        statements PER ROW (each an ``ORDER BY executed_at DESC LIMIT 5`` that stops after five
-        matches), or -- when a ``failed_rule`` dimension makes the per-row key predicate an
-        ``EXISTS(json_each(...))`` that early termination cannot help -- two statements for the
-        WHOLE page. That one shape was the entire cost of a key-arm query: 271 ms with samples,
-        0.4 ms without, on the reduced scale dataset.
+        **The two halves are shaped independently**, because they want opposite query plans and
+        the measurements say so per half (``query_sql.batched_api_samples``,
+        ``BATCHED_RUN_SAMPLES``, ``stored_key_apis``, ``_api_set_in``):
 
-        The two shapes read the same POPULATION, and a test asserts they return byte-identical
-        id lists across every dimension shape -- the batched form's predicates are still
-        ``sample_predicates``' and its key match is still null-safe ``IS``, so a sample can never
-        come from a population the row did not count.
+        * run ids -- always one statement per row, ``ORDER BY executed_at DESC LIMIT 5``, with
+          every api-set membership term written non-sargable so the plan STAYS that index and
+          stops after five rows;
+        * api ids -- one statement per row, asked of ``runs`` when the row's key is an indexed
+          run column and of the CATALOGUE (probing ``runs``) when it is an api attribute, so the
+          ``LIMIT 20`` stops the read instead of arriving after a 12,500-id set has been
+          materialized; one batched statement for the page when the key lives on a key axis (an
+          unindexed ``EXISTS(json_each(...))`` / ``http_status`` per-row predicate); and on the
+          ``rollup_key_day`` arm with no status filter, no ``runs`` read at all -- the stored
+          ``api_ids`` union, which is the same set the ``apis`` measure is computed from.
+
+        **Every shape reads the same POPULATION.** The predicates are ``sample_predicates``' --
+        the spec's own filters -- plus the row's key, matched null-safe; the ``+`` markers change
+        the plan and not the rows; and the stored-union shortcut is gated on exactly the
+        condition under which the stored set IS the row's population. Tests pin all of it: the
+        shapes return byte-identical id lists across every dimension shape, and a filtered spec's
+        samples are checked run by run against the filter in python.
 
         These ids are what the executor remembers in ``seen_apis``/``seen_runs``, so the card's
         provenance discipline (an id the session has seen) holds for a query result exactly as it
         does for a digest."""
         if not rows:
             return
-        if batched_samples(spec):
-            (run_sql, run_params), (api_sql, api_params) = sample_batch(
+        if stored_key_apis(spec, compiled.source):
+            self._fill_key_api_samples(rows, raw_keys, spec, compiled)
+        elif batched_api_samples(spec):
+            (_run, _rp), (api_sql, api_params) = sample_batch(
                 spec, compiled.day_from, compiled.day_to, tz, raw_keys,
                 run_cap=RUN_SAMPLE_CAP, api_cap=API_SAMPLE_CAP)
             width = len(spec.dimensions)
-            # `ORDER BY rn` on both statements, so appending in row order preserves per-key order
-            # (newest-first run ids; ascending api ids) without a second sort here.
-            by_key: dict[tuple, tuple[list[str], list[str]]] = {key: ([], []) for key in raw_keys}
-            for sql, params, slot in ((api_sql, api_params, 0), (run_sql, run_params, 1)):
-                for record in self._tuples(sql, params):
-                    bucket = by_key.get(tuple(record[:width]))
-                    if bucket is not None:
-                        bucket[slot].append(record[width])
+            # `ORDER BY rn` on the statement, so appending in row order preserves the ascending
+            # api order per key without a second sort here.
+            by_key: dict[tuple, list[str]] = {key: [] for key in raw_keys}
+            for record in self._tuples(api_sql, api_params):
+                bucket = by_key.get(tuple(record[:width]))
+                if bucket is not None:
+                    bucket.append(record[width])
             for row, raw in zip(rows, raw_keys, strict=True):
-                row.api_ids, row.run_ids = by_key[raw]
-            return
-        base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, tz)
+                row.api_ids = by_key[raw]
+        else:
+            base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, tz)
+            from_apis = apis_driven_api_samples(spec)
+            for row, raw in zip(rows, raw_keys, strict=True):
+                clauses, params = list(base), list(base_params)
+                attrs: list[str] = []
+                attr_params: list = []
+                for dimension, value in zip(spec.dimensions, raw, strict=True):
+                    if from_apis and dimension in APIS_DIMENSIONS:
+                        attrs.append(apis_key_predicate(dimension, value, attr_params))
+                    else:
+                        clauses += row_key_predicates(dimension, value, params)
+                if attrs:
+                    row.api_ids = [r[0] for r in self._tuples(
+                        f"SELECT a.api_id FROM apis AS a WHERE {' AND '.join(attrs)} AND EXISTS ("
+                        f"SELECT 1 FROM runs WHERE runs.api_id = a.api_id "
+                        f"AND {' AND '.join(clauses)}) ORDER BY a.api_id LIMIT ?",
+                        [*attr_params, *params, API_SAMPLE_CAP])]
+                else:
+                    row.api_ids = [r[0] for r in self._tuples(
+                        f"SELECT DISTINCT api_id FROM runs WHERE {' AND '.join(clauses)} "
+                        "ORDER BY api_id LIMIT ?", [*params, API_SAMPLE_CAP])]
+
+        ordered, ordered_params = sample_predicates(
+            spec, compiled.day_from, compiled.day_to, tz, ordered_drive=True)
         for row, raw in zip(rows, raw_keys, strict=True):
-            clauses, params = list(base), list(base_params)
+            clauses, params = list(ordered), list(ordered_params)
             for dimension, value in zip(spec.dimensions, raw, strict=True):
-                clauses += row_key_predicates(dimension, value, params)
-            where_sql = " AND ".join(clauses)
-            row.api_ids = [r[0] for r in self._tuples(
-                f"SELECT DISTINCT api_id FROM runs WHERE {where_sql} ORDER BY api_id LIMIT ?",
-                [*params, API_SAMPLE_CAP])]
+                clauses += row_key_predicates(dimension, value, params, ordered_drive=True)
             row.run_ids = [r[0] for r in self._tuples(
-                f"SELECT run_id FROM runs WHERE {where_sql} "
-                "ORDER BY executed_at DESC, run_id DESC LIMIT ?",
-                [*params, RUN_SAMPLE_CAP])]
+                f"SELECT run_id FROM runs WHERE {' AND '.join(clauses)} "
+                "ORDER BY executed_at DESC, run_id DESC LIMIT ?", [*params, RUN_SAMPLE_CAP])]
+
+    def _fill_key_api_samples(self, rows: list[QueryRow], raw_keys: list[tuple], spec: QuerySpec,
+                              compiled: CompiledQuery) -> None:
+        """The API-id EVIDENCE for a ``rollup_key_day`` row, off the stored ``api_ids`` union --
+        the same read (and the same union) ``_fill_query_key_apis`` makes for the ``apis``
+        MEASURE, so on a spec that asks for both, the count and the sample can no longer disagree.
+        Gated by ``query_sql.stored_key_apis``; see there for why a status filter takes it away."""
+        axis = next(d for d in spec.dimensions if d in _QUERY_KEY_AXES)
+        placeholders = ",".join("?" for _ in raw_keys)
+        unions: dict[str, set[str]] = {key[0]: set() for key in raw_keys}
+        for key, api_ids in self._tuples(
+            f'SELECT "key", api_ids FROM rollup_key_day WHERE axis = ? AND day >= ? AND day <= ? '
+            f'AND "key" IN ({placeholders})',
+            [axis, compiled.day_from, compiled.day_to, *(k[0] for k in raw_keys)],
+        ):
+            if api_ids:
+                unions[key].update(json.loads(api_ids))
+        for row, key in zip(rows, raw_keys, strict=True):
+            row.api_ids = sorted(unions[key[0]])[:API_SAMPLE_CAP]
 
     def _join_previous_window(self, rows: list[QueryRow], raw_keys: list[tuple], spec: QuerySpec,
                               previous: CompiledQuery) -> None:
@@ -2187,7 +2257,7 @@ class Store:
         rows before the join. Whatever is left ``NULL`` after that is left ``NULL``:
         ``previous.unavailable_measures`` names the measures this source never measured, and they
         get ``None``/``None`` rather than a comparison against a number nobody computed."""
-        prev_rows, prev_keys = self._query_rows(spec, previous)
+        prev_rows, prev_keys, _totals = self._query_rows(spec, previous)
         if previous.p95_sql:
             self._fill_query_p95(prev_rows, prev_keys, previous)
         if previous.apis_from_key_rows:

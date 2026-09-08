@@ -213,8 +213,10 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   `extra="forbid"`, `limit <= 50`. `catalog.py` holds the labels and the two deterministic
   string-makers (`title_for_spec`, `cluster_key_for_spec`) and computes no number, so the
   `query_runs` tool bytes stay a pure function of config (cache-stable). `Store.query` /
-  `query_sql.compile_query` (`host/`) turn one spec into ONE ranked statement plus its totals
-  statement, choosing among four sources by the spec alone (`select_source`): `rollup_day` for
+  `query_sql.compile_query` (`host/`) turn one spec into ONE ranked statement — carrying
+  `total_groups`/`population` as window columns over its own grouped subquery, so the totals
+  cannot disagree with the page and cost no second grouping pass — choosing among four sources by
+  the spec alone (`select_source`): `rollup_day` for
   cell axes, `rollup_key_day` for an UNSCOPED `failed_rule`/`http_status` axis,
   **`rollup_operator_day`** (a new ingest-folded table) for an `executed_by` axis alone or with
   `day`/`week` — including an `executed_by` FILTER on that axis, since the rollup's key column IS
@@ -231,7 +233,15 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   populations, and a measure the chosen source never computed comes back `None`/`None` rather than
   compared against a fabricated zero. A 300-test oracle (`host/tests/test_query.py`) re-derives
   every measure in plain python from `fetch_runs()` and asserts every spec on two stores, and
-  asserts that the matrix actually reaches all four sources.
+  asserts that the matrix actually reaches all four sources. Each returned row also carries
+  EVIDENCE — up to 20 api ids and the 5 newest run ids — and the fill's two halves are shaped
+  independently because they want opposite query plans (`_api_set_in`, `apis_driven_api_samples`,
+  `batched_api_samples`, `stored_key_apis`); the invariant across every shape is that **a sample
+  may only come from the population the row counted**, pinned both by an id-for-id equivalence
+  test against a row-by-row oracle and by a python-side leak test. All five benched `query_runs`
+  shapes are inside `slo_query_ms` (300) on the full 2,019,000-run set — 219/233/17/139/251 ms,
+  down from 1,040/1,461/904/213/278 (perf round 2026-09-09; the limit was never moved, and
+  `host/tests/test_scale.py`'s `SLO_ASSERT` comment carries the phase profile).
   **(2) The ask log.** Every chat turn writes exactly one `ask_log` row from a turn-end hook in
   `streaming.py` (a `finally`, so a turn that raised still leaves a `partial` row), keyed on the
   `turn_id` the `/chat` route generates and the card carries. `outcome`

@@ -96,43 +96,55 @@ SLO_ASSERT: dict[str, bool] = {
     # (1) `PRAGMA analysis_limit=1000` + `ANALYZE`, once at `Store` open when the file has no
     #     stats and then as a daily retention step. Without table statistics SQLite picked the
     #     less selective of two usable indexes on the runs arm: 790ms -> 166ms, no schema change.
-    # (2) `_fill_query_samples` fills the WHOLE page in one pair of statements -- but only where
-    #     that helps. The row-by-row form stops after five matches on `idx_runs_executed_at`; a
-    #     window function cannot, so batching is a loss on an ordinary indexed key
-    #     (`method x target_env` 132ms row-by-row vs 290ms batched) and a large win on
-    #     `failed_rule`, whose per-row predicate is a `json_each` EXISTS early termination cannot
-    #     help (352ms vs 187ms). `query_sql.batched_samples` is that rule, and a test asserts the
-    #     two forms return identical id lists on eleven dimension shapes.
+    # (2) the evidence fill was batched for the `failed_rule` arm.
     #
-    # Measured on the reduced set after both, all five inside 300ms -- which is the set this
-    # module generates and therefore the set these switches govern:
-    "query_runs path_segment_2 (non_pass)": True,              # 90ms  (was 164 / 177)
-    "query_runs method x target_env": True,                    # 130ms (was 264 / 294)
-    "query_runs failed_rule (key arm)": True,                  # 134ms (was 295 / 566)
-    "query_runs executed_by x api (runs arm)": True,           # 33ms  (was 630 / 734)
-    "query_runs compare_previous_window (rollup arm)": True,   # 24ms
+    # That was measured on the REDUCED set only, and it did not hold: on the 2,019,000-run full
+    # set three of the five rows breached 3-5x (path_segment_2 1,040ms, method x target_env
+    # 1,461ms, failed_rule 904ms), and the 450k mid set sat in between (426 / 587 / 383). One
+    # focused perf round (2026-09-09) profiled the phases on the full set and found the cost was
+    # never the ARM and never really the batching either -- it was three things, each fixed where
+    # it lives, and all five rows are now green ON THE FULL SET:
     #
-    # HONESTLY: three of those five BREACH on the 450k-run mid set (90 days x 20k APIs), and that
-    # is written here rather than left for someone to rediscover -- path_segment_2 426ms,
-    # method x target_env 587ms, failed_rule 383ms. The engine has never been measured at the
-    # 2M-run full size at all; the scale branch's numbers predate `query_runs`. The split, on mid:
+    #   row                     was       page   api ids   run ids   now
+    #   path_segment_2        1,040ms    127ms     0ms      72ms    219ms
+    #   method x target_env   1,461ms    148ms     0ms      81ms    233ms
+    #   failed_rule (key)       904ms      0ms    0.3ms    3.5ms     17ms
+    #   executed_by x api       213ms    137ms      --      1ms     139ms
+    #   compare_previous        278ms    115ms      --      1ms     251ms
     #
-    #   row                aggregation   sample fill
-    #   path_segment_2         206ms        260ms
-    #   method x target_env    199ms        392ms
-    #   failed_rule (key)      0.5ms        457ms
+    # (a) The totals statement re-ran the whole GROUP BY to count the groups it had just built --
+    #     an exact doubling of the aggregation (197ms + 198ms). It is now two window columns on
+    #     the page itself (`CompiledQuery`), one grouped pass, same numbers by construction.
+    # (b) The evidence fill's two halves want OPPOSITE plans, and one of them had lost its own.
+    #     An api-set membership term (`api_id IN (SELECT ... FROM apis WHERE method IS 'GET')`) is
+    #     sargable, so SQLite drove the newest-first statement off it -- 12,500 window range scans
+    #     and a temp b-tree sort -- instead of off `idx_runs_executed_at`, and the `LIMIT 5` that
+    #     was supposed to stop after five rows never stopped. A unary `+` (`query_sql._api_set_in`,
+    #     the same trick `_scope_operator_clause` already used) put it back: 956ms -> 69ms, ids
+    #     identical. The api half keeps the opposite shape, and on an attribute key now reads the
+    #     catalogue and probes runs so ITS limit bites too (`apis_driven_api_samples`, 91ms -> 0ms);
+    #     on the key arm it comes off `rollup_key_day.api_ids`, the same union the `apis` measure
+    #     already uses (`stored_key_apis`, 490ms -> 0.3ms). Batching survives for the key axes
+    #     only, where the per-row predicate is unindexed (`batched_api_samples`).
+    # (c) `idx_apis_attributes`, the covering index for the `rollup_day ⋈ apis` join (197 -> 127ms,
+    #     219 -> 147ms). The one index this round added, for the one join that measured.
     #
-    # So there are TWO follow-ups, not one, and neither is "widen `slo_query_ms`":
-    # (a) The evidence fill dominates every row, and the batched/row-by-row rule above is still
-    #     the better of the two shapes at this size (forcing either one is worse on mid too --
-    #     measured). It is the WINDOW that costs: a per-row `ORDER BY executed_at DESC LIMIT 5`
-    #     over 30 days walks far when a group's runs are sparse. The named fix is to fill from
-    #     the NEWEST day partitions first and widen only for a group that came up short of five.
-    # (b) A cell-axis GROUP BY that keys on an `apis` column joins 20k catalogue rows against the
-    #     window's rollup rows. The named fix is the same transposition `rollup_key_day` already
-    #     is, for path segments: a `rollup_segment_day`.
-    # Both are sized and measured work of their own, with their own review; recorded in the final
-    # fix wave report with this profile.
+    # Reduced-set numbers (the set this module generates, and therefore the set these switches
+    # govern) in the comments; the full-set number in brackets:
+    "query_runs path_segment_2 (non_pass)": True,              # 18ms  [full 219]
+    "query_runs method x target_env": True,                    # 20ms  [full 233]
+    "query_runs failed_rule (key arm)": True,                  # 14ms  [full 17]
+    "query_runs executed_by x api (runs arm)": True,           # 27ms  [full 139]
+    "query_runs compare_previous_window (rollup arm)": True,   # 14ms  [full 251]
+    #
+    # The two follow-ups the previous wave named off the MID-set profile are retired by the
+    # above -- "fill from the newest day partitions first" was a workaround for the lost ordering
+    # index, and a `rollup_segment_day` transposition is not needed while the join is index-only.
+    # What remains is a bound rather than a breach, recorded so nobody has to rediscover it: the
+    # run half is one statement per returned row, so a page of the maximum 50 rows on an
+    # attribute dimension with many distinct values costs ~6ms x 50 on the full set. No catalogue
+    # shape in the bench reaches it (path_segment_2 has 12 groups, method x env 8); if one ever
+    # does, the fix is the same shape the api half just took -- ask the catalogue, not the runs.
     "simulate_rule (30d, amount)": True,
     "insights.build (deterministic)": True,
     "briefing.generate": True,

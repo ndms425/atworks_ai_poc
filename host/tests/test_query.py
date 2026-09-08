@@ -899,7 +899,7 @@ def _samples_row_by_row(store: Store, spec: QuerySpec) -> list[tuple[list[str], 
     that it changes the number of statements and nothing about the population."""
     from atworks_host.query_sql import row_key_predicates, sample_predicates
     compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
-    rows, raw_keys = store._query_rows(spec, compiled)
+    rows, raw_keys, _totals = store._query_rows(spec, compiled)
     base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, TZ)
     out = []
     for raw in raw_keys:
@@ -935,14 +935,24 @@ def _samples_row_by_row(store: Store, spec: QuerySpec) -> list[tuple[list[str], 
     ("grand total", QuerySpec(measures=["runs"])),
     ("filtered", QuerySpec(dimensions=["path_segment_1"], measures=["runs"], order_by="runs",
                            limit=25, filters=QueryFilters(status="non_pass", target_env=["dev"]))),
+    # the key arm UNDER a status filter -- the one case `stored_key_apis` must refuse, because
+    # `rollup_key_day.api_ids` carries no verdict split and would name APIs whose runs on that
+    # key all passed.
+    ("failed_rule + status", QuerySpec(dimensions=["failed_rule"], measures=["runs"],
+                                       order_by="runs", limit=25,
+                                       filters=QueryFilters(status="fail"))),
+    ("http_status + env", QuerySpec(dimensions=["http_status"], measures=["runs"], order_by="runs",
+                                    limit=25, filters=QueryFilters(target_env=["dev"]))),
 ])
 def test_the_batched_sample_fill_returns_exactly_what_the_row_by_row_fill_did(synthetic, label, spec):
-    """Both shapes on EVERY dimension shape, not only the ones ``batched_samples`` picks today.
-    The choice between them is a performance decision; that they read the same population is the
-    invariant, and it has to hold whichever way the rule swings later."""
+    """Both shapes on EVERY dimension shape, not only the ones the fill picks today, and both
+    halves of each. The choice between them is a performance decision -- per half, and now also
+    per arm (`stored_key_apis` reads the api ids off `rollup_key_day` and never touches `runs`);
+    that all of them read the same population is the invariant, and it has to hold whichever way
+    the rules swing later."""
     from atworks_host.query_sql import sample_batch
     compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
-    _rows, raw_keys = synthetic._query_rows(spec, compiled)
+    _rows, raw_keys, _totals = synthetic._query_rows(spec, compiled)
     (run_sql, run_params), (api_sql, api_params) = sample_batch(
         spec, compiled.day_from, compiled.day_to, TZ, raw_keys, run_cap=5, api_cap=20)
     width = len(spec.dimensions)
@@ -951,10 +961,84 @@ def test_the_batched_sample_fill_returns_exactly_what_the_row_by_row_fill_did(sy
         for record in synthetic.conn().execute(sql, params).fetchall():
             batched[tuple(record[i] for i in range(width))][slot].append(record[width])
     assert raw_keys
-    assert [batched[key] for key in raw_keys] == _samples_row_by_row(synthetic, spec), label
-    # ...and what the engine actually returns is one of the two, whichever the rule picked.
+    oracle = _samples_row_by_row(synthetic, spec)
+    assert [batched[key] for key in raw_keys] == oracle, label
+    # ...and what the engine actually returns equals the ORACLE, not merely one of the shapes:
+    # the shipped run half writes its api-set terms non-sargable (`_api_set_in`) and the shipped
+    # api half may come off the key rollup entirely, and neither may change a single id.
     result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
-    assert [(r.api_ids, r.run_ids) for r in result.rows] == [batched[key] for key in raw_keys], label
+    assert [(r.api_ids, r.run_ids) for r in result.rows] == oracle, label
+
+
+@pytest.mark.parametrize("label,spec", [
+    # one per API-half shape: the catalogue-driven one, the run-driven one, the batched key-axis
+    # one, and the `rollup_key_day` stored-union one.
+    ("attribute key", QuerySpec(dimensions=["path_segment_2"], measures=["runs"], order_by="runs",
+                                limit=25,
+                                filters=QueryFilters(status="non_pass", target_env=["dev"]))),
+    ("run-column key", QuerySpec(dimensions=["target_env"], measures=["runs"], order_by="runs",
+                                 limit=25,
+                                 filters=QueryFilters(status="fail", test_data_label=["S1"]))),
+    ("key axis, cell-scoped", QuerySpec(dimensions=["failed_rule"], measures=["runs"],
+                                        order_by="runs", limit=25,
+                                        filters=QueryFilters(status="fail", target_env=["dev"]))),
+    # `rollup_key_day` UNDER a status filter: the stored `api_ids` union is not the row's
+    # population here, and this case is what fails if `stored_key_apis` ever forgets that.
+    ("key axis, status-filtered", QuerySpec(dimensions=["http_status"], measures=["runs"],
+                                            order_by="runs", limit=25,
+                                            filters=QueryFilters(status="fail"))),
+    ("key axis, stored union", QuerySpec(dimensions=["http_status"], measures=["runs"],
+                                         order_by="runs", limit=25)),
+])
+def test_no_sample_comes_from_outside_the_rows_own_population(synthetic, label, spec):
+    """The invariant every shape of the evidence fill exists under: an id may only be evidence
+    for a row if it belongs to the population THAT ROW COUNTED -- the spec's own filters, the
+    spec's own window, and the row's own key.
+
+    Checked in python against the raw run records rather than in SQL, so it holds no matter which
+    statement (or which stored column) the fill happened to read. It is the test that fails if a
+    future shortcut -- the stored ``rollup_key_day.api_ids`` union under a status filter, say, or
+    a batched statement whose key join went sargable-but-wrong -- ever widens the population by
+    one row."""
+    result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    day_from, day_to = align_days(*resolve_window(spec, NOW, DEFAULT_DAYS), TZ)
+    apis = {a.api_id: a for a in synthetic.search_apis(limit=200).items}
+    runs = synthetic.fetch_runs()
+    by_id = {r.run_id: r for r in runs}
+
+    def in_population(run: RunResult) -> bool:
+        if not day_from <= _run_day(run) <= day_to:
+            return False
+        if spec.filters.status == "fail" and run.status is not RunStatus.FAIL:
+            return False
+        if spec.filters.target_env and run.target_env not in spec.filters.target_env:
+            return False
+        if spec.filters.test_data_label and run.test_data_label not in spec.filters.test_data_label:
+            return False
+        return not (spec.filters.status == "non_pass" and run.status is RunStatus.PASS)
+
+    def matches_key(run: RunResult, dimension: str, value) -> bool:
+        if dimension == "path_segment_2":
+            return path_segments(apis[run.api_id].path)[1] == value
+        if dimension == "target_env":
+            return run.target_env == value
+        return value in _group_keys(run, dimension)
+
+    assert result.rows
+    for row in result.rows:
+        assert row.api_ids and len(row.api_ids) <= 20
+        assert row.run_ids and len(row.run_ids) <= 5
+        for run_id in row.run_ids:
+            run = by_id[run_id]
+            assert in_population(run), (label, run_id)
+            for dimension, value in row.keys.items():
+                assert matches_key(run, dimension, value), (label, run_id, dimension)
+        # ...and every sampled API really has at least one run in that same population
+        for api_id in row.api_ids:
+            assert any(
+                run.api_id == api_id and in_population(run)
+                and all(matches_key(run, d, v) for d, v in row.keys.items())
+                for run in runs), (label, api_id)
 
 
 def test_include_samples_false_skips_the_fill(synthetic):
@@ -994,6 +1078,61 @@ def test_path_segment_grouping_uses_an_apis_index_and_never_scans_runs(synthetic
     # join, the day-leading rollup index for the window), neither by a table walk.
     assert re.search(r"SEARCH a USING (COVERING )?INDEX", detail), detail
     assert re.search(r"SEARCH r USING (COVERING )?INDEX idx_rollup_day", detail), detail
+
+
+def test_the_apis_covering_index_carries_every_attribute_dimension(synthetic):
+    """``idx_apis_attributes`` exists so the ``rollup_day ⋈ apis`` join is index-only -- one seek
+    per rollup row in the window, 168,000 of them on the full set, each for one attribute column
+    (measured: the ranked page 197ms -> 127ms for ``path_segment_2``). It only stays index-only
+    while it carries EVERY column ``APIS_DIMENSIONS`` can group by, which is what this pins: add a
+    seventh attribute dimension without adding it here and the join silently goes back to a table
+    seek per row, with nothing failing."""
+    from atworks_host.query_sql import APIS_DIMENSIONS
+    columns = {row["name"] for row in
+               synthetic.conn().execute("PRAGMA index_info(idx_apis_attributes)").fetchall()}
+    assert columns, "idx_apis_attributes is missing"
+    assert "api_id" in columns, columns
+    expected = {'group' if d == "api_group" else d for d in APIS_DIMENSIONS}
+    assert expected <= columns, expected - columns
+
+
+def test_the_evidence_fill_keeps_the_plan_each_half_needs(synthetic):
+    """The perf round's load-bearing property, and the one nothing else would catch: the two
+    halves of the evidence fill must land on OPPOSITE plans.
+
+    The run half is ``ORDER BY executed_at DESC LIMIT 5`` and must drive off the ordering index so
+    it stops after five rows; left sargable, the api-set membership term steals the plan and the
+    statement sorts the whole window instead (956 ms for one page on the 2M-run set). The api half
+    is ``ORDER BY api_id LIMIT 20`` and must walk the catalogue's covering index in api_id order,
+    probing runs per candidate, so IT stops after twenty."""
+    from atworks_host.query_sql import (
+        apis_key_predicate,
+        row_key_predicates,
+        sample_predicates,
+    )
+    spec = QuerySpec(dimensions=["path_segment_2"], measures=["runs"], order_by="runs",
+                     filters=QueryFilters(status="non_pass"))
+    compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
+
+    ordered, params = sample_predicates(spec, compiled.day_from, compiled.day_to, TZ,
+                                        ordered_drive=True)
+    params = list(params)
+    clauses = [*ordered, *row_key_predicates("path_segment_2", "payments", params,
+                                             ordered_drive=True)]
+    detail = _plan(synthetic, f"SELECT run_id FROM runs WHERE {' AND '.join(clauses)} "
+                              "ORDER BY executed_at DESC, run_id DESC LIMIT 5", params)
+    assert "SEARCH runs USING INDEX idx_runs_executed_at" in detail, detail
+    assert "TEMP B-TREE FOR ORDER BY" not in detail, detail
+
+    attr_params: list = []
+    attrs = apis_key_predicate("path_segment_2", "payments", attr_params)
+    base, base_params = sample_predicates(spec, compiled.day_from, compiled.day_to, TZ)
+    detail = _plan(synthetic,
+                   f"SELECT a.api_id FROM apis AS a WHERE {attrs} AND EXISTS (SELECT 1 FROM runs "
+                   f"WHERE runs.api_id = a.api_id AND {' AND '.join(base)}) "
+                   "ORDER BY a.api_id LIMIT 20", [*attr_params, *base_params])
+    assert "COVERING INDEX idx_apis_attributes" in detail, detail
+    assert "TEMP B-TREE FOR ORDER BY" not in detail, detail
 
 
 def test_the_executed_by_run_path_uses_the_executed_by_index(synthetic):

@@ -228,17 +228,24 @@ def _label_in(label: str | None) -> str:
 
 @dataclass(frozen=True)
 class CompiledQuery:
-    """One spec, compiled. ``sql``/``params`` is the ranked, limited statement; ``totals_sql``
-    answers ``total_groups`` and ``population`` over the SAME grouped subquery with no ORDER BY
-    and no LIMIT, so the two can never disagree about which groups exist."""
+    """One spec, compiled. ``sql``/``params`` is the ranked, limited statement, and it carries its
+    own totals: every returned row ends with ``t_groups`` (``COUNT(*) OVER ()``) and
+    ``t_population`` (``SUM(m_runs) OVER ()``) computed over the WHOLE grouped set, before the
+    ``LIMIT``.
+
+    That used to be a second statement over the same grouped subquery. It could not disagree with
+    the page -- but it re-ran the grouping, and on the 2M-run set the grouping IS the query: the
+    ranked page and the totals cost 197 ms and 198 ms of a 1,040 ms ``path_segment_2`` (222 ms and
+    230 ms of a 1,461 ms ``method x target_env``). A window function over the same subquery is
+    evaluated after GROUP BY/HAVING and before ORDER BY/LIMIT, so it sees exactly the groups the
+    second statement counted -- one grouped pass instead of two, measured at 195.6 ms for the
+    pair. An empty page reports ``(0, 0)``, which is what "no groups" means."""
     sql: str
     params: list
     source: str
     group_columns: list[str]
     #: measure aliases in ``spec.measures`` order (``m_fail_rate``, ...)
     measure_columns: list[str] = field(default_factory=list)
-    totals_sql: str = ""
-    totals_params: list = field(default_factory=list)
     day_from: str = ""
     day_to: str = ""
     #: ``rollup_key_day`` cannot COUNT(DISTINCT api_id) -- the ``apis`` measure is filled in
@@ -495,11 +502,11 @@ def _finish(spec: QuerySpec, source: str, *, from_sql: str, from_params: list,
     else:
         direction = "DESC" if spec.descending else "ASC"
         order_terms = [f"m_{spec.order_by} {direction}"] + [f"{col} ASC" for col in group_columns]
-    sql = f"{grouped} ORDER BY {', '.join(order_terms)} LIMIT ?"
-    totals_sql = f"SELECT COUNT(*), COALESCE(SUM(m_runs), 0) FROM ({grouped})"
+    sql = (f"SELECT *, COUNT(*) OVER () AS t_groups, SUM(m_runs) OVER () AS t_population "
+           f"FROM ({grouped}) ORDER BY {', '.join(order_terms)} LIMIT ?")
     return CompiledQuery(
         sql=sql, params=[*params, spec.limit], source=source, group_columns=group_columns,
-        measure_columns=measure_columns, totals_sql=totals_sql, totals_params=list(params),
+        measure_columns=measure_columns,
         day_from=day_from, day_to=day_to, apis_from_key_rows=apis_from_key_rows,
         null_measures=tuple(name for name in spec.measures if measure_sql[name] == "NULL"),
     )
@@ -733,8 +740,31 @@ def _failed_rule_predicate(values, params: list, non_pass: str = NON_PASS_SQL) -
             f"AND json_array_length(COALESCE(runs.failed_rules, '[]')) = 0 AND {synthetic}))")
 
 
+def _api_set_in(subquery: str, ordered_drive: bool) -> str:
+    """``runs.api_id IN (SELECT ...)`` -- with a unary ``+`` in front of the column when the
+    statement's plan must stay its ORDER BY index.
+
+    This is the same trick (and the same reason) as ``_scope_operator_clause``'s ``+``, and it is
+    the single biggest number in this perf round. Left bare, an api-set membership term is
+    SARGABLE, so SQLite drives the whole statement off it: ``SEARCH runs USING INDEX
+    idx_runs_api_executed_at (api_id=? AND executed_at>? AND executed_at<?)`` once per api in the
+    set -- 12,500 window range scans for one ``method`` group -- and then ``USE TEMP B-TREE FOR
+    ORDER BY`` to sort everything it found down to five rows. The ``ORDER BY executed_at DESC
+    LIMIT 5`` that was supposed to stop after five matches never stops at all. On the 2M-run set
+    the run half of the evidence fill measured 956 ms for ``method x target_env`` and 550 ms for
+    ``path_segment_2``; with the ``+`` -- byte-identical results -- 69 ms and 72 ms.
+
+    The API half wants the OPPOSITE plan and therefore passes ``ordered_drive=False``: its
+    ``SELECT DISTINCT api_id ... ORDER BY api_id LIMIT 20`` has no use for the newest-first index,
+    and driving off the api set is what lets IT stop early (75 ms; forced onto the ordered index
+    it measured 1,428 ms). Same rows, opposite right answer -- exactly the split
+    ``NON_PASS_SQL``/``NON_PASS_ORDERED_SQL`` already documents at the top of this module."""
+    return f"{'+' if ordered_drive else ''}runs.api_id IN ({subquery})"
+
+
 def sample_predicates(spec: QuerySpec, day_from: str, day_to: str, tz: str,
-                      non_pass: str = NON_PASS_ORDERED_SQL) -> tuple[list[str], list]:
+                      non_pass: str = NON_PASS_ORDERED_SQL, *,
+                      ordered_drive: bool = False) -> tuple[list[str], list]:
     """The spec's whole filter set, expressed over ``runs`` ALONE (alias ``runs``, no join) --
     what the evidence-sample fill runs under. The api-scoped filters become one
     ``api_id IN (SELECT ... FROM apis)`` subquery instead of a join, so the outer statement keeps
@@ -742,7 +772,8 @@ def sample_predicates(spec: QuerySpec, day_from: str, day_to: str, tz: str,
     source builds, so a sample can never come from a population the row did not count.
 
     ``non_pass`` defaults to the ORDERED form because the per-row fill's plan is its
-    ``ORDER BY executed_at DESC LIMIT 5``; ``sample_batch`` passes the sargable one."""
+    ``ORDER BY executed_at DESC LIMIT 5``; ``sample_batch`` passes the sargable one.
+    ``ordered_drive`` says the same thing about the api-scoped subquery -- see ``_api_set_in``."""
     filters = spec.filters
     since_dt, until_dt = day_bounds(day_from, day_to, tz)
     status = _status_of(spec)
@@ -771,29 +802,102 @@ def sample_predicates(spec: QuerySpec, day_from: str, day_to: str, tz: str,
     api_params: list = []
     api_clauses += _apis_predicates(filters, api_params)
     if api_clauses:
-        where.append(f"runs.api_id IN (SELECT a.api_id FROM apis AS a WHERE {' AND '.join(api_clauses)})")
+        where.append(_api_set_in(
+            f"SELECT a.api_id FROM apis AS a WHERE {' AND '.join(api_clauses)}", ordered_drive))
         params += api_params
     where += _scope_operator_clause(filters.scope_operator, since_dt, "runs.api_id", params)
     return where, params
 
 
-def batched_samples(spec: QuerySpec) -> bool:
-    """Whether the evidence fill runs as ONE batched pair of statements rather than two per row.
+def batched_api_samples(spec: QuerySpec) -> bool:
+    """Whether the API half of the evidence fill runs as ONE batched statement for the page
+    rather than one per row. (The RUN half is never batched -- see ``BATCHED_RUN_SAMPLES``.)
 
-    The row-by-row form is not naive: each of its statements is
-    ``ORDER BY executed_at DESC LIMIT 5`` on ``idx_runs_executed_at``, so it STOPS after five
-    matches instead of reading the window. A batched window function cannot stop early -- it
-    ranks the whole window -- so batching is a loss on every dimension whose key is a plain
-    indexed predicate (measured on the reduced dataset: ``method x target_env`` 132 ms row-by-row
-    vs 290 ms batched; ``path_segment_2`` 58 vs 111).
+    The two halves of the fill do not want the same shape, and neither do the two families of
+    dimension, so the rule is stated per half and measured per half on the 2M-run set:
 
-    ``failed_rule`` is the exception, and it is the row that was red: its key predicate is an
-    ``EXISTS (json_each(...))`` that must be evaluated per candidate run, so early termination
-    buys nothing and the fan-out multiplies it by the page -- 352 ms row-by-row vs 187 ms batched
-    for the same twelve groups. Expanding the JSON once is strictly better there.
+    ==================  ==================  ==================  ==============================
+    dimension family    api half per-row    api half batched    verdict
+    ==================  ==================  ==================  ==============================
+    ``path_segment_2``  75 ms (12 rows)     385 ms              per-row
+    ``method x env``    91 ms (8 rows)      826 ms              per-row
+    ``failed_rule``     1,614 ms (12 rows)  490 ms              batched
+    ==================  ==================  ==================  ==============================
 
-    One rule, stated where both callers can read it, rather than a flag at the call site."""
-    return "failed_rule" in spec.dimensions
+    A plain key is an indexed predicate, so the per-row statement drives off it and stops after
+    twenty ids (an ATTRIBUTE key does better still -- see ``apis_driven_api_samples``). A
+    KEY-AXIS key is neither: ``failed_rule`` means ``EXISTS (json_each(...))`` evaluated per
+    candidate run, and ``http_status`` has no index at all, so both scan the window once per
+    returned row and expanding the JSON once for the whole page is strictly better. The rule is
+    the key axes, not the ``failed_rule`` dimension alone: ``http_status`` has the same unindexed
+    per-row predicate."""
+    return any(d in KEY_AXES for d in spec.dimensions)
+
+
+def apis_driven_api_samples(spec: QuerySpec) -> bool:
+    """Whether the API half reads the CATALOGUE and probes ``runs``, rather than the other way
+    round -- ``SELECT a.api_id FROM apis a WHERE +<attribute> AND EXISTS (SELECT 1 FROM runs
+    WHERE runs.api_id = a.api_id AND <the spec's own filters>) ORDER BY a.api_id LIMIT 20``.
+
+    The two forms are the same set, written from the two ends of the same join, and the
+    equivalence test pins them id for id. What differs is where the ``LIMIT 20`` bites. Asking
+    ``runs`` means ``api_id IN (SELECT ... FROM apis WHERE method IS 'GET')``, and SQLite has to
+    materialize that whole set -- 12,500 api ids -- before it can return the first row: 11.3 ms
+    per row on the 2M-run set, 91 ms for one eight-row page. Asking ``apis`` walks
+    ``idx_apis_attributes`` in api_id order (the ``+`` is what keeps it there instead of on
+    ``idx_apis_method``, which would sort 12,500 rows to satisfy the ORDER BY), tests the
+    attribute from that same covering index, and probes ``runs`` per candidate -- STOPPING at the
+    twentieth api that has one. Measured: 0.0 ms. Neither form is better in the pathological case,
+    where few of the attribute's APIs ran at all and both probe every candidate.
+
+    Only for an ATTRIBUTE dimension (that materialized set is the whole cost), and only when no
+    api-scoped FILTER is in play: ``path_prefix`` and friends are selective predicates that
+    rightly drive off their own ``apis`` index, and a ``+`` here would take that away from them."""
+    filters = spec.filters
+    return (any(d in APIS_DIMENSIONS for d in spec.dimensions)
+            and not any(not _empty(getattr(filters, name))
+                        for name in ("path_contains", "path_prefix", "method", "api_group")))
+
+
+def apis_key_predicate(dimension: str, value: str | None, params: list) -> str:
+    """One returned row's ATTRIBUTE key, as a predicate on the ``apis`` alias ``a`` -- the
+    catalogue-side half of ``apis_driven_api_samples``' statement. Null-safe ``IS``, for the same
+    reason ``row_key_predicates`` is; ``+``-marked, for the reason stated there."""
+    column = 'a."group"' if dimension == "api_group" else f"a.{dimension}"
+    params.append(value)
+    return f"+{column} IS ?"
+
+
+#: The RUN half is never batched, on any arm. Each per-row statement is ``ORDER BY executed_at
+#: DESC LIMIT 5``, which STOPS after five matches on ``idx_runs_executed_at``; the batched form
+#: ranks the whole window with a window function and cannot stop at all. Measured on the 2M-run
+#: set, whole page: ``path_segment_2`` 72 ms per-row vs 354 ms batched, ``method x target_env``
+#: 69 vs 1,065, ``failed_rule`` 3.5 vs 425 -- early termination wins on every arm once the
+#: api-set term stops stealing the plan (``_api_set_in``), including the key axes, where the
+#: ``EXISTS`` is then evaluated against a handful of newest runs rather than against the window.
+#: ``sample_batch`` still BUILDS the batched run statement: the equivalence test runs it as the
+#: oracle the per-row form is pinned against, so flipping this decision back is a measurement and
+#: one line rather than a rewrite.
+BATCHED_RUN_SAMPLES = False
+
+
+def stored_key_apis(spec: QuerySpec, source: str) -> bool:
+    """Whether the API half can be read straight off ``rollup_key_day.api_ids`` instead of off
+    ``runs`` at all -- the cheapest form there is (0.3 ms for the page, against 490 ms batched).
+
+    ``rollup_key_day`` stores, per (day, axis, key), the sorted set of APIs that contributed to
+    it. On this arm that set IS the row's population: the arm is chosen only when the key axis is
+    the sole dimension and nothing scopes the query to a set of APIs or cells, so the row counts
+    exactly the runs those stored ids came from. It is the same read ``_fill_query_key_apis``
+    already makes for the ``apis`` MEASURE, which is why measure and evidence now agree by
+    construction rather than by coincidence.
+
+    The one condition is the status filter. The stored set carries NO verdict split, so under
+    ``status=fail`` it would name APIs whose runs on that key all passed -- evidence from outside
+    the population the row counted, which is the one thing the fill may never do. Filtered, the
+    batched statement answers instead."""
+    return (source == "rollup_key_day" and spec.filters.status in (None, "all")
+            and any(d in KEY_AXES for d in spec.dimensions))
 
 
 def sample_batch(spec: QuerySpec, day_from: str, day_to: str, tz: str,
@@ -803,7 +907,8 @@ def sample_batch(spec: QuerySpec, day_from: str, day_to: str, tz: str,
     row. Returns ``((run_sql, run_params), (api_sql, api_params))``; each yields
     ``(k0, .., kn, value)`` rows for every returned key at once.
 
-    Used only where the row-by-row fill is pathological -- see ``batched_samples``. Two
+    Only the API half is used in production, and only where the row-by-row fill is pathological
+    -- see ``batched_api_samples`` and ``BATCHED_RUN_SAMPLES``. Two
     statements, not one: the two samples differ in both ordering and cap (the 5 NEWEST runs; the
     20 alphabetically-first DISTINCT api ids), so one window function cannot serve both, and a
     UNION ALL would only hide the second pass behind one round trip.
@@ -875,14 +980,18 @@ def sample_batch(spec: QuerySpec, day_from: str, day_to: str, tz: str,
     return (run_sql, [*tail, run_cap]), (api_sql, [*tail, api_cap])
 
 
-def row_key_predicates(dimension: str, value: str | None, params: list) -> list[str]:
+def row_key_predicates(dimension: str, value: str | None, params: list, *,
+                       ordered_drive: bool = False) -> list[str]:
     """"the runs behind THIS returned row", as an indexed predicate over ``runs``. ``IS`` rather
     than ``=`` throughout: a group key can legitimately be NULL (an API with no group, a run with
-    no executor) and ``= NULL`` matches nothing."""
+    no executor) and ``= NULL`` matches nothing.
+
+    ``ordered_drive`` is for the newest-first half of the fill and only affects the PLAN, never
+    the rows -- see ``_api_set_in``."""
     if dimension in APIS_DIMENSIONS:
         column = 'a."group"' if dimension == "api_group" else f"a.{dimension}"
         params.append(value)
-        return [f"runs.api_id IN (SELECT a.api_id FROM apis AS a WHERE {column} IS ?)"]
+        return [_api_set_in(f"SELECT a.api_id FROM apis AS a WHERE {column} IS ?", ordered_drive)]
     if dimension == "failed_rule":
         return [NON_PASS_ORDERED_SQL,
                 _failed_rule_predicate([value], params, NON_PASS_ORDERED_SQL)]
