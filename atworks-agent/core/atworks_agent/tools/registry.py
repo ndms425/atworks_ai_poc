@@ -59,7 +59,7 @@ def _profile_id() -> dict[str, Any]:
 # pure function of config (cache-stable prefix).
 _QUERY_EXAMPLES = (
     {"filters": {"status": "non_pass", "window_days": 30}, "dimensions": ["path_segment_2"],
-     "measures": ["non_pass", "apis", "fail_rate"], "limit": 20},
+     "measures": ["non_pass", "apis", "runs"], "limit": 20},
     {"filters": {"scope_operator": "<operator_id>", "window_days": 14}, "dimensions": ["day"],
      "measures": ["runs", "non_pass"], "order_by": "key", "descending": False},
 )

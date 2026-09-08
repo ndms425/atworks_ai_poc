@@ -409,10 +409,14 @@ def _specs() -> list[tuple[str, QuerySpec]]:
         cases.append((f"pair:{'+'.join(pair)}",
                       QuerySpec(dimensions=list(pair), measures=measures, order_by="non_pass")))
     for name, filters in FILTER_CASES:
+        # fail_rate is refused together with a status filter (QuerySpec validator: the ratio over
+        # a status-filtered population is 1.0 or 0.0 on every row), so those cases keep the counters.
+        status = filters.get("status") if isinstance(filters, dict) else getattr(filters, "status", None)
+        filtered_measures = (["runs", "fail", "error", "apis"] if status not in (None, "all")
+                             else ["runs", "fail", "error", "fail_rate", "apis"])
         for dimension in ("api", "path_segment_2", "failed_rule", "executed_by"):
             cases.append((f"filter:{name}/{dimension}", QuerySpec(
-                dimensions=[dimension], filters=filters,
-                measures=["runs", "fail", "error", "fail_rate", "apis"], order_by="runs")))
+                dimensions=[dimension], filters=filters, measures=filtered_measures, order_by="runs")))
     # `compare_previous_window` on ONE spec per source: the prev/delta join is a different code
     # path per arm (a python `apis` fill on the key rollup, a NULL `apis` column on the operator
     # rollup, a real COUNT(DISTINCT) on the other two), and it was the arm-specific halves that
