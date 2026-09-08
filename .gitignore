@@ -20,3 +20,4 @@ scripts/scale/out/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+scripts/smoke/shots/
