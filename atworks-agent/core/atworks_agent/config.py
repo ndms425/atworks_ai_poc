@@ -204,8 +204,10 @@ class AtworksAgentConfig(BaseAgentConfig):
         if not self.enable_screen_directives:
             names |= {"navigate_screen", "highlight_screen"}
         if not self.enable_query_runs:
-            # These tool names do not exist in the registry yet (Task 3 adds them) -- the gate is
-            # data now so later tasks only have to add the tools, never touch this method.
+            # All four self-growth tools go together: the query, its card, the "I cannot answer
+            # this" record, and the alias proposal. `test_registry` asserts the switch removes
+            # every one of them from the built tool list, so this set cannot drift from the
+            # registry.
             names |= {"query_runs", "present_query_table", "note_unmet_ask", "propose_alias"}
         if not self.enable_growth:
             # `propose_alias` is the only tool that writes to the growth ledgers, and every

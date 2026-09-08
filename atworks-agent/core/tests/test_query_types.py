@@ -181,3 +181,36 @@ def test_fail_rate_is_refused_under_a_status_filter_but_allowed_with_all_or_none
         QuerySpec(measures=["runs", "fail_rate"], filters={"status": "pass"})
     # the counter measures stay allowed under any status filter
     QuerySpec(measures=["non_pass", "apis"], filters={"status": "non_pass"})
+
+
+def test_the_double_has_a_key_rule_for_every_dimension_and_refuses_an_unknown_one():
+    """The conftest double is the oracle a dozen executor tests read as the truth. Its key
+    function used to end in `return [None]`, so a dimension it had never been taught answered
+    "one group, key None" for every run -- a plausible table over a key nobody computed.
+    `path_segment_3` sat in that fallback for a whole task. It must fail loudly instead."""
+    import importlib.util
+    from datetime import datetime as _dt
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "_query_double_conftest", Path(__file__).with_name("conftest.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _double_keys = module._double_keys
+
+    class _Api:
+        method, group, path = "GET", "product", "/v1/product/history/001796"
+
+    class _Run:
+        api_id, target_env, test_data_label = "api-001", "dev", "기본"
+        failed_rules: list[str] = []
+        http_status, executed_by = 200, "minseong"
+        executed_at = _dt(2026, 9, 8, tzinfo=UTC)
+
+    run, api = _Run(), _Api()
+    for dimension in get_args(Dimension):
+        keys = _double_keys(run, api, dimension)
+        assert isinstance(keys, list), dimension
+    assert _double_keys(run, api, "path_segment_3") == ["history"]
+    with pytest.raises(AssertionError, match="no key rule"):
+        _double_keys(run, api, "response_header")

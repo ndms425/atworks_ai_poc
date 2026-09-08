@@ -68,6 +68,8 @@ def _double_keys(run, api, dimension: str) -> list:
         return [segments[0]] if segments else [None]
     if dimension == "path_segment_2":
         return [segments[1]] if len(segments) >= 2 else [None]
+    if dimension == "path_segment_3":
+        return [segments[2]] if len(segments) >= 3 else [None]
     if dimension == "path_prefix_2":
         return ["/".join(segments[:2])] if segments else [None]
     if dimension == "method":
@@ -89,7 +91,13 @@ def _double_keys(run, api, dimension: str) -> list:
     if dimension == "week":
         year, week, _ = run.executed_at.isocalendar()
         return [f"{year}-W{week:02d}"]
-    return [None]
+    # NOT `[None]`. A dimension this double does not know about would then answer "one group,
+    # key None" for every run -- a plausible-looking table over a key the double never computed,
+    # and a test that reads it as the truth. `path_segment_3` reached that fallback for a whole
+    # task before anyone noticed. A new `Dimension` must be taught here or fail loudly.
+    raise AssertionError(
+        f"the double has no key rule for dimension {dimension!r} -- add one rather than letting "
+        f"it group everything under None")
 
 
 def _double_measures(names, group) -> dict:

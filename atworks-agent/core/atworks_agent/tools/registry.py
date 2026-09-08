@@ -60,7 +60,11 @@ def _profile_id() -> dict[str, Any]:
 _QUERY_EXAMPLES = (
     {"filters": {"status": "non_pass", "window_days": 30}, "dimensions": ["path_segment_2"],
      "measures": ["non_pass", "apis", "runs"], "limit": 20},
-    {"filters": {"scope_operator": "<operator_id>", "window_days": 14}, "dimensions": ["day"],
+    # `<operator_id>` read as "put an operator id here", and the executor refuses any id but the
+    # session's own -- the example was teaching the exact call that gets rejected. The placeholder
+    # now says WHOSE id, which is the only thing this filter accepts.
+    {"filters": {"scope_operator": "<the operator_id in your context block, never anyone else's>",
+                 "window_days": 14}, "dimensions": ["day"],
      "measures": ["runs", "non_pass"], "order_by": "key", "descending": False},
 )
 

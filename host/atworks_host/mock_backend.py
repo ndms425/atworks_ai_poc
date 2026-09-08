@@ -563,9 +563,8 @@ class MockAtworks(AtworksBackend):
         return GrowthSummary(
             asks_total=counts["total"], answered=counts["answered"], partial=counts["partial"],
             unmet=counts["unmet"], action=counts["action"], up=counts["up"], down=counts["down"],
-            # `new_terms` is a COUNT over the vocabulary sidecar (Task 6). Saved questions (§8)
-            # land in Task 7; until then that one stays honestly zero rather than a number
-            # invented from another table.
+            # Both are COUNTs over their own table -- the vocabulary sidecar (§7) and the
+            # promoted saved questions (§8) -- never a number inferred from the ask log.
             new_terms=self.store.count_vocabulary_since(since),
             new_saved=self.store.count_saved_questions_since(since),
             unmet_clusters=self.store.unmet_clusters(since),

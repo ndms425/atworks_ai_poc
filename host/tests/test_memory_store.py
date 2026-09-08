@@ -6,6 +6,7 @@ generation included.
 """
 from datetime import UTC, datetime
 
+import pytest
 from commerce_common.memory import InMemoryMemoryStore, check_memory_store
 from commerce_common.types import MemoryCategory, MemoryFact
 
@@ -25,10 +26,21 @@ def _fact(key: str, value: str, *, category=MemoryCategory.CONTEXT, at: datetime
                       source_session_id="sess")
 
 
-def test_check_memory_store_accepts_it():
+def test_check_memory_store_accepts_it_and_rejects_a_partial_one():
     # The whole reason this runs where the store enters the deployment: a partial store must fail
-    # at startup, not inside a turn.
-    assert check_memory_store(_store()) is not None
+    # at startup, not inside a turn. `is not None` proved neither half -- it passes for anything
+    # the checker returns, and it would still pass if the checker had quietly become `identity`.
+    store = _store()
+    assert check_memory_store(store) is store          # the SAME object, not a wrapper
+
+    class _Partial:
+        """Everything but `purge_facts` -- the shape a half-finished port actually has."""
+        async def get_facts(self, subject, keys=None): return []
+        async def upsert_facts(self, subject, facts): return None
+        async def delete_facts(self, subject, keys): return None
+
+    with pytest.raises(TypeError):
+        check_memory_store(_Partial())
 
 
 async def test_upsert_and_get_round_trip_every_field():

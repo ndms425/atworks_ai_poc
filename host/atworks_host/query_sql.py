@@ -580,8 +580,13 @@ def _rollup_key_day(spec: QuerySpec, status: str | None, day_from: str, day_to: 
     params: list = [axis, day_from, day_to]
     if not _empty(getattr(filters, axis)):
         where.append(_in_clause('k."key"', getattr(filters, axis), params))
-    keys = ['k."key"' if d in KEY_AXES else ("k.day" if d == "day" else week_sql("k.day"))
-            for d in spec.dimensions]
+    # ONE key, always. `select_source` reaches this arm only under `len(dims) == 1`, so the
+    # `day`/`week` arms the first draft carried here were dead code that read as support for
+    # "failed_rule x day" -- a spec this table cannot answer (its rows are already summed across
+    # cells, so pairing a key with a day would need the cell rows the transposition replaced).
+    # A dead branch that looks like a feature is worse than no branch: asserted instead.
+    assert len(spec.dimensions) == 1, spec.dimensions
+    keys = ['k."key"']
     return _finish(spec, "rollup_key_day", from_sql="rollup_key_day AS k", from_params=[],
                    where=where, where_params=params, keys=keys,
                    c='k."count"', p='(k."count" - k.fail - k.error)', f="k.fail", e="k.error",

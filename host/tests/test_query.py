@@ -1101,3 +1101,44 @@ def test_json_round_trip_of_a_result(synthetic):
                   order_by="fail_rate", compare_previous_window=True),
         now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
     assert json.loads(result.model_dump_json())["source"] == "rollup_day"
+
+
+def test_compare_reports_none_for_the_measures_an_arm_never_computed(synthetic):
+    """The compare join's honesty rule, on the two measures the oracle matrix's compare cases
+    never asked for. ``rollup_operator_day`` has neither a transition counter nor a duration, so
+    ``transitions`` and ``p95_duration_ms`` are None on BOTH sides with no delta -- a ``_prev`` of
+    0 here would read as "nothing flipped last week" and a ``_prev`` of 0 ms as an instant API,
+    which is exactly the fabricated-zero the `apis_prev` bug produced on the same arm."""
+    spec = QuerySpec(dimensions=["executed_by"],
+                     measures=["runs", "transitions", "p95_duration_ms"], order_by="runs",
+                     filters=QueryFilters(window_days=7), compare_previous_window=True, limit=20)
+    result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    assert result.source == "rollup_operator_day" and result.rows
+    compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
+    assert set(compiled.unavailable_measures) == {"transitions", "p95_duration_ms"}
+    for row in result.rows:
+        for measure in ("transitions", "p95_duration_ms"):
+            assert row.measures[measure] is None, (row.keys, measure)
+            assert row.measures[f"{measure}_prev"] is None, (row.keys, measure)
+            assert row.measures[f"{measure}_delta"] is None, (row.keys, measure)
+        # ...while the measure this arm DOES compute still compares for real.
+        assert row.measures["runs_prev"] is not None and row.measures["runs_delta"] is not None
+
+
+def test_compare_on_the_key_arm_keeps_p95_and_drops_only_transitions(synthetic):
+    """The other half of the same rule: `rollup_key_day` carries a p95 (max-merged from the cell
+    rows) but no transition counter, so exactly one of the two goes None. A blanket "the rollups
+    cannot do these two" would have passed the test above and silently thrown away a real p95."""
+    spec = QuerySpec(dimensions=["failed_rule"],
+                     measures=["runs", "transitions", "p95_duration_ms"], order_by="runs",
+                     filters=QueryFilters(window_days=7), compare_previous_window=True, limit=20)
+    result = synthetic.query(spec, now=NOW, tz=TZ, default_window_days=DEFAULT_DAYS)
+    assert result.source == "rollup_key_day" and result.rows
+    compiled = compile_query(spec, now=NOW, tz=TZ, default_days=DEFAULT_DAYS)
+    assert set(compiled.unavailable_measures) == {"transitions"}
+    assert any(row.measures["p95_duration_ms"] for row in result.rows)
+    for row in result.rows:
+        assert row.measures["transitions"] is None and row.measures["transitions_prev"] is None
+        assert row.measures["transitions_delta"] is None
+        assert row.measures["p95_duration_ms"] is not None
+        assert row.measures["p95_duration_ms_prev"] is not None

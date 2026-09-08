@@ -11,7 +11,7 @@
     "role": "developer"
   },
   "turns": [
-    "최근 30일 실패를 endpoint 기준으로 묶어서 보여줘"
+    "실패는 총 몇천 건인데 endpoint 기준으로 grouping해줘. items나 history가 들어간 endpoint 계열이 많이 깨졌는지 보고 싶어"
   ],
   "expected": {
     "calls_tool": "query_runs",
@@ -38,5 +38,5 @@
     ],
     "max_tool_calls": 4
   },
-  "notes": "Task 5 smoke step 2, hand-written so the runner has one real case in CI: '실패를 endpoint 기준으로 묶어줘' groups by the second path segment over a status+window filter and answers with the query_table card. Not auto-generated -- every 20260908-NNN.json here is."
+  "notes": "Task 5 smoke step 2, hand-written so the runner has one real case in CI: the operator asks for failures grouped by endpoint and the answer is a query_table over the second path segment with a status+window filter. Not auto-generated -- every 20260908-NNN.json here is. The turn text is the smoke's OWN sentence, verbatim. An earlier paraphrase ('최근 30일 실패를 endpoint 기준으로 묶어서 보여줘') failed live: with no example endpoint in the message, 'endpoint 기준' reads as the fixed api axis and the model answered with aggregate_runs, which is a defensible reading of an ambiguous sentence -- the case, not the model, was wrong. Naming two path fragments makes the intent a path axis. Verified live (ATWORKS_EVAL_LIVE=1) in the final fix wave: PASS."
 }

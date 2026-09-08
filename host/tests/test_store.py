@@ -1235,20 +1235,25 @@ def test_api_path_segments_are_materialized_on_the_write():
     """``query_runs`` groups by "endpoint family", and a GROUP BY over a SUBSTR of `path` can use
     no index at all. The split therefore happens on the write that already touches the row."""
     store = _store_with_fixtures()
-    rows = {r["api_id"]: (r["path"], r["path_segment_1"], r["path_segment_2"], r["path_prefix_2"])
+    rows = {r["api_id"]: (r["path"], r["path_segment_1"], r["path_segment_2"],
+                          r["path_segment_3"], r["path_prefix_2"])
             for r in store.conn().execute("SELECT * FROM apis").fetchall()}
     assert rows
-    for _api_id, (path, seg1, seg2, prefix) in rows.items():
+    for _api_id, (path, seg1, seg2, seg3, prefix) in rows.items():
         parts = [p for p in path.split("/") if p]
         assert seg1 == parts[0]
         assert seg2 == (parts[1] if len(parts) > 1 else None)
+        # Segment THREE is where the demo catalogue's endpoint family actually lives
+        # (`/v1/product/history/001796`), so a test that stops at two proves nothing about the
+        # axis the model reaches for.
+        assert seg3 == (parts[2] if len(parts) > 2 else None)
         assert prefix == "/" + "/".join(parts[:2])
     # a replacement rewrites them too (`replace_all_apis` backs `backend.apis = {...}`)
     store.replace_all_apis([ApiSpec(api_id="api-900", method="GET", path="/v2/orders/{id}/items",
                                     name="x", updated_at=datetime(2026, 9, 1, tzinfo=UTC))])
     row = store.conn().execute("SELECT * FROM apis").fetchone()
-    assert (row["path_segment_1"], row["path_segment_2"], row["path_prefix_2"]) == \
-        ("v2", "orders", "/v2/orders")
+    assert (row["path_segment_1"], row["path_segment_2"], row["path_segment_3"],
+            row["path_prefix_2"]) == ("v2", "orders", "{id}", "/v2/orders")
 
 
 def test_a_store_written_before_the_path_segment_columns_is_migrated_and_backfilled(tmp_path):
@@ -1271,14 +1276,50 @@ def test_a_store_written_before_the_path_segment_columns_is_migrated_and_backfil
     legacy.close()
 
     store = Store(path)
-    rows = {r["api_id"]: (r["path_segment_1"], r["path_segment_2"], r["path_prefix_2"])
+    rows = {r["api_id"]: (r["path_segment_1"], r["path_segment_2"], r["path_segment_3"],
+                          r["path_prefix_2"])
             for r in store.conn().execute("SELECT * FROM apis").fetchall()}
-    assert rows == {"api-001": ("v1", "payments", "/v1/payments"),
-                    "api-002": ("health", None, "/health")}
+    assert rows == {"api-001": ("v1", "payments", "{id}", "/v1/payments"),
+                    "api-002": ("health", None, None, "/health")}
     # ...and re-opening the migrated file is a no-op, not a second backfill
     again = Store(path)
     assert {r["api_id"]: r["path_prefix_2"] for r in again.conn().execute("SELECT * FROM apis")} == \
         {"api-001": "/v1/payments", "api-002": "/health"}
+
+
+def test_a_store_written_between_task_2_and_task_10_gains_only_segment_3_and_it_is_backfilled(
+        tmp_path):
+    """The migration path the first test cannot reach. A store written between Task 2 and Task 10
+    already HAS segments 1/2 and the prefix, filled; only `path_segment_3` is added. Keying the
+    backfill off segment 1 alone (the obvious way to write it) would find nothing missing and
+    leave the new column NULL on every row -- and the `path_segment_3` axis, which is the one the
+    demo catalogue's endpoint family lives on, would answer "one group, key NULL" over a full
+    catalogue rather than fail loudly."""
+    path = tmp_path / "task2.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        'CREATE TABLE apis (api_id TEXT PRIMARY KEY, method TEXT NOT NULL, path TEXT NOT NULL, '
+        'name TEXT NOT NULL, "group" TEXT, updated_at TEXT NOT NULL, '
+        "has_rules INTEGER NOT NULL DEFAULT 0, params JSON NOT NULL DEFAULT '[]', "
+        "path_segment_1 TEXT, path_segment_2 TEXT, path_prefix_2 TEXT);"
+    )
+    legacy.executemany(
+        "INSERT INTO apis VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [("api-001", "GET", "/v1/product/history/001796", "h", "product",
+          "2026-09-01T00:00:00.000000Z", 0, "[]", "v1", "product", "/v1/product"),
+         ("api-002", "GET", "/health", "h", None,
+          "2026-09-01T00:00:00.000000Z", 0, "[]", "health", None, "/health")],
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = Store(path)
+    assert {r["api_id"]: (r["path_segment_1"], r["path_segment_2"], r["path_segment_3"],
+                          r["path_prefix_2"])
+            for r in store.conn().execute("SELECT * FROM apis").fetchall()} == {
+        "api-001": ("v1", "product", "history", "/v1/product"),
+        "api-002": ("health", None, None, "/health"),
+    }
 
 
 def test_a_store_written_before_rollup_operator_day_derives_it_from_the_runs(tmp_path):

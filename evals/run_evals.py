@@ -154,15 +154,36 @@ async def replay_case(case: dict[str, Any], backend, session: AtworksSessionCont
         outcome.failures.append(f"the current catalogue rejects this case's spec: {error}")
         return outcome
     result = await backend.query_runs(session, spec)
+    # Every assertion below must be able to FAIL on a plausible regression. `population >= 0` and
+    # `rows <= limit` were the first pass and neither could: population is a COUNT and the LIMIT
+    # is in the statement, so both held on a store the engine had stopped reading correctly. What
+    # replay can honestly check without a model is that the envelope and the rows AGREE.
     if len(result.rows) > spec.limit:
         outcome.failures.append(f"{len(result.rows)} rows > limit {spec.limit}")
-    if result.population < 0:
-        outcome.failures.append(f"negative population {result.population}")
+    # `total_groups` is the count BEFORE the cut, so it can never be smaller than what came back
+    # -- a source that forgot its totals statement and returned `len(rows)`'s worth of groups
+    # from a limited page shows up here.
+    if result.total_groups < len(result.rows):
+        outcome.failures.append(
+            f"total_groups {result.total_groups} < {len(result.rows)} returned rows")
+    row_runs = sum(int(row.measures.get("runs") or 0) for row in result.rows)
+    if "runs" in spec.measures and result.population < row_runs:
+        # The population is the whole filtered set; the returned page is a subset of it. A
+        # window/predicate mismatch between the ranked statement and the totals statement (the
+        # two are built separately) lands exactly here.
+        outcome.failures.append(f"population {result.population} < rows' own runs {row_runs}")
     for index, row in enumerate(result.rows):
         missing = [m for m in spec.measures if m not in row.measures]
         if missing:
             outcome.failures.append(f"row {index} is missing measure column(s) {missing!r}")
             break
+    # A case whose spec matches NOTHING is not a passing regression test -- it is a case that
+    # stopped testing anything, which is what a renamed dimension key or an emptied fixture store
+    # looks like from here. Said out loud rather than counted as green.
+    if not result.rows and result.population == 0:
+        outcome.failures.append(
+            "the current store answers this spec with zero rows AND zero population -- "
+            "the case no longer exercises anything (renamed key? empty fixtures?)")
     outcome.passed = not outcome.failures
     return outcome
 
@@ -312,8 +333,12 @@ def report(outcomes: list[CaseOutcome], *, live: bool) -> str:
             note = "passed on retry"
         lines.append(f"{outcome.case_id:<44} {verdict:<8} {note}")
     failed = sum(1 for o in outcomes if not o.passed and not o.skipped)
+    # SKIP is on the tally line, not only in the rows: "12 case(s), 0 failed" reads as a green
+    # suite whether one case is skipped or eleven are, and a suite that quietly stopped running
+    # is the failure mode this whole file exists to catch.
+    skipped = sum(1 for o in outcomes if o.skipped)
     lines.append("-" * 92)
-    lines.append(f"{mode}: {len(outcomes)} case(s), {failed} failed")
+    lines.append(f"{mode}: {len(outcomes)} case(s), {failed} failed, {skipped} skipped")
     return "\n".join(lines)
 
 

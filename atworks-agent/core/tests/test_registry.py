@@ -257,10 +257,16 @@ def test_query_table_tool_takes_only_a_title_and_a_note():
     assert set(schema["properties"]) == {"title", "note"} and schema["required"] == ["title"]
 
 
-def test_query_runs_switch_removes_both_tools():
+def test_query_runs_switch_removes_all_four_self_growth_tools():
+    """The gate names four tools, so all four have to go: the query, its card, the "I cannot
+    answer this" record and the alias proposal. Asserting only the first two let the config
+    comment claim a coverage that did not exist."""
     names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_query_runs=False), [])]
-    assert not {"query_runs", "present_query_table"} & set(names)
+    assert not {"query_runs", "present_query_table", "note_unmet_ask", "propose_alias"} & set(names)
     assert "aggregate_runs" in names and "present_run_groups" in names
+    # ...and on by default, all four are there.
+    on = [t["name"] for t in build_tools(AtworksAgentConfig(model="m"), [])]
+    assert {"query_runs", "present_query_table", "note_unmet_ask", "propose_alias"} <= set(on)
 
 
 def test_query_tools_are_byte_stable_across_builds():

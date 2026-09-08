@@ -140,7 +140,12 @@ def match_terms(
         return []
     seen: set[str] = set()
     matched: list[VocabularyEntry] = []
-    for entry in sorted(entries, key=lambda e: (-len(e.term), e.term)):
+    # 정렬도 **정규형**으로 한다. 매칭은 정규형끼리인데 길이는 원형으로 재던 앞 판에서는
+    # "결 제  계열"(정규형 "결제 계열", 6자)이 "결제계열구분"(정규형 그대로, 7자)보다 원형이
+    # 길다는 이유로 먼저 왔다 -- 실제로 무엇이 더 구체적인지와 무관한 순서다. 같은 값으로
+    # 재고 같은 값으로 줄을 세운다.
+    for entry in sorted(entries, key=lambda e: (-len(normalize_term(e.term)),
+                                                normalize_term(e.term))):
         term = normalize_term(entry.term)
         if term and term in haystack and term not in seen:
             seen.add(term)

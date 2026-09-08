@@ -317,6 +317,21 @@ async def test_chat_request_accepts_screen_state_and_caps_visible(client):
     assert r.status_code == 422
 
 
+async def test_a_chat_sent_from_the_growth_view_is_accepted(client):
+    """The portal sends `screen_state` on EVERY turn, Growth included -- so "growth" has to be a
+    valid REPORTED view or standing on the 6th tab would 422 the chat box. It is not a directive
+    DESTINATION (`navigate_screen` takes five views) and it grounds nothing: Growth reports
+    `visible: []` because none of its rows has a `ScreenTargetKind`."""
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    ok = await client.post("/api/atworks/chat", headers={"X-Session-Id": sid},
+                           json={"message": "hi", "screen_state": {"view": "growth", "visible": []}})
+    assert ok.status_code == 200 and ok.headers["content-type"].startswith("text/event-stream")
+    # ...and a view nobody reports is still a 422, so this is a widening, not an open string.
+    bad = await client.post("/api/atworks/chat", headers={"X-Session-Id": sid},
+                            json={"message": "hi", "screen_state": {"view": "formats", "visible": []}})
+    assert bad.status_code == 422
+
+
 async def test_apply_route_marks_then_consumes_approval(client):
     sid = (await client.post("/api/atworks/session")).json()["session_id"]
     r = await client.post("/api/atworks/changes/job-9999/apply", headers={"X-Session-Id": sid})
