@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from atworks_agent.asklog import classify_turn, cluster_key_for, normalized_tokens
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.masking import policy_from_config
-from atworks_agent.types import AtworksSessionContext, QueryFilters, QuerySpec
+from atworks_agent.types import AtworksSessionContext, AtworksSessionState, QueryFilters, QuerySpec
 
 NOW = datetime(2026, 9, 8, 10, tzinfo=UTC)
 POLICY = policy_from_config(AtworksAgentConfig(model="m"))
@@ -215,3 +215,18 @@ def test_the_entry_carries_the_session_the_counters_and_the_turn_id():
 def test_a_turn_without_an_unmet_report_carries_neither_reason_nor_wanted():
     entry = _classify(tools=["list_runs"], cards=1)
     assert entry.unmet_reason is None and entry.wanted is None
+
+
+def test_per_turn_scratch_fields_never_change_the_persisted_session_document():
+    """turn_tool_names/turn_cards/turn_unmet are per-turn scratch (Field(exclude=True)): mutating
+    them must leave `state.model_dump(mode="json")` -- the bytes SessionRecord.state_document
+    persists under compare-and-set -- identical, or every chat turn would dirty the session row."""
+    import json
+    state = AtworksSessionState()
+    before = json.dumps(state.model_dump(mode="json"), sort_keys=True)
+    state.turn_tool_names.extend(["query_runs", "present_query_table"])
+    state.turn_cards = 2
+    state.turn_unmet = ("no_dimension", "endpoint 계열", "path_segment_3")
+    after = json.dumps(state.model_dump(mode="json"), sort_keys=True)
+    assert before == after
+    assert "turn_tool_names" not in after and "turn_cards" not in after and "turn_unmet" not in after

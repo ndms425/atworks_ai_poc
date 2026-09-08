@@ -32,7 +32,6 @@ DATA_TOOLS: frozenset[str] = frozenset({
     "search_apis",
     "get_api",
     "get_run",
-    "simulate_rule",
     "find_apis_with_param",
     "recommend_rules_for_api",
     "recommend_ignore_paths",
