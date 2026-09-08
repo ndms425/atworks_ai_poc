@@ -50,6 +50,15 @@ from zoneinfo import ZoneInfo
 
 from playwright.sync_api import Page, sync_playwright
 
+# 이 스크립트가 찍는 것은 한국어 발화, 카드 문구, 그리고 👍/👎다 — Windows 콘솔의 기본 코드페이지
+# (cp949)로는 이모지가 UnicodeEncodeError를 낸다. 실제로 그렇게 터졌다: 👍를 누른 뒤 결과를
+# **찍다가** 단계가 죽어서, 케이스 파일은 멀쩡히 쓰였는데 스모크는 제품 FAIL을 보고했다. 로그가
+# 자기가 재는 것을 부수면 안 된다. `errors="replace"`까지 두는 이유는 같다: 인코딩 하나 때문에
+# 스모크가 다시 죽는 것보다 물음표 한 글자가 낫다.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[2]
 SHOTS = ROOT / "scripts" / "smoke" / "shots"
 DEMO = ROOT / "scripts" / "scale" / "out" / "demo"
@@ -485,8 +494,13 @@ def step_6(page: Page, state: dict[str, Any], session_id: str) -> None:
         rows = _unmet_rows(session_id, before)
     reasons = {row.get("unmet_reason") for row in rows}
     check("6. unmet 행이 이 세션에 새로 생겼다", bool(rows), kind="model")
-    check(f"6. unmet_reason ∈ no_evidence|no_dimension (본 것: {sorted(r for r in reasons if r)})",
-          bool(reasons & {"no_evidence", "no_dimension"}), kind="model")
+    # `note_unmet_ask`의 enum 전체를 받는다. 처음에는 no_evidence|no_dimension만 받았는데, 모델이
+    # "서버 로그"를 out_of_scope로 분류한 것은 그 enum 안의 정당한 값이다 — 좁은 기대는 모델이
+    # 아니라 이 검사가 틀린 것이었다. 여기서 봐야 하는 것은 "설명 전에 기록했는가"이지 네 사유 중
+    # 어느 것을 골랐는가가 아니다.
+    valid = {"no_dimension", "no_evidence", "out_of_scope", "refused"}
+    check(f"6. unmet_reason이 note_unmet_ask의 enum 안이다 (본 것: {sorted(r for r in reasons if r)})",
+          bool(reasons & valid), kind="model")
     # 여기서는 "…하지 않습니다"가 규칙 위반이 아니라 정답이다 — note_unmet_ask를 부른 뒤
     # 무엇이 있어야 답할 수 있는지 말하는 것이 §5 규칙 (2)가 요구하는 모양이다.
     check("6. 답이 그 데이터가 없다고 인정한다",
@@ -734,7 +748,9 @@ def step_feedback(page: Page, state: dict[str, Any], session_id: str) -> None:
     """👍 → eval 케이스 파일 하나, 👎 → 파일 없음, 그리고 그 파일을 포함한 ``pytest -m evals``가
     통과해야 한다 — 만들어만 놓고 돌지 않는 케이스는 회귀 스위트가 아니다. 어느 쪽도 감사 로그를
     쓰지 않는다: 평가는 승인이 아니다."""
-    page.get_by_role("button", name="Chat").first.click()
+    # 채팅은 별도 뷰가 아니라 오른쪽 패널이지만, Growth 화면에서 바로 보내면 방금 클릭한 탭이
+    # 스크린샷을 채운다 — 카드를 보려고 Home으로 돌아온다.
+    page.get_by_role("button", name="Home").first.click()
     page.wait_for_timeout(2000)
     audit_before = _audit_total(session_id)
     ask = "엔드포인트 경로 두 번째 조각 기준으로 최근 30일 실패·에러를 묶어서 표로 보여줘"
@@ -831,8 +847,12 @@ def main() -> int:
     parser.add_argument("--db", default=str(DEMO / "scale.sqlite"))
     parser.add_argument("--phase", type=int, choices=(1, 2), default=1,
                         help="1=질의 엔진 6발화(기본), 2=1단계 회귀 + 어휘·승격·피드백·Growth")
+    parser.add_argument("--steps", default="",
+                        help="쉼표로 구분한 단계 라벨만 돈다(예: --steps F,G). 고친 단계 하나를 "
+                             "다시 재려고 스무 번의 모델 호출을 다시 사지 않기 위한 것")
     parser.add_argument("--keep-shots", action="store_true", help="이전 스크린샷을 지우지 않는다")
     args = parser.parse_args()
+    only = {label.strip() for label in args.steps.split(",") if label.strip()}
 
     SHOT_PREFIX = "growth" if args.phase == 1 else "growth2"
     if args.restart:
@@ -894,6 +914,8 @@ def main() -> int:
                                           state.get("clicks", 0))),
             ]
         for label, run in steps:
+            if only and label not in only:
+                continue
             try:
                 run()
             except Exception as failure:                    # noqa: BLE001 — 스모크는 계속 돈다
