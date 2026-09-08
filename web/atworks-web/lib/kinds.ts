@@ -59,6 +59,7 @@ export const QUERY_DIMENSION_LABEL: Record<QueryDimension, string> = {
   api: "API별",
   path_segment_1: "경로 1조각별",
   path_segment_2: "경로 2조각별",
+  path_segment_3: "경로 3조각별",
   path_prefix_2: "경로 앞 2조각별",
   method: "HTTP 메서드별",
   api_group: "API 그룹별",

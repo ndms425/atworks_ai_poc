@@ -539,7 +539,7 @@ class MaskingPolicy(BaseModel):
 
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 Dimension = Literal[
-    "api", "path_segment_1", "path_segment_2", "path_prefix_2", "method", "api_group",
+    "api", "path_segment_1", "path_segment_2", "path_segment_3", "path_prefix_2", "method", "api_group",
     "target_env", "test_data_label", "failed_rule", "http_status", "executed_by", "day", "week",
 ]
 Measure = Literal["runs", "pass", "fail", "error", "non_pass", "fail_rate", "apis", "transitions", "p95_duration_ms"]

@@ -57,7 +57,7 @@ class QueryFilters(BaseModel):
     http_status: list[int] | None = Field(default=None, max_length=10)
 
 Dimension = Literal[
-    "api", "path_segment_1", "path_segment_2", "path_prefix_2", "method", "api_group",
+    "api", "path_segment_1", "path_segment_2", "path_segment_3", "path_prefix_2", "method", "api_group",
     "target_env", "test_data_label", "failed_rule", "http_status", "executed_by", "day", "week",
 ]
 Measure = Literal["runs", "pass", "fail", "error", "non_pass", "fail_rate", "apis", "transitions", "p95_duration_ms"]
@@ -78,9 +78,13 @@ class QuerySpec(BaseModel):
 
 - `window_days`가 있으면 `since = now - window_days`, `until = now`. 둘 다 없으면 `max_aggregate_window_days`.
 - `path_segment_n` = 경로를 `/`로 나눈 n번째 조각(1-base, 선행 `/v1` 같은 버전 조각도 1). `path_prefix_2` = 앞 두 조각.
-  `{id}`·숫자만인 조각은 그대로(라벨링 안 함).
+  `{id}`·숫자만인 조각은 그대로(라벨링 안 함). `n`은 1·2·3 — **세 번째 조각이 T10에서 추가됐다**: 실제 카탈로그는
+  `/v1/product/history/001796`처럼 버전 → 도메인 → 액션 순이라 "엔드포인트 계열"이 세 번째 조각에 있다.
 - `fail_rate = (fail+error)/runs`, 소수 4자리. `apis` = COUNT(DISTINCT api_id). `transitions`·`p95_duration_ms`는 롤업의
-  정의(전환 누계, 최대값 병합 근사)를 그대로 따른다.
+  정의(전환 누계, 최대값 병합 근사)를 그대로 따른다. `fail_rate`는 `status` 필터(`all`/없음 외)와 **함께 쓸 수 없다**
+  (구현 시 확정, `QuerySpec` 검증기가 거부): 분모가 필터가 남긴 행이라 `status=non_pass`에서는 모든 행이 1.0,
+  `status=pass`에서는 0.0 — 아무도 묻지 않은 분모다. 거부 문구가 대안을 말한다("실패율은 status 필터 없이;
+  실패 건수는 non_pass").
 - `day`/`week`는 `briefing_tz` 기준 로컬 날짜·ISO 주. `compare_previous_window=True`면 동일 스펙을 바로 앞 같은 길이의
   창에 실행해 각 측정값에 `_prev`·`_delta` 컬럼을 붙인다(그룹 키 기준 외부 조인, 없는 쪽은 0).
 - 정렬은 요청 측정값 내림차순 기본, `key`는 그룹 키 오름차순. 동률은 키 오름차순.
@@ -115,9 +119,11 @@ class QuerySpec(BaseModel):
   각 항목의 한 줄 의미와 예시 스펙 2개.
 - 실행기 `_query_runs`: 스펙 검증 → `backend.query_runs(session, spec)` → 표본 id를 `seen_apis`/`seen_runs`에 기억
   (`runs_by_ids`/`get_apis` 배치, `PROVENANCE_CAP`) → `last_query_result`에 저장 → `present_query_table`.
-- 카드 `query_table` (presentation tool `present_query_table {result_ref, title, note}`): 열 = 차원 키 + 측정값(+ `_prev/_delta`),
+- 카드 `query_table` (presentation tool `present_query_table {title, note}`): 열 = 차원 키 + 측정값(+ `_prev/_delta`),
   행 ≤ limit, 푸터에 **실행 스펙 요약**(사람이 읽는 문장 + JSON 접기), `population`, `total_groups`, 표본 링크(`attach=run:`),
   👍/👎(§9). 웹 `GenerativeBlock`에 컴포넌트 추가. 카드 숫자는 전부 `QueryResult`에서.
+  `result_ref` 인자는 **없다**(구현 시 확정): 세션에는 `last_query_result` 슬롯이 하나뿐이고 카드는 그것을 읽는다 —
+  `present_run_groups`와 같은 모양이다. 모델이 참조 id를 지어내 넣을 자리를 아예 만들지 않는 쪽이 안전하다.
 - 도구 `note_unmet_ask(reason: no_dimension|no_evidence|out_of_scope|refused, summary ≤200, wanted ≤200)` — 모델이
   카탈로그로 답할 수 없다고 판단하면 **설명 전에** 부른다. 호스트는 `ask_log`에 unmet으로 기록하고 도구 결과로
   "기록했습니다"만 돌려준다. 카드 없음.
@@ -161,8 +167,10 @@ IDX (at), (cluster_key, at), (outcome, at)
      해석했습니다 — 맞나요? [예] [아니오]"를 붙인다(`query_table.pending_alias`).
   2. `POST /vocabulary/{term}/confirm|reject`(세션, 사람 클릭) → confirmed(`confirmations+1`, 감사 2행) / rejected
      (`cooldown_until = now + 30d`). 다른 오퍼레이터가 같은 term을 나중에 확인하면 `confirmations+1`.
-  3. 컨텍스트 주입: `build_dynamic_context` payload `vocabulary` — 이 턴 메시지와 `match_facts`로 맞는 **confirmed** 항목
-     ≤8(`select_tier_one_facts` 규칙 재사용: 최신순). 모델은 되묻지 않고 fragment를 쓴다. `uses+1`.
+  3. 컨텍스트 주입: `build_dynamic_context` payload `vocabulary` — 이 턴 메시지에 실제로 **나타난** confirmed 용어 ≤8.
+     매칭은 `match_terms`(용어 문자열을 긴 것부터 메시지에서 찾는다), `match_facts`+`select_tier_one_facts`가 아니다
+     (구현 시 확정): 어휘는 자유 문장 사실이 아니라 이름이 있는 항목이고, 긴 것 우선이라야 '결제 계열'이 '결제'에
+     먹히지 않는다. 모델은 되묻지 않고 fragment를 쓴다. `uses+1`.
   4. 👎(§9)를 받은 턴이 어휘를 썼으면 `rejections+1`; `rejections ≥ 3 AND rejections > confirmations`면 자동 pending으로 강등.
 - `enable_memory=True`로 켜되 참조 구현의 **턴 후 자유 사실 추출(`extract_and_store`)은 켜지 않는다**
   (`memory_extract_facts=False` 신설). 저장되는 것은 어휘만.

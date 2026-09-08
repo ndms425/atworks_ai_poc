@@ -85,6 +85,29 @@ SLO_ASSERT: dict[str, bool] = {
     "aggregate_runs group_by=failed_rule": True,
     "aggregate_runs group_by=api_env_data": True,
     "aggregate_runs (max of 5)": True,
+    # Task 10 (self-growth §12): one row per arm `select_source` can pick. Two are green and
+    # asserted; three are NOT, and the limit is not moved to make them so.
+    #
+    # What the bench found is that the ARM is not what costs: measured on the 60k-run demo set,
+    # aggregation alone is 0.6ms (key arm), 28ms (rollup_day), 53ms (runs arm) -- every one of
+    # them comfortably inside 300ms. It is `include_samples` (the default, and what the model
+    # actually sends) that adds 30-464ms: `_fill_query_samples` runs TWO statements per returned
+    # row, and on the key axis each of those is a `json_each` EXISTS over the whole window with
+    # no index to drive off -- 40 window scans for one card. The runs arm pays the same toll for
+    # a different reason: `executed_by IS ?` and `api_id IS ?` are both usable indexes and,
+    # without table statistics, SQLite picks the far less selective one.
+    #
+    # Named follow-ups, in the order they should be tried: (1) a bounded `PRAGMA analysis_limit`
+    # + `ANALYZE` step in the daily retention job -- measured on a copy of the demo set it takes
+    # the runs-arm row from 790ms to 166ms with no schema change; (2) fill the evidence samples
+    # for the whole page in ONE pair of statements keyed on the returned group keys, instead of
+    # one pair per row. Documented with its per-read profile in the Task 10 report, never by
+    # widening `slo_query_ms`.
+    "query_runs path_segment_2 (non_pass)": True,              # 164 / 177ms over two runs
+    "query_runs method x target_env": False,                   # 264 / 294ms -- inside, but only just
+    "query_runs failed_rule (key arm)": False,                 # 295 / 566ms
+    "query_runs executed_by x api (runs arm)": False,          # 630 / 734ms
+    "query_runs compare_previous_window (rollup arm)": True,   # 27 / 40ms
     "simulate_rule (30d, amount)": True,
     "insights.build (deterministic)": True,
     "briefing.generate": True,

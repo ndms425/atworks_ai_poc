@@ -151,8 +151,9 @@ def _keys_for(run: RunResult, dimension: str, apis: dict[str, ApiSpec]) -> list[
     api = apis.get(run.api_id)
     if dimension == "api":
         return [run.api_id]
-    if dimension in ("path_segment_1", "path_segment_2", "path_prefix_2"):
-        index = {"path_segment_1": 0, "path_segment_2": 1, "path_prefix_2": 2}[dimension]
+    if dimension in ("path_segment_1", "path_segment_2", "path_segment_3", "path_prefix_2"):
+        index = {"path_segment_1": 0, "path_segment_2": 1, "path_segment_3": 2,
+                 "path_prefix_2": 3}[dimension]
         return [path_segments(api.path)[index] if api else None]
     if dimension == "method":
         return [api.method if api else None]
@@ -366,12 +367,16 @@ def _assert_compare_matches_oracle(result, spec: QuerySpec, runs: list[RunResult
 
 # -- the spec matrix -----------------------------------------------------------------------------
 
-DIMENSIONS = ("api", "path_segment_1", "path_segment_2", "path_prefix_2", "method", "api_group",
-              "target_env", "test_data_label", "failed_rule", "http_status", "executed_by",
-              "day", "week")
+DIMENSIONS = ("api", "path_segment_1", "path_segment_2", "path_segment_3", "path_prefix_2",
+              "method", "api_group", "target_env", "test_data_label", "failed_rule",
+              "http_status", "executed_by", "day", "week")
 
 PAIRS = (("path_segment_2", "target_env"), ("method", "http_status"), ("executed_by", "api"),
-         ("day", "target_env"), ("failed_rule", "api_group"))
+         ("day", "target_env"), ("failed_rule", "api_group"),
+         # the third segment is where the demo catalogue puts the endpoint family
+         # (`/v1/product/history/001796`), and several fixture paths have no third segment at
+         # all -- so this pair also pins the NULL key against the oracle.
+         ("path_segment_3", "failed_rule"))
 
 FILTER_CASES = (
     ("status_pass", QueryFilters(status="pass")),
@@ -417,6 +422,12 @@ def _specs() -> list[tuple[str, QuerySpec]]:
         for dimension in ("api", "path_segment_2", "failed_rule", "executed_by"):
             cases.append((f"filter:{name}/{dimension}", QuerySpec(
                 dimensions=[dimension], filters=filters, measures=filtered_measures, order_by="runs")))
+    # The third segment under a filter that itself needs the `apis` join (`path_prefix`): both the
+    # grouping key and the predicate resolve through the same joined catalogue row, which is the
+    # one way this dimension can go wrong that a bare `dim:` case would not show.
+    cases.append(("filter:path_prefix/path_segment_3", QuerySpec(
+        dimensions=["path_segment_3"], filters=QueryFilters(path_prefix="/v1/payments"),
+        measures=["runs", "fail", "error", "fail_rate", "apis"], order_by="runs")))
     # `compare_previous_window` on ONE spec per source: the prev/delta join is a different code
     # path per arm (a python `apis` fill on the key rollup, a NULL `apis` column on the operator
     # rollup, a real COUNT(DISTINCT) on the other two), and it was the arm-specific halves that
@@ -520,13 +531,15 @@ def test_source_selection_follows_the_spec_table(spec, expected):
 
 
 def test_path_segments():
-    assert path_segments("/v1/items/{id}") == ("v1", "items", "/v1/items")
-    assert path_segments("/v1/items") == ("v1", "items", "/v1/items")
-    assert path_segments("/v1") == ("v1", None, "/v1")
-    assert path_segments("/") == (None, None, None)
-    assert path_segments("") == (None, None, None)
+    # (segment 1, segment 2, segment 3, prefix of the first two) -- the `apis` column order
+    assert path_segments("/v1/items/{id}") == ("v1", "items", "{id}", "/v1/items")
+    assert path_segments("/v1/product/history/001796") == ("v1", "product", "history", "/v1/product")
+    assert path_segments("/v1/items") == ("v1", "items", None, "/v1/items")
+    assert path_segments("/v1") == ("v1", None, None, "/v1")
+    assert path_segments("/") == (None, None, None, None)
+    assert path_segments("") == (None, None, None, None)
     # segments are kept VERBATIM -- {id} and a numeric segment are not relabelled
-    assert path_segments("/v1/{id}/42") == ("v1", "{id}", "/v1/{id}")
+    assert path_segments("/v1/{id}/42") == ("v1", "{id}", "42", "/v1/{id}")
 
 
 def test_week_sql_equals_python_isocalendar(synthetic):

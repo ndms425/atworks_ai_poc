@@ -13,6 +13,7 @@
 영구    롤업·워터마크·현재상태     —                           손대지 않는다
 파생    ``insights_out/<op>/<날짜>`` ``insights_cache_days``    회전
 세션    ``SessionStore``           ``session_idle_hours``      TTL 스윕
+질문    ``ask_log``                ``ask_log_retention_days``  **삭제**(자가발전 spec §6)
 ======  =========================  ==========================  ==================================
 
 콜드 삭제는 ``retention_cold_until``이 **설정되어 있고 지났을 때만** 일어난다 — 기본값 None은
@@ -43,7 +44,8 @@ from .store import Store
 logger = logging.getLogger(__name__)
 
 #: The `retention_state.partition_key` prefixes, one per step, plus the once-a-day guard.
-STEPS = ("runs_archived", "bodies_deleted", "archive_purged", "insight_cache_rotated", "sessions_swept")
+STEPS = ("runs_archived", "bodies_deleted", "archive_purged", "insight_cache_rotated",
+         "sessions_swept", "asks_deleted")
 DAILY_GUARD = "daily"
 #: Rows per body-DELETE statement. Small enough that no single statement holds the loop for
 #: seconds at 450k rows, large enough that the loop is a few dozen statements, not thousands.
@@ -142,6 +144,12 @@ class Retention:
         counts["sessions_swept"] = (
             self.sessions.sweep(self.config.session_idle_hours, now) if self.sessions is not None else 0
         )
+
+        # ask_log 회전 (자가발전 spec §6): the question text is the operator's own words, masked at
+        # write, and it is evidence for the promoter and the unmet clusters -- but not forever.
+        # One bounded DELETE, no day loop: a year of asks is thousands of rows, not millions.
+        counts["asks_deleted"] = self.store.delete_asks_before(
+            now - timedelta(days=self.config.ask_log_retention_days))
 
         for step in STEPS:
             self.store.set_retention_state(f"{step}:{day}", now)

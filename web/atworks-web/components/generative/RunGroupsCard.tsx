@@ -22,7 +22,10 @@ export default function RunGroupsCard({
     <GenCard>
       <GenCardHeader title={payload.title ?? "실행 묶음"} meta={<b className="font-semibold text-(--ink)">{scope}</b>} />
       <div className="panel-scroll overflow-x-auto px-3.5 pb-2">
-        <table data-component="run_groups" className="w-full border-collapse text-[12.5px]">
+        {/* data-component 표식은 여기 없다 — web-shared/Transcript가 이 블록을 감싸며 이미
+            `data-component="run_groups"`를 달고 있고, 표에 한 번 더 달면 어긋날 수 있는 표식이
+            둘이 된다(스모크·E2E는 감싸는 쪽을 찾는다). */}
+        <table className="w-full border-collapse text-[12.5px]">
           <thead>
             <tr className="text-left text-[11.5px] font-semibold text-(--ink-soft)">
               <th className="py-1.5 pr-3">그룹</th>

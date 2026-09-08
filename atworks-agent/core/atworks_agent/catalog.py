@@ -41,6 +41,9 @@ DIMENSIONS: dict[Dimension, DimInfo] = {
     "path_segment_2": DimInfo(
         "경로 2조각별", "경로를 '/'로 나눈 두 번째 조각. {id}·숫자만인 조각은 그대로 둔다.", "apis"
     ),
+    "path_segment_3": DimInfo(
+        "경로 3조각별", "경로를 '/'로 나눈 세 번째 조각. {id}·숫자만인 조각은 그대로 둔다.", "apis"
+    ),
     "path_prefix_2": DimInfo("경로 앞 2조각별", "경로의 앞 두 조각을 합친 접두사로 묶는다.", "apis"),
     "method": DimInfo("HTTP 메서드별", "GET/POST/PUT/PATCH/DELETE로 묶는다.", "apis"),
     "api_group": DimInfo("API 그룹별", "API 스펙의 group 필드로 묶는다.", "apis"),
@@ -121,8 +124,10 @@ def title_for_spec(spec: QuerySpec, *, default_window_days: int | None = None) -
     ``default_window_days``는 창을 안 적은 스펙(``window_days``도 ``since``/``until``도 없음)에
     호스트가 실제로 적용한 기본 창이다 -- 주면 제목이 "기본 기간" 대신 그 일수를 적는다. 실행기는
     ``max_aggregate_window_days``를 넘긴다(``Store.query``의 ``default_window_days``와 같은 값),
-    그래서 카드 제목의 기간이 실제로 조회된 기간과 어긋나지 않는다. 호출자가 창을 모르면
-    (승격기 등) 생략하고 "기본 기간"으로 남는다."""
+    그래서 카드 제목의 기간이 실제로 조회된 기간과 어긋나지 않는다. 저장 질문을 만드는 승격기
+    (``host/atworks_host/promoter.py``)도 같은 config 값을 넘기므로, 사람이 보는 제목에 "기본
+    기간"이 뜨는 자리는 이 저장소에 없다 -- 그 폴백은 창을 정말로 모르는 호출자(테스트, 카탈로그를
+    직접 부르는 도구)를 위해 남겨 둔 것이다."""
     status = spec.filters.status or "all"
     status_part = _STATUS_LABEL_KO.get(status, "전체")
 

@@ -7,34 +7,13 @@ import { useState } from "react";
 import { AskButton, formatDate, GenCard, GenCardHeader, Pill } from "web-shared";
 import { actOnVocabulary, sendFeedback } from "@/lib/api";
 import { QUERY_SOURCE_LABEL } from "@/lib/kinds";
-import type { AttachedItem, QueryTableColumn, QueryTablePayload, QueryTableRow } from "@/lib/types";
+import { QueryTable } from "@/components/QueryTableView";
+import type { AttachedItem, QueryTablePayload } from "@/lib/types";
 
 /**
  * 자가발전 질의(query_runs) 결과 표. 숫자는 하나도 이 파일에서 계산하지 않는다 — 열 정의도, 값도,
  * 모집단도, 창도 전부 서버가 QueryResult에서 채워 보낸 payload 그대로다.
  */
-
-/** 비율 측정값(fail_rate와 그 _prev/_delta)은 값이 정수(0, 1)여도 소수 4자리로 고정한다 — 형식은 값이 아니라
- *  컬럼이 정한다. 나머지 측정값은 정수 카운트라 자릿수 구분만 한다. */
-function isRatioColumn(key: string): boolean {
-  return key === "fail_rate" || key.startsWith("fail_rate_");
-}
-
-function cellText(value: number | null | undefined, kind: QueryTableColumn["kind"], key: string): string {
-  if (value === null || value === undefined) return "—";
-  const text = isRatioColumn(key) ? value.toFixed(4) : Number.isInteger(value) ? value.toLocaleString() : value.toFixed(4);
-  return kind === "delta" && value > 0 ? `+${text}` : text;
-}
-
-function cellTone(value: number | null | undefined, kind: QueryTableColumn["kind"]): string {
-  if (kind !== "delta" || value === null || value === undefined || value === 0) return "text-(--ink)";
-  return value > 0 ? "text-(--danger)" : "text-(--ok)";
-}
-
-function rowKey(row: QueryTableRow, index: number): string {
-  const keys = Object.values(row.keys).map((v) => v ?? "—").join(" · ");
-  return keys.length > 0 ? `${index}:${keys}` : `${index}`;
-}
 
 /**
  * "‘결제 계열’을 경로 접두사 /v1/payment로 해석했습니다 — 맞나요? [예] [아니오]".
@@ -120,58 +99,31 @@ export default function QueryTableCard({
         {payload.compare ? <span className="ml-1.5"><Pill tone="violet">이전 기간 비교</Pill></span> : null}
       </p>
       <div className="panel-scroll overflow-x-auto px-3.5 pb-2">
-        {/* data-component: 스모크·E2E가 카드를 푸터 문구가 아니라 안정된 훅으로 찾게 한다(표시에는 영향 없음). */}
-        <table data-component="query_table" className="w-full border-collapse text-[12.5px]">
-          <thead>
-            <tr className="text-left text-[11.5px] font-semibold text-(--ink-soft)">
-              {payload.columns.map((column) => (
-                <th
-                  key={column.key}
-                  className={column.kind === "dimension" ? "py-1.5 pr-3" : "px-2 py-1.5 text-right"}
-                >
-                  {column.label}
-                </th>
-              ))}
-              {hasSamples ? <th className="py-1.5 pl-2" /> : null}
-            </tr>
-          </thead>
-          <tbody>
-            {payload.rows.map((row, index) => (
-              <tr key={rowKey(row, index)} className="border-t border-(--line)">
-                {payload.columns.map((column) =>
-                  column.kind === "dimension" ? (
-                    <td key={column.key} className="py-1.5 pr-3 font-mono text-(--ink)">
-                      {row.keys[column.key] ?? "—"}
-                    </td>
-                  ) : (
-                    <td
-                      key={column.key}
-                      className={`px-2 py-1.5 text-right tabular-nums ${cellTone(row.measures[column.key], column.kind)}`}
-                    >
-                      {cellText(row.measures[column.key], column.kind, column.key)}
-                    </td>
-                  ),
-                )}
-                {hasSamples ? (
-                  <td className="py-1.5 pl-2">
-                    {row.run_ids[0] ? (
-                      <AskButton
-                        label="채팅에 첨부"
-                        onClick={() =>
-                          onAttach?.({
-                            kind: "run",
-                            ref_id: row.run_ids[0],
-                            label: Object.values(row.keys).map((v) => v ?? "—").join(" · ") || row.run_ids[0],
-                          })
-                        }
-                      />
-                    ) : null}
-                  </td>
-                ) : null}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {/* 표 자체는 QueryTableView의 `QueryTable` 하나뿐이다 — 저장 질문 화면과 같은 구현.
+            data-component 표식은 여기 없다: web-shared/Transcript가 이 블록을 감싸며 이미 달고
+            있고, 표에 한 번 더 달면 어긋날 수 있는 표식이 둘이 된다. */}
+        <QueryTable
+          columns={payload.columns}
+          rows={payload.rows}
+          trailingHeader={hasSamples}
+          renderTrailing={
+            hasSamples
+              ? (row) =>
+                  row.run_ids[0] ? (
+                    <AskButton
+                      label="채팅에 첨부"
+                      onClick={() =>
+                        onAttach?.({
+                          kind: "run",
+                          ref_id: row.run_ids[0],
+                          label: Object.values(row.keys).map((v) => v ?? "—").join(" · ") || row.run_ids[0],
+                        })
+                      }
+                    />
+                  ) : null
+              : undefined
+          }
+        />
       </div>
       {payload.rows.length === 0 ? (
         <p className="px-3.5 pb-3 text-[12px] text-(--ink-soft)">조건에 맞는 그룹이 없습니다.</p>
@@ -194,10 +146,13 @@ export default function QueryTableCard({
             </span>
           ) : null}
         </p>
+        {/* 스펙과 함께 서버가 실제로 해석한 창·소스를 싣는다. 위 헤더의 날짜는 사람이 읽는
+            형식이라 "이 표가 정확히 어느 구간을 센 것인가"를 되짚을 수 없다 — 창은 이 카드에서
+            가장 무거운 값이고, 그 값을 기계가 읽을 수 있는 자리는 여기뿐이다. */}
         <details className="mt-1.5">
           <summary className="cursor-pointer">실행된 질의(JSON)</summary>
           <pre className="panel-scroll mt-1 overflow-x-auto whitespace-pre font-mono text-[11.5px] text-(--ink-soft)">
-            {JSON.stringify(payload.spec, null, 2)}
+            {JSON.stringify({ spec: payload.spec, window: payload.window, source: payload.source }, null, 2)}
           </pre>
         </details>
       </div>

@@ -49,6 +49,8 @@ from atworks_agent import (
     AtworksSessionContext,
     JobDraft,
     JobKind,
+    QueryFilters,
+    QuerySpec,
     RuleDraft,
     RunsQuery,
     TestDataSet,
@@ -57,6 +59,7 @@ from atworks_agent.aggregation import GROUP_BY
 from atworks_host.briefing import Briefings
 from atworks_host.insights import InsightPanels
 from atworks_host.mock_backend import MockAtworks
+from atworks_host.query_sql import select_source
 from atworks_host.retention import Retention
 from atworks_host.store import Store
 
@@ -168,6 +171,17 @@ async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
     rows.append(Row("aggregate_runs (max of 5)", config.slo_aggregate_ms, max(aggregate_ms),
                     note="restates the worst row above", derived=True))
 
+    # -- query_runs: one row per SOURCE the compiler can pick (self-growth spec §4/§12) ------
+    #    Source selection is the design, so a bench that only ever hit `rollup_day` would prove
+    #    nothing about the other three arms. Each spec below is named for the arm it lands on,
+    #    asserted by `select_source` rather than assumed, and every one of them is a shape the
+    #    Query catalogue actually invites the model to ask for.
+    for name, spec in _query_specs(config):
+        source = select_source(spec)
+        ms, samples = await _best_of(lambda s=spec: backend.query_runs(session, s))
+        rows.append(Row(f"query_runs {name}", config.slo_query_ms, ms,
+                        note=f"source={source}", samples=samples))
+
     # -- simulate_rule 30d on a numeric-compare draft over a widely shared param -------------
     amount_apis = {a.api_id for a in backend.apis.values() if "amount" in a.params}
     target = next((api_id for api_id in _busiest_apis(store, window) if api_id in amount_apis), None)
@@ -207,6 +221,40 @@ async def run_bench(dataset: Path, *, config: AtworksAgentConfig | None = None,
     #    honest shape: a production write appends to a store that already holds its history.
     rows.append(await _sse_probe(backend, session, config, amount_apis))
     return rows
+
+
+def _query_specs(config: AtworksAgentConfig) -> list[tuple[str, QuerySpec]]:
+    """The five `query_runs` shapes the bench times, one per compiled arm plus the compare join.
+
+    The window is `max_aggregate_window_days` throughout -- the same 30 days every other
+    aggregate row on this table uses, so the numbers are comparable -- and it is expressed as
+    `window_days` rather than since/until so the spec is what the model would actually emit."""
+    window = config.max_aggregate_window_days
+    return [
+        # rollup_day, `apis` join: the endpoint-family question the smoke asks in Korean.
+        ("path_segment_2 (non_pass)", QuerySpec(
+            filters=QueryFilters(status="non_pass", window_days=window),
+            dimensions=["path_segment_2"], measures=["runs", "non_pass"], order_by="non_pass")),
+        # rollup_day, two dimensions, one of them off the catalogue and one off the cell.
+        ("method x target_env", QuerySpec(
+            filters=QueryFilters(window_days=window), dimensions=["method", "target_env"],
+            measures=["runs", "non_pass", "fail_rate"], order_by="runs")),
+        # rollup_key_day: the transposed key axis, unscoped, which is the arm that exists so a
+        # key group does not `json_each` every cell row in the window.
+        ("failed_rule (key arm)", QuerySpec(
+            filters=QueryFilters(window_days=window), dimensions=["failed_rule"],
+            measures=["runs", "non_pass"], order_by="non_pass")),
+        # runs: an `executed_by` dimension PAIRED with `api` has no rollup that carries both, so
+        # this is the raw-scan arm -- the slowest thing the catalogue can ask for.
+        ("executed_by x api (runs arm)", QuerySpec(
+            filters=QueryFilters(status="non_pass", window_days=window),
+            dimensions=["executed_by", "api"], measures=["runs", "non_pass"], order_by="non_pass")),
+        # rollup_day + the previous-window join: two windows, two top lists, one row set.
+        ("compare_previous_window (rollup arm)", QuerySpec(
+            filters=QueryFilters(window_days=window), dimensions=["api"],
+            measures=["runs", "non_pass", "apis"], order_by="non_pass",
+            compare_previous_window=True)),
+    ]
 
 
 def _retention_now(store: Store, config: AtworksAgentConfig) -> datetime | None:

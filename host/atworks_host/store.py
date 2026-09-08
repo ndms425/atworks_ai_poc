@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS apis (
     -- the spec, and relabelling them here would invent a grouping nobody asked for.
     path_segment_1 TEXT,
     path_segment_2 TEXT,
+    path_segment_3 TEXT,
     path_prefix_2 TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_apis_updated_at ON apis(updated_at DESC);
@@ -105,6 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_apis_group ON apis("group");
 CREATE INDEX IF NOT EXISTS idx_apis_path ON apis(path);
 CREATE INDEX IF NOT EXISTS idx_apis_seg1 ON apis(path_segment_1);
 CREATE INDEX IF NOT EXISTS idx_apis_seg2 ON apis(path_segment_2);
+CREATE INDEX IF NOT EXISTS idx_apis_seg3 ON apis(path_segment_3);
 CREATE INDEX IF NOT EXISTS idx_apis_prefix2 ON apis(path_prefix_2);
 CREATE INDEX IF NOT EXISTS idx_apis_method ON apis(method);
 
@@ -737,6 +739,7 @@ class Store:
                                     ("rollup_key_day", "p95_duration_ms", "INTEGER"),
                                     ("apis", "path_segment_1", "TEXT"),
                                     ("apis", "path_segment_2", "TEXT"),
+                                    ("apis", "path_segment_3", "TEXT"),
                                     ("apis", "path_prefix_2", "TEXT"),
                                     ("ask_log", "vocabulary_terms", "JSON")):
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -749,7 +752,12 @@ class Store:
         """Everything a widened (or brand-new) table needs AFTER the schema script has run: the
         reshape of a table whose columns changed meaning, and the backfills that turn a NULL
         column or an empty new table into the values every read assumes are there."""
-        if ("apis", "path_segment_1") in added:
+        # ANY of the four pre-split columns arriving means the split has to be (re-)run: a store
+        # written between Task 2 and Task 10 already has segments 1/2 and the prefix, and gains
+        # only `path_segment_3` here -- keying the backfill off segment 1 alone would leave that
+        # new column NULL on every row and the `path_segment_3` axis would answer "no groups".
+        if added & {("apis", "path_segment_1"), ("apis", "path_segment_2"),
+                    ("apis", "path_segment_3"), ("apis", "path_prefix_2")}:
             self._backfill_path_segments()
         # `retention_state` was created in Task 4 as a generic (key, value) pair table and never
         # written by anything; Task 9 gives it the spec's own columns. A store written before
@@ -765,14 +773,15 @@ class Store:
         self._backfill_operator_rollup()
 
     def _backfill_path_segments(self) -> None:
-        """Fill the three new ``apis`` columns on a store written before they existed. The split
+        """Fill the four pre-split ``apis`` columns on a store written before they existed. The split
         is python (``path_segments``), not SQL: the SQL for "the second `/`-separated segment, or
         NULL when there isn't one" is a nest of SUBSTR/INSTR that would then have to agree
         CHARACTER FOR CHARACTER with the python the write path uses -- two definitions of one
         grouping. A catalogue is at most tens of thousands of rows and this runs once per file."""
         rows = self._conn.execute("SELECT api_id, path FROM apis").fetchall()
         self._conn.executemany(
-            "UPDATE apis SET path_segment_1 = ?, path_segment_2 = ?, path_prefix_2 = ? WHERE api_id = ?",
+            "UPDATE apis SET path_segment_1 = ?, path_segment_2 = ?, path_segment_3 = ?, "
+            "path_prefix_2 = ? WHERE api_id = ?",
             [(*path_segments(r["path"]), r["api_id"]) for r in rows],
         )
 
@@ -863,8 +872,8 @@ class Store:
         """Rows in, no commit -- the caller owns the transaction."""
         self._conn.executemany(
             'INSERT OR REPLACE INTO apis (api_id, method, path, name, "group", updated_at, has_rules, params, '
-            "path_segment_1, path_segment_2, path_prefix_2) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "path_segment_1, path_segment_2, path_segment_3, path_prefix_2) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         self._refresh_api_updated_at([a[0] for a in rows])

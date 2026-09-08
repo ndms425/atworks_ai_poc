@@ -262,7 +262,8 @@ export interface RunGroupsPayload {
 
 /** 자가발전 질의 카드 (query_table) — 열·행·숫자는 전부 서버가 채운 QueryResult에서 온다. */
 export type QueryDimension =
-  | "api" | "path_segment_1" | "path_segment_2" | "path_prefix_2" | "method" | "api_group"
+  | "api" | "path_segment_1" | "path_segment_2" | "path_segment_3" | "path_prefix_2"
+  | "method" | "api_group"
   | "target_env" | "test_data_label" | "failed_rule" | "http_status" | "executed_by" | "day" | "week";
 
 export type QueryMeasure =

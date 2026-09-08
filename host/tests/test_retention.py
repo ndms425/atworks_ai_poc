@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from atworks_agent import (
     ActorKind,
+    AskEntry,
     AtworksAgentConfig,
     AtworksSessionContext,
     JobDraft,
@@ -50,6 +51,14 @@ def _seed(store: Store, *, age_days: int, count: int, prefix: str) -> list[str]:
     ]
     store.ingest(runs)
     return [r.run_id for r in runs]
+
+
+def _ask(turn_id: str, *, at: datetime) -> AskEntry:
+    return AskEntry(
+        at=at, session_id="s-1", operator="operator", role="qa", question="실패 보여줘",
+        intent="aggregate", outcome="answered", tool_calls=1, cards=1,
+        cluster_key="dims=api|measures=non_pass|filters=window_days", turn_id=turn_id,
+    )
 
 
 def _rollup_totals(store: Store) -> list[tuple]:
@@ -351,3 +360,23 @@ async def test_newest_run_at_is_public_and_none_on_an_empty_store(tmp_path):
     _seed(store, age_days=3, count=1, prefix="a")
     _seed(store, age_days=1, count=1, prefix="b")
     assert store.newest_run_at() == NOW - timedelta(days=1)
+
+
+# -- ask_log 회전 (자가발전 spec §6) ---------------------------------------------------------
+
+
+async def test_asks_past_the_ask_window_are_deleted_and_recent_ones_are_not(tmp_path):
+    """The ask_log is the only self-growth table that rotates: the promoter's evidence and the
+    unmet clusters are kept for `ask_log_retention_days`, not forever. Everything else the
+    engine writes (vocabulary, saved questions, the audit log) is permanent."""
+    backend = _backend()
+    store = backend.store
+    store.insert_ask(_ask("old", at=NOW - timedelta(days=400)))
+    store.insert_ask(_ask("recent", at=NOW - timedelta(days=10)))
+
+    counts = await Retention(store, backend._config, tmp_path).run(NOW)
+
+    assert counts["asks_deleted"] == 1
+    assert [e.turn_id for e in store.list_asks().items] == ["recent"]
+    day = Retention(store, backend._config, tmp_path).local_date(NOW).isoformat()
+    assert f"asks_deleted:{day}" in store.retention_state()

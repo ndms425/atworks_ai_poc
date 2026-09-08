@@ -64,7 +64,8 @@ CELL_FILTERS = ("target_env", "test_data_label")
 KEY_AXES = ("failed_rule", "http_status")
 
 #: Dimensions that are read off the ``apis`` catalogue rather than off the run/rollup row.
-APIS_DIMENSIONS = ("path_segment_1", "path_segment_2", "path_prefix_2", "method", "api_group")
+APIS_DIMENSIONS = ("path_segment_1", "path_segment_2", "path_segment_3", "path_prefix_2", "method",
+                   "api_group")
 
 #: JSON map column per key axis, on ``rollup_day``.
 MAP_COLUMN = {"failed_rule": "failed_rule_counts", "http_status": "http_status_counts"}
@@ -74,20 +75,26 @@ API_SAMPLE_CAP = 20
 RUN_SAMPLE_CAP = 5
 
 
-def path_segments(path: str) -> tuple[str | None, str | None, str | None]:
-    """``("/v1/items/{id}")`` -> ``("v1", "items", "/v1/items")``.
+def path_segments(path: str) -> tuple[str | None, str | None, str | None, str | None]:
+    """``("/v1/product/history/001796")`` -> ``("v1", "product", "history", "/v1/product")``.
 
+    The tuple is ``(segment 1, segment 2, segment 3, prefix of the first two)`` -- the column
+    order of the four pre-split ``apis`` columns, so callers unpack it straight into the INSERT.
     Segments are the ``/``-separated pieces with empty ones dropped, kept VERBATIM: ``{id}`` and a
     bare number are what the operator wrote in the spec, and normalizing them here would invent a
     grouping nobody asked for (catalog.py says exactly this to the model). A path with fewer than
-    two segments gets ``None`` for what is missing and a prefix of whatever exists; a path with no
-    segment at all is three ``None``s."""
+    three segments gets ``None`` for what is missing and a prefix of whatever exists; a path with
+    no segment at all is four ``None``s.
+
+    The THIRD segment earns a column of its own because the real catalogue puts the endpoint
+    family there: ``/v1/product/history/001796`` is versioned, then domain, then action."""
     parts = [segment for segment in path.split("/") if segment]
     if not parts:
-        return None, None, None
+        return None, None, None, None
     seg1 = parts[0]
     seg2 = parts[1] if len(parts) > 1 else None
-    return seg1, seg2, "/" + "/".join(parts[:2])
+    seg3 = parts[2] if len(parts) > 2 else None
+    return seg1, seg2, seg3, "/" + "/".join(parts[:2])
 
 
 def resolve_window(spec: QuerySpec, now: datetime, default_days: int) -> tuple[datetime, datetime]:
@@ -513,6 +520,7 @@ _ROLLUP_DAY_KEY = {
     "api": lambda _axis: "r.api_id",
     "path_segment_1": lambda _axis: "a.path_segment_1",
     "path_segment_2": lambda _axis: "a.path_segment_2",
+    "path_segment_3": lambda _axis: "a.path_segment_3",
     "path_prefix_2": lambda _axis: "a.path_prefix_2",
     "method": lambda _axis: "a.method",
     "api_group": lambda _axis: 'a."group"',
@@ -755,6 +763,7 @@ _RUNS_KEY = {
     "api": "runs.api_id",
     "path_segment_1": "a.path_segment_1",
     "path_segment_2": "a.path_segment_2",
+    "path_segment_3": "a.path_segment_3",
     "path_prefix_2": "a.path_prefix_2",
     "method": "a.method",
     "api_group": 'a."group"',
