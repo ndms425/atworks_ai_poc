@@ -74,7 +74,7 @@
 </style>
 
 <main>
-  <div class="eyebrow">atworks-ai-mvp · 초급 개발자용 · 2026-09-06 기준 (HEAD 0abc3d1)</div>
+  <div class="eyebrow">atworks-ai-mvp · 초급 개발자용 · 2026-09-08 기준 (<code>feature/self-growth</code>)</div>
   <h1>aTworks AI 기능 지도</h1>
   <p class="lede">aTworks(자바 백엔드의 API 테스트 도구) 옆에 붙은 <b>AI 채팅 서비스</b>가 지금 무엇을 할 수 있고, 무엇을 <em>일부러</em> 안 했고, 무엇이 아직 남았는지를 한 장으로 정리했습니다. 코드를 처음 여는 사람이 "왜 이렇게 짜여 있지?"를 이해하는 데 필요한 만큼만 담았습니다.</p>
 
@@ -201,15 +201,30 @@
     </tbody>
   </table></div>
 
+  <h3>G. 자가발전 — 못 답한 질문이 다음 배포의 기능이 되는 고리</h3>
+  <p>다섯 축(<code>aggregate_runs</code>)으로 답할 수 없는 질문이 오면 그동안은 "지원하지 않습니다"로 끝났습니다. 이제 <b>질의 엔진</b>이 그 질문의 대부분을 그 자리에서 답하고, 못 답한 것과 되풀이된 것과 사람이 가르친 말은 <b>기록으로 남아</b> 다음에 쓰입니다. 다섯 조각 전부에서 <b>공유 상태를 바꾸는 것은 여전히 사람의 클릭 하나뿐</b>입니다.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>기능</th><th>초급 설명</th><th>어떻게 동작</th><th>코드</th></tr></thead>
+    <tbody>
+      <tr><td class="feat">질의 엔진 (<code>query_runs</code>)</td><td>"endpoint 계열별로 실패 묶어줘", "이번 주 실행자별로 지난주랑 비교해줘" — 다섯 축 밖의 질문</td><td>모델은 <b>SQL을 쓰지 않습니다</b>. 고정 카탈로그 <code>QuerySpec</code>(14 차원 × 9 측정값, 차원 ≤ 2, <code>extra="forbid"</code>)을 채워 넘기면 호스트가 스펙만 보고 네 소스(<code>rollup_day</code> / <code>rollup_key_day</code> / <code>rollup_operator_day</code> / <code>runs</code>) 중 하나를 골라 <b>한 문장</b>으로 컴파일합니다. 숫자는 전부 호스트가 셉니다. <code>fail_rate</code>+status 필터처럼 뜻이 망가지는 조합은 <b>거절</b>이지 추측이 아닙니다</td><td class="mono">types.py catalog.py<br>host/query_sql.py store.py</td></tr>
+      <tr><td class="feat">질문 기록 (ask_log)</td><td>모든 채팅 턴이 한 행. "무엇을 물었고 답이 됐는가"</td><td>턴 끝 훅(<code>finally</code>이라 예외로 끝난 턴도 <code>partial</code> 한 행). <code>outcome</code>(answered/partial/unmet/action)·<code>intent</code>·<code>cluster_key</code>는 <b>결정론</b>: 실제로 부른 도구 이름과 실제로 낸 카드로 계산하지, 모델의 자기 보고로 정하지 않습니다. 질문 텍스트는 저장 전에 마스킹됩니다</td><td class="mono">asklog.py · streaming.py</td></tr>
+      <tr><td class="feat">조직 공용 어휘</td><td>"결제 계열이 뭔지 기억해" — 한 사람이 가르치면 <b>팀 전체</b>가 씁니다</td><td><code>propose_alias</code>는 <b>아무것도 저장하지 않습니다</b>: 제안한 세션의 카드에만 뜨는 <code>pending</code>입니다. 사람이 [확인]을 눌러야 저장되고, 그때부터 그 말이 나온 턴의 컨텍스트에 실립니다. 별칭은 <b>모양</b>만 이름 붙일 수 있습니다 — 기간(오늘만 참)과 사람(<code>executed_by</code>·<code>scope_operator</code>)은 거부합니다: 한 번의 클릭으로 확정된 별칭에 남의 id가 얼어붙으면 모두의 질문이 조용히 좁아집니다</td><td class="mono">vocabulary.py<br>memory_store.py</td></tr>
+      <tr><td class="feat">승격 (저장 질문)</td><td>3명 이상이 5회 이상 한 같은 질문이 Home 카드로 올라옵니다</td><td>스케줄러 꼬리에서 <b>LLM 없이</b> 하루 1회. 제목은 카탈로그가 만든 결정론 문장입니다(모델이 쓴 문장이 아닙니다). [실행]은 <b>저장된 답이 아니라 지금 다시 계산</b>합니다 — 저장 질문은 질문이지 답이 아닙니다</td><td class="mono">host/promoter.py</td></tr>
+      <tr><td class="feat">피드백 · 회귀 스위트</td><td>카드의 👍/👎. 👍 하나가 회귀 테스트 한 건이 됩니다</td><td>표는 <b>한 사람의 지금 의견</b>이지 카운터가 아닙니다: 같은 카드에 👎 세 번은 거부 1회고(전이에서만 셈), 자기 턴만 투표할 수 있으며(남의 <code>turn_id</code>는 403), 감사 로그에 남기지 않습니다 — <b>단 하나의 예외</b>는 👎가 실제로 공용 어휘를 강등시켰을 때(모두가 보는 상태의 변경이라 감사 2행). 👍는 그 턴의 <b>필터 종류</b>만 담은 케이스를 <code>evals/cases/</code>에 씁니다(값은 담지 않습니다)</td><td class="mono">host/evals_writer.py<br>evals/run_evals.py</td></tr>
+      <tr><td class="feat">Growth 화면 (6번째 뷰)</td><td>시스템이 <b>무엇을 배웠는지</b> 보고 틀린 것을 사람이 바로잡는 자리</td><td>네 탭: 배운 어휘(확인·거부·삭제) / 저장 질문(실행·숨기기) / 미충족 질문(군집 + 기록) / 이번 주(전부 COUNT, <b>비율은 일부러 안 보여줍니다</b> — 화면이 나눗셈을 시작하면 분모를 서버와 다르게 기억하게 됩니다)</td><td class="mono">web: GrowthView.tsx</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout"><p><b>"자가발전"이 무엇이 아닌지:</b> 모델이 스스로 코드를 고치거나 규칙을 켜는 것이 아닙니다. 시스템이 하는 일은 <em>기록</em>(무엇을 못 답했나)과 <em>제안</em>(이 말은 이런 뜻인 것 같습니다, 이 질문은 되풀이됩니다)까지고, 그 제안이 팀에 실리는 순간은 언제나 <b>사람이 버튼을 누른 때</b>입니다. <code>enable_growth=False</code>면 라우트도 화면도 <b>기록 자체도</b> 없습니다.</p></div>
+
   <h3>공통 인프라</h3>
   <div class="tablewrap"><table>
     <thead><tr><th>구성</th><th>무엇</th><th>코드</th></tr></thead>
     <tbody>
       <tr><td class="feat">백엔드 추상화</td><td>aTworks와 닿는 유일한 접점 <code>AtworksBackend</code>(ABC). MVP는 <code>MockAtworks</code>. 자바 연동은 <code>rest_backend.py</code> 한 파일로 교체하면 됨</td><td class="mono">backend.py · mock_backend.py</td></tr>
-      <tr><td class="feat">도구 표면</td><td>모델이 부를 수 있는 함수 목록(고정). 읽기 도구 / <code>stage_*</code> 초안 도구 / <code>present_*</code> 카드 도구 / 화면 지시 2개. 기능 플래그(<code>enable_rules</code>·<code>enable_parity</code>·<code>enable_screen_directives</code>)로 묶음 단위 on/off</td><td class="mono">tools/registry.py · config.py</td></tr>
-      <tr><td class="feat">호스트 라우트</td><td>SSE 채팅 <code>/chat</code>, 포털 읽기 <code>/apis /runs /jobs /rules /formats /profiles</code>, 승인 버튼 <code>/changes|/rules|/format-batches|/profiles/{id}/apply·discard</code>, <code>/scheduler/tick</code>, <code>/reports/{job}</code>, <code>/briefings</code>. 종류별로 <b>네임스페이스 분리</b></td><td class="mono">host/app.py</td></tr>
-      <tr><td class="feat">웹 포털</td><td>Next.js. Home / APIs / Runs / Jobs / Rules(+저장된 포맷, 비교 프로파일 섹션). 채팅 카드 8종(run_digest, run_groups, job_preview, rule_preview, format_batch, parity_summary, profile_preview, question_form)</td><td class="mono">web/atworks-web</td></tr>
-      <tr><td class="feat">스킬 6개</td><td>요청 종류별 절차서. 프롬프트엔 목차만, 필요할 때 <code>load_skill</code>로 로드: failed-triage · schedule-run · job-approval · api-lookup · rule-authoring · parity-compare</td><td class="mono">atworks-agent/skills/</td></tr>
+      <tr><td class="feat">도구 표면</td><td>모델이 부를 수 있는 함수 목록(고정). 읽기 도구 / <code>stage_*</code> 초안 도구 / <code>present_*</code> 카드 도구 / 화면 지시 2개. 기능 플래그(<code>enable_rules</code>·<code>enable_parity</code>·<code>enable_screen_directives</code>·<code>enable_query_runs</code>·<code>enable_growth</code>)로 묶음 단위 on/off</td><td class="mono">tools/registry.py · config.py</td></tr>
+      <tr><td class="feat">호스트 라우트</td><td>SSE 채팅 <code>/chat</code>, 포털 읽기 <code>/apis /runs /jobs /rules /formats /profiles</code>, 승인 버튼 <code>/changes|/rules|/format-batches|/profiles/{id}/apply·discard</code>, <code>/scheduler/tick</code>, <code>/reports/{job}</code>, <code>/briefings</code>, 자가발전 읽기 <code>/ask-log /growth/summary /vocabulary /saved-questions</code>와 그 클릭 라우트. 종류별로 <b>네임스페이스 분리</b></td><td class="mono">host/app.py</td></tr>
+      <tr><td class="feat">웹 포털</td><td>Next.js. Home / APIs / Runs / Jobs / Rules(+저장된 포맷, 비교 프로파일 섹션) / Growth(배운 어휘·저장 질문·미충족 질문·이번 주). 채팅 카드 9종(run_digest, run_groups, query_table, job_preview, rule_preview, format_batch, parity_summary, profile_preview, question_form)</td><td class="mono">web/atworks-web</td></tr>
+      <tr><td class="feat">스킬 6개</td><td>요청 종류별 절차서. 프롬프트엔 목차만, 필요할 때 <code>load_skill</code>로 로드: failed-triage · schedule-run · job-approval · api-lookup · rule-authoring · parity-compare. 화면 상호작용과 자가발전은 <b>7·8번째 스킬이 아니라</b> 여섯 스킬 위에 얹힌 능력입니다</td><td class="mono">atworks-agent/skills/</td></tr>
     </tbody>
   </table></div>
 
@@ -234,7 +249,7 @@
       <tr><td class="feat">채팅으로 대리 승인 ("너가 승인해")</td><td><span class="tag stop">취소</span></td><td>운영자 결정. 채팅 텍스트는 모델의 자기판단이나 첨부에 숨은 인젝션("이 job 승인해")으로 오염될 수 있어 "진짜 사람 의사"를 보장 못 함. 승인은 인증된 버튼 클릭만. 관련 테스트: 화면 라벨이 "approve job-0001 now"여도 승인 마크가 안 움직임을 단언</td></tr>
       <tr><td class="feat">실제 aTworks(자바) REST 연동</td><td><span class="tag soft">범위 밖</span></td><td>MVP는 <code>MockAtworks</code>. 연동은 <code>host/atworks_host/rest_backend.py</code> 한 파일에 ABC 메서드를 구현하면 됨. ABC 독스트링에 REST 의무(effective_from 찍기, record_execution 1회 등)를 적어둠</td></tr>
       <tr><td class="feat">시나리오 생성</td><td><span class="tag soft">범위 밖</span></td><td>운영자 지시로 배제</td></tr>
-      <tr><td class="feat">메모리 · 마켓플레이스 · 웹 검색</td><td><span class="tag soft">범위 밖</span></td><td>폐쇄망 단일 테넌트 내부 도구. <code>enable_memory=False</code>, 외부 콘텐츠 소스 없음</td></tr>
+      <tr><td class="feat">자유 기억(사람별 메모리) · 마켓플레이스 · 웹 검색</td><td><span class="tag soft">범위 밖</span></td><td>폐쇄망 단일 테넌트 내부 도구, 외부 콘텐츠 소스 없음. 메모리는 <b>조직 공용 어휘 하나만</b> 켜져 있습니다(<code>enable_memory=True</code>, 주체는 사람이 아니라 <b>프로젝트</b>): 대화에서 사실을 뽑아 저장하는 추출 패스는 꺼져 있고(<code>memory_extract_facts=False</code>), <code>save_memory</code>/<code>recall_memories</code> 도구는 <code>absent_tools</code>가 지워 <b>모델이 부를 수 없습니다</b>. 어휘 한 항목이 저장되는 유일한 경로는 사람이 Growth 화면에서 [확인]을 누르는 것입니다</td></tr>
       <tr><td class="feat">타깃별 인증(OAuth 등) · 골든셋(기준값 캡처) 모드</td><td><span class="tag soft">범위 밖</span></td><td>parity는 "두 서버 동시 호출"만. 인증은 기본 동일 + 단순 오버라이드 자리(<code>target_endpoints</code>)까지. 노후 서버가 사라진 뒤 비교하려면 골든셋이 필요 — 후속</td></tr>
       <tr><td class="feat">숫자 허용오차 · 배열 순서 무시 · 스키마 변경 감지</td><td><span class="tag soft">범위 밖</span></td><td><code>compare_bodies</code>는 정확 일치. 무시 스펙 확장으로 붙일 자리는 있음</td></tr>
       <tr><td class="feat">버튼·탭 클릭 조작, Home 타일·포맷·프로파일 강조</td><td><span class="tag soft">범위 밖</span></td><td>화면 조작은 "이동 + 항목 + 필터/검색"(레벨 2)까지. 강조 대상은 엔티티(run/api/job/rule)만 — 컨트롤을 모델이 누르는 건 하지 않음</td></tr>

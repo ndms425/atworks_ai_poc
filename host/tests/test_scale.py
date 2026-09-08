@@ -104,12 +104,35 @@ SLO_ASSERT: dict[str, bool] = {
     #     help (352ms vs 187ms). `query_sql.batched_samples` is that rule, and a test asserts the
     #     two forms return identical id lists on eleven dimension shapes.
     #
-    # Measured on the reduced set after both, all five inside 300ms:
-    "query_runs path_segment_2 (non_pass)": True,              # 106ms (was 164 / 177)
-    "query_runs method x target_env": True,                    # 164ms (was 264 / 294)
-    "query_runs failed_rule (key arm)": True,                  # 161ms (was 295 / 566)
-    "query_runs executed_by x api (runs arm)": True,           # 236ms (was 630 / 734)
-    "query_runs compare_previous_window (rollup arm)": True,   # 30ms
+    # Measured on the reduced set after both, all five inside 300ms -- which is the set this
+    # module generates and therefore the set these switches govern:
+    "query_runs path_segment_2 (non_pass)": True,              # 90ms  (was 164 / 177)
+    "query_runs method x target_env": True,                    # 130ms (was 264 / 294)
+    "query_runs failed_rule (key arm)": True,                  # 134ms (was 295 / 566)
+    "query_runs executed_by x api (runs arm)": True,           # 33ms  (was 630 / 734)
+    "query_runs compare_previous_window (rollup arm)": True,   # 24ms
+    #
+    # HONESTLY: three of those five BREACH on the 450k-run mid set (90 days x 20k APIs), and that
+    # is written here rather than left for someone to rediscover -- path_segment_2 426ms,
+    # method x target_env 587ms, failed_rule 383ms. The engine has never been measured at the
+    # 2M-run full size at all; the scale branch's numbers predate `query_runs`. The split, on mid:
+    #
+    #   row                aggregation   sample fill
+    #   path_segment_2         206ms        260ms
+    #   method x target_env    199ms        392ms
+    #   failed_rule (key)      0.5ms        457ms
+    #
+    # So there are TWO follow-ups, not one, and neither is "widen `slo_query_ms`":
+    # (a) The evidence fill dominates every row, and the batched/row-by-row rule above is still
+    #     the better of the two shapes at this size (forcing either one is worse on mid too --
+    #     measured). It is the WINDOW that costs: a per-row `ORDER BY executed_at DESC LIMIT 5`
+    #     over 30 days walks far when a group's runs are sparse. The named fix is to fill from
+    #     the NEWEST day partitions first and widen only for a group that came up short of five.
+    # (b) A cell-axis GROUP BY that keys on an `apis` column joins 20k catalogue rows against the
+    #     window's rollup rows. The named fix is the same transposition `rollup_key_day` already
+    #     is, for path segments: a `rollup_segment_day`.
+    # Both are sized and measured work of their own, with their own review; recorded in the final
+    # fix wave report with this profile.
     "simulate_rule (30d, amount)": True,
     "insights.build (deterministic)": True,
     "briefing.generate": True,

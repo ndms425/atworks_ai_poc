@@ -363,8 +363,21 @@ def main(argv: list[str] | None = None) -> int:
                              "partition). Default --no-mutate copies scale.sqlite for that probe.")
     parser.add_argument("--no-mutate", dest="mutate", action="store_false",
                         help=argparse.SUPPRESS)
+    parser.add_argument("--i-know-this-destroys-the-dataset", dest="confirmed",
+                        action="store_true",
+                        help="required with --mutate. The retention probe ages out a day "
+                             "partition IN PLACE, and the file is a generated dataset the other "
+                             "18 rows are measured against -- once its hot partition has moved, "
+                             "every later run of this bench measures a different set.")
     parser.set_defaults(mutate=False)
     args = parser.parse_args(argv)
+    if args.mutate and not args.confirmed:
+        # An earlier run emptied `mid` and `reduced` this way and nobody noticed until three
+        # bench rows read suspiciously fast on an empty window. The flag is not a warning to
+        # read, it is a second flag to type.
+        parser.error("--mutate rewrites the dataset in place (the retention probe moves a day "
+                     "partition into the cold table). Regenerating it takes minutes. Pass "
+                     "--i-know-this-destroys-the-dataset as well if that is really what you want.")
     dataset = Path(args.db)
     if dataset.is_file():
         dataset = dataset.parent
