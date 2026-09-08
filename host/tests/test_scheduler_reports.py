@@ -6,9 +6,11 @@ import pytest
 
 from atworks_agent import (
     ActorKind,
+    AskEntry,
     AtworksAgentConfig,
     AtworksBackend,
     AtworksSessionContext,
+    GrowthSummary,
     JobDraft,
     JobKind,
     JobSchedule,
@@ -187,6 +189,7 @@ class RecordingBackend(AtworksBackend):
         self.job = job
         self.run = run
         self.calls: list[str] = []
+        self.asks: list[AskEntry] = []
 
     async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
                           path_prefix=None):
@@ -244,6 +247,18 @@ class RecordingBackend(AtworksBackend):
 
     async def append_audit(self, session, action, target_kind, target_id):
         raise NotImplementedError
+
+    # ask_log (self-growth spec §6): the scheduler path never writes one -- no chat turn, no
+    # question. An in-memory list so a test can assert exactly that: it stays empty.
+    async def record_ask(self, session, entry):
+        self.asks.append(entry)
+        return entry
+
+    async def list_asks(self, session, outcome=None, cursor=None, limit=50):
+        return Page[AskEntry](items=list(self.asks), next_cursor=None, total=len(self.asks))
+
+    async def growth_summary(self, session, since):
+        return GrowthSummary(asks_total=len(self.asks))
 
     async def active_jobs(self, session):
         self.calls.append("active_jobs")

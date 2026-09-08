@@ -6,6 +6,7 @@ from typing import Any
 from .rules import FormatDefinition, ValidationRule
 from .types import (
     ApiSpec,
+    AskEntry,
     AuditEntry,
     ComparisonProfile,
     FailedRank,
@@ -72,6 +73,12 @@ def rule_recommendation_record(rec: RuleRecommendation) -> dict[str, Any]:
 
 def audit_record(entry: AuditEntry) -> dict[str, Any]:
     """감사 로그 1행. append-only 원장의 읽기 모양 — 파생 필드도 별칭도 없다."""
+    return entry.model_dump(mode="json")
+
+
+def ask_record(entry: AskEntry) -> dict[str, Any]:
+    """ask_log 1행. ``question``은 저장 시점에 이미 마스킹된 요약이라 여기서 더 손대지 않는다 --
+    한 번 더 마스킹하면 규칙이 바뀐 뒤 같은 행이 날마다 다르게 읽힌다. 파생 필드도 별칭도 없다."""
     return entry.model_dump(mode="json")
 
 

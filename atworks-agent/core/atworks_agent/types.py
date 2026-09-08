@@ -808,6 +808,13 @@ class AtworksSessionState(BaseModel):
     # The turn id the runtime stamps on this turn (set by Task 4's stream_turn); the query_table
     # card carries it so a 👍/👎 on the card can be matched back to the ask_log row.
     current_turn_id: str | None = None
+    # -- 이번 턴 스크래치 (ask_log 분류의 입력) --------------------------------------
+    # stream_turn이 턴 시작마다 비우고, executor가 채운다. `exclude=True`는 필수다: 이 셋은
+    # 턴 안에서만 의미가 있는데 세션 문서에 실리면 매 턴 문서가 달라져 compare-and-set 쓰기가
+    # 불필요하게 일어나고, 재접속한 세션이 남의 턴 도구 목록을 안고 시작한다.
+    turn_tool_names: list[str] = Field(default_factory=list, exclude=True)
+    turn_cards: int = Field(default=0, exclude=True)
+    turn_unmet: tuple[UnmetReason, str, str] | None = Field(default=None, exclude=True)
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)

@@ -40,6 +40,7 @@ from atworks_agent import (
     AggregateQuery,
     ApiSpec,
     ApiWatermark,
+    AskEntry,
     AuditEntry,
     CellKey,
     CellKeyLevel,
@@ -294,6 +295,34 @@ CREATE TABLE IF NOT EXISTS audit_log (
     session_id TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at_seq ON audit_log(at, seq);
+
+-- One row per CHAT TURN (self-growth spec §6): what was asked (masked, ≤300 chars), what the
+-- deterministic classifier made of it, and — when the turn ran one — the QuerySpec behind it.
+-- `turn_id` is UNIQUE so the turn-end hook is idempotent: a retry, or a hook that fires twice
+-- because a stream both raised and completed, writes one row, never two. `question` is a SUMMARY,
+-- never the raw message: masking happens before the value reaches this table, and a REST
+-- implementation must do the same (see AtworksBackend.record_ask).
+CREATE TABLE IF NOT EXISTS ask_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    role TEXT,
+    question TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    spec_json TEXT,
+    outcome TEXT NOT NULL,
+    unmet_reason TEXT,
+    wanted TEXT,
+    tool_calls INTEGER NOT NULL DEFAULT 0,
+    cards INTEGER NOT NULL DEFAULT 0,
+    feedback TEXT,
+    cluster_key TEXT NOT NULL,
+    turn_id TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_ask_log_at ON ask_log(at DESC, seq DESC);
+CREATE INDEX IF NOT EXISTS idx_ask_log_cluster_at ON ask_log(cluster_key, at);
+CREATE INDEX IF NOT EXISTS idx_ask_log_outcome_at ON ask_log(outcome, at);
 
 -- One row per retention STEP per local day (spec §3/§6): `partition_key` is `<step>:<YYYY-MM-DD>`
 -- (plus the `daily:<YYYY-MM-DD>` guard row that makes the tick-tail job run once a day), and
@@ -2347,3 +2376,130 @@ class Store:
         # numerically, not lexicographically (mirrors the pre-SQL _page() key).
         next_cursor = encode_cursor(items[-1].at, f"{items[-1].seq:020d}") if len(rows) > limit else None
         return Page(items=items, next_cursor=next_cursor, total=total)
+
+    # -- ask_log (자가발전 spec §6: 한 턴 = 한 행) ------------------------------------------
+
+    @staticmethod
+    def _row_to_ask(row: sqlite3.Row) -> AskEntry:
+        spec_json = row["spec_json"]
+        return AskEntry(
+            seq=row["seq"], at=_parse_iso(row["at"]), session_id=row["session_id"],
+            operator=row["operator"], role=row["role"], question=row["question"],
+            intent=row["intent"], spec=QuerySpec.model_validate_json(spec_json) if spec_json else None,
+            outcome=row["outcome"], unmet_reason=row["unmet_reason"], wanted=row["wanted"],
+            tool_calls=row["tool_calls"], cards=row["cards"], feedback=row["feedback"],
+            cluster_key=row["cluster_key"], turn_id=row["turn_id"],
+        )
+
+    def insert_ask(self, entry: AskEntry) -> AskEntry:
+        """One ask_log row, idempotent on ``turn_id``. ``INSERT OR IGNORE`` (not a plain INSERT)
+        because the turn-end hook is best-effort and may fire more than once for one turn -- a
+        retry must not turn one question into two rows in the counts the Growth view publishes.
+        The already-stored row wins and is returned as is: it was written by the same
+        deterministic classifier, and re-writing it would let a retry silently change history."""
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO ask_log (at, session_id, operator, role, question, intent, spec_json, "
+            "outcome, unmet_reason, wanted, tool_calls, cards, feedback, cluster_key, turn_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (_iso(entry.at), entry.session_id, entry.operator, entry.role, entry.question, entry.intent,
+             entry.spec.model_dump_json() if entry.spec is not None else None, entry.outcome,
+             entry.unmet_reason, entry.wanted, entry.tool_calls, entry.cards, entry.feedback,
+             entry.cluster_key, entry.turn_id),
+        )
+        self._conn.commit()
+        if cur.rowcount == 0:
+            stored = self._conn.execute(
+                "SELECT * FROM ask_log WHERE turn_id = ?", (entry.turn_id,)).fetchone()
+            if stored is not None:
+                return self._row_to_ask(stored)
+        return entry.model_copy(update={"seq": cur.lastrowid})
+
+    def list_asks(self, outcome: str | None = None, cursor: str | None = None,
+                  limit: int = 50) -> Page[AskEntry]:
+        """Newest first, keyset over ``(at DESC, seq DESC)`` -- the same shape and the same cursor
+        codec as ``audit`` (spec §6's paged envelope). ``total`` is the count AFTER the outcome
+        filter and independent of ``limit``."""
+        clauses: list[str] = []
+        params: list = []
+        if outcome:
+            clauses.append("outcome = ?")
+            params.append(outcome)
+        total_sql = f"SELECT COUNT(*) FROM ask_log{' WHERE ' + ' AND '.join(clauses) if clauses else ''}"
+        total = self._conn.execute(total_sql, params).fetchone()[0]
+        keyset_params = list(params)
+        keyset = list(clauses)
+        if cursor:
+            after_dt, after_seq = decode_cursor(cursor)
+            keyset.append("(at < ? OR (at = ? AND seq < ?))")
+            keyset_params += [_iso(after_dt), _iso(after_dt), int(after_seq)]
+        where_sql = f"WHERE {' AND '.join(keyset)}" if keyset else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM ask_log {where_sql} ORDER BY at DESC, seq DESC LIMIT ?",
+            [*keyset_params, limit + 1],
+        ).fetchall()
+        items = [self._row_to_ask(r) for r in rows[:limit]]
+        # seq zero-padded to a fixed width so the tie-break sorts numerically, not
+        # lexicographically -- identical to `audit` above.
+        next_cursor = encode_cursor(items[-1].at, f"{items[-1].seq:020d}") if len(rows) > limit else None
+        return Page(items=items, next_cursor=next_cursor, total=total)
+
+    def ask_counts(self, since: datetime) -> dict[str, int]:
+        """The Growth view's "이번 주" tile, as COUNTs -- never a list the caller then counts.
+        Always carries every key (0 when nothing matched), so the caller never has to guess
+        whether a missing key means zero or means the query failed."""
+        counts = {"total": 0, "answered": 0, "partial": 0, "unmet": 0, "action": 0, "up": 0, "down": 0}
+        for row in self._conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM ask_log WHERE at >= ? GROUP BY outcome", (_iso(since),)
+        ).fetchall():
+            counts["total"] += row["n"]
+            if row["outcome"] in counts:
+                counts[row["outcome"]] = row["n"]
+        for row in self._conn.execute(
+            "SELECT feedback, COUNT(*) AS n FROM ask_log WHERE at >= ? AND feedback IS NOT NULL "
+            "GROUP BY feedback", (_iso(since),)
+        ).fetchall():
+            if row["feedback"] in counts:
+                counts[row["feedback"]] = row["n"]
+        return counts
+
+    def unmet_clusters(self, since: datetime, limit: int = 20) -> list[dict[str, Any]]:
+        """The "미충족 질문" tab: one row per cluster, biggest first, with ONE example -- the
+        cluster's newest masked question summary. The example is a stored `question` value, which
+        was masked before it ever reached this table, so nothing here re-exposes a raw message."""
+        rows = self._conn.execute(
+            "SELECT cluster_key, COUNT(*) AS n, MAX(at) AS last_at FROM ask_log "
+            "WHERE outcome = 'unmet' AND at >= ? GROUP BY cluster_key ORDER BY n DESC, last_at DESC LIMIT ?",
+            (_iso(since), limit),
+        ).fetchall()
+        clusters: list[dict[str, Any]] = []
+        for row in rows:
+            newest = self._conn.execute(
+                "SELECT question, unmet_reason, wanted FROM ask_log WHERE cluster_key = ? AND at >= ? "
+                "ORDER BY at DESC, seq DESC LIMIT 1", (row["cluster_key"], _iso(since)),
+            ).fetchone()
+            clusters.append({
+                "cluster_key": row["cluster_key"],
+                "reason": newest["unmet_reason"] if newest is not None else None,
+                "count": row["n"],
+                "last_at": _parse_iso(row["last_at"]).isoformat(),
+                "example": newest["question"] if newest is not None else "",
+                "wanted": newest["wanted"] if newest is not None else None,
+            })
+        return clusters
+
+    def set_feedback(self, turn_id: str, vote: str | None) -> bool:
+        """👍/👎 on a card's footer (spec §9). Re-voting the same turn OVERWRITES; ``None`` clears
+        it. False means no row carries that ``turn_id`` -- the caller answers 404 rather than
+        silently accepting a vote nothing recorded."""
+        cur = self._conn.execute(
+            "UPDATE ask_log SET feedback = ? WHERE turn_id = ?", (vote, turn_id))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def delete_asks_before(self, cutoff: datetime) -> int:
+        """The ask_log retention step (`ask_log_retention_days`, default 365). The ONLY deleter of
+        these rows; every other growth table is permanent."""
+        with self._transaction():
+            deleted = self._conn.execute(
+                "DELETE FROM ask_log WHERE at < ?", (_iso(cutoff),)).rowcount
+        return deleted

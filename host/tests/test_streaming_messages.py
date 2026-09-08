@@ -16,7 +16,7 @@ def test_credential_messages_do_not_mention_the_dead_sentinel():
 
 def test_credential_messages_name_a_real_anthropic_env_var():
     text = _source()
-    _, _, after_auth = text.partition("except anthropic.AuthenticationError:")
+    _, _, after_auth = text.partition("except anthropic.AuthenticationError")
     auth_block, _, after_generic = after_auth.partition("except Exception")
     generic_block = after_generic.split("def ", 1)[0]
     for block in (auth_block, generic_block):

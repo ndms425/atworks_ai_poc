@@ -1223,3 +1223,73 @@ async def test_query_runs_is_absent_when_the_feature_is_off(backend, skills, ses
     off = AtworksAgentConfig(model="m", enable_query_runs=False)
     out = await _exec(backend, off, skills, session, state).execute("query_runs", {"measures": ["runs"]})
     assert state.last_query_result is None and "query_runs" in out.result_text
+
+
+# -- note_unmet_ask + the per-turn counters ask_log classifies from (Task 4, spec §5/§6) ------
+
+async def test_note_unmet_ask_records_the_triple_and_draws_no_card(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute("note_unmet_ask", {
+        "reason": "no_dimension", "summary": "요청 헤더별로 실패를 묶어달라",
+        "wanted": "요청 헤더 차원",
+    })
+    assert not out.refused and out.events == []
+    assert state.turn_unmet == ("no_dimension", "요청 헤더별로 실패를 묶어달라", "요청 헤더 차원")
+    assert "기록했습니다" in out.result_text
+
+
+async def test_note_unmet_ask_rejects_a_reason_outside_the_enum(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute("note_unmet_ask", {
+        "reason": "because_i_said_so", "summary": "…",
+    })
+    assert out.is_error and state.turn_unmet is None
+
+
+async def test_note_unmet_ask_needs_a_summary(backend, config, skills, session, state):
+    out = await _exec(backend, config, skills, session, state).execute("note_unmet_ask", {
+        "reason": "refused", "summary": "",
+    })
+    assert out.is_error and state.turn_unmet is None
+
+
+async def test_note_unmet_ask_truncates_summary_and_wanted_at_200(backend, config, skills, session, state):
+    await _exec(backend, config, skills, session, state).execute("note_unmet_ask", {
+        "reason": "no_evidence", "summary": "가" * 500, "wanted": "나" * 500,
+    })
+    reason, summary, wanted = state.turn_unmet
+    assert reason == "no_evidence" and len(summary) <= 200 and len(wanted) <= 200
+
+
+async def test_note_unmet_ask_is_absent_when_the_feature_is_off(backend, skills, session, state):
+    off = AtworksAgentConfig(model="m", enable_query_runs=False)
+    out = await _exec(backend, off, skills, session, state).execute("note_unmet_ask", {
+        "reason": "refused", "summary": "…",
+    })
+    assert state.turn_unmet is None and "note_unmet_ask" in out.result_text
+
+
+async def test_every_dispatch_appends_its_tool_name_in_call_order(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("search_apis", {"query": "contracts"})
+    await ex.execute("list_runs", {})
+    await ex.execute("nonexistent_tool", {})
+    # Even the unknown name is recorded: tool_calls counts what the turn ATTEMPTED, and a turn
+    # that spent its rounds on tools that do not exist is exactly what `partial` has to catch.
+    assert state.turn_tool_names == ["search_apis", "list_runs", "nonexistent_tool"]
+
+
+async def test_a_rendered_card_increments_turn_cards(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("list_runs", {})
+    out = await ex.execute("present_run_digest", {
+        "title": "실패", "items": [{"kind": "fail", "ref_id": "run-1", "headline": "amount 음수"}],
+    })
+    assert not out.refused and state.turn_cards == 1
+
+
+async def test_a_refused_card_does_not_increment_turn_cards(backend, config, skills, session, state):
+    # An ungrounded run id is refused by the presentation gate: the operator saw nothing, so the
+    # turn must not read as `answered`.
+    out = await _exec(backend, config, skills, session, state).execute("present_run_digest", {
+        "title": "실패", "items": [{"kind": "fail", "ref_id": "run-never-seen", "headline": "x"}],
+    })
+    assert out.refused and state.turn_cards == 0

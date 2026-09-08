@@ -454,3 +454,12 @@ def test_every_backend_subclass_implements_query_runs():
     assert MockAtworks in subclasses
     for subclass in subclasses:
         assert "query_runs" in vars(subclass), subclass.__name__
+
+
+def test_every_backend_subclass_implements_the_ask_log_methods():
+    """The same conformance rule for Task 4's three ABC additions: a double that silently
+    inherited an abstract stub would pass its own tests and fail the moment a real turn ended."""
+    for name in ("record_ask", "list_asks", "growth_summary"):
+        assert name in AtworksBackend.__abstractmethods__
+        for subclass in AtworksBackend.__subclasses__():
+            assert name in vars(subclass), f"{subclass.__name__} is missing {name}"

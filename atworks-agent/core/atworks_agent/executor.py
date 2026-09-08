@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, get_args
 
 from commerce_common.execution import BaseToolExecutor, Handler, clamp_limit, parse_argument
 from commerce_common.memory import MemoryRuntime
@@ -92,6 +92,7 @@ from .types import (
     RunResult,
     RunsQuery,
     RunStatus,
+    UnmetReason,
 )
 
 
@@ -101,6 +102,9 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
 
 
 RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
+# The four reasons note_unmet_ask accepts, read off the Literal so the tool schema, the executor's
+# validation and the ask_log column can never drift apart (self-growth spec §5/§6).
+UNMET_REASONS: tuple[str, ...] = get_args(UnmetReason)
 # Groups asked of one aggregate_runs call. Comfortably above the card's own max_group_items*2, so
 # the envelope's `more` is exact for any ordinary result, and each returned group costs at most
 # one bounded run_ids lookup in the backend.
@@ -312,6 +316,11 @@ class AtworksToolExecutor(BaseToolExecutor):
             return ToolOutcome(self.displayed_text)
         outcome = await super()._present(spec, tool_input)
         if not outcome.refused:
+            # ask_log's "카드가 나왔나" (asklog.decide_outcome). Counted here, at the one place a
+            # component's `ui` event is born, so a refused or held presentation never counts as
+            # an answer -- the operator saw nothing.
+            if any(event.type == "ui" for event in outcome.events):
+                self._state.turn_cards += 1
             if spec.name == QUESTION_TOOL:
                 self._asked_form = True
             if spec.name == PREVIEW_TOOL:
@@ -321,6 +330,11 @@ class AtworksToolExecutor(BaseToolExecutor):
         return outcome
 
     async def dispatch(self, name: str, tool_input: dict[str, Any]) -> ToolOutcome:
+        # Every tool this turn calls, in call order, at the ONE place every path (execute, a
+        # host prefetch, a parallel gather) funnels through. asklog.classify_turn reads nothing
+        # else to decide the turn's outcome and intent, so a name recorded anywhere but here
+        # would be a second, drifting source of truth.
+        self._state.turn_tool_names.append(name)
         if name in (
             "stage_job", "apply_job", "stage_rule", "apply_rule", "stage_profile", "apply_profile",
         ) and self._asked_form and name not in self._absent:
@@ -359,6 +373,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "apply_profile": self._apply_profile,
             "discard_profile": self._discard_profile,
             "recommend_ignore_paths": self._recommend_ignore_paths,
+            "note_unmet_ask": self._note_unmet_ask,
         }
 
     # -- 읽기 -------------------------------------------------------------------------
@@ -941,6 +956,29 @@ class AtworksToolExecutor(BaseToolExecutor):
         )
         self._state.remember_profile(discarded)
         return ToolOutcome(f"Discarded {profile_id}.", [AgentEvent.change_update(profile_record(discarded))])
+
+    async def _note_unmet_ask(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        """"카탈로그로는 못 답한다"를 모델이 신고하는 유일한 경로(자가발전 spec §5). 백엔드를
+        부르지 않고 카드도 내지 않는다 -- 이 턴의 스크래치에 삼중항을 남기면, 턴이 끝날 때
+        호스트 훅이 ``asklog.classify_turn``으로 ``unmet`` 행 하나를 쓴다. 그 행이 §8의 승격기와
+        Growth 뷰의 "미충족 질문"이 읽는 유일한 재료다.
+
+        모델이 스스로 outcome을 정하는 것처럼 보이지만 아니다: 이 도구는 신고일 뿐이고, 행의
+        outcome·intent·cluster_key는 결정론 규칙이 낸다(스테이징 도구가 같이 돌았다면 그 턴은
+        ``unmet``이 아니라 ``action``이 된다)."""
+        reason = str(tool_input.get("reason", ""))
+        if reason not in UNMET_REASONS:
+            return ToolOutcome.error(
+                f"reason must be one of {', '.join(UNMET_REASONS)}; adjust and call again."
+            )
+        summary = self._sanitize(tool_input.get("summary"), 200)
+        if not summary:
+            return ToolOutcome.error("summary must say, in one line, what was asked; add it and call again.")
+        wanted = self._sanitize(tool_input.get("wanted"), 200)
+        self._state.turn_unmet = (reason, summary, wanted)
+        return ToolOutcome(
+            "기록했습니다 — 이 질문은 미충족으로 남고, 무엇이 있으면 답할 수 있는지 한 문장으로 설명하세요."
+        )
 
     async def _recommend_ignore_paths(self, tool_input: dict[str, Any]) -> ToolOutcome:
         """Read-only: ranks the parity report's noise clusters biggest-first so the model can

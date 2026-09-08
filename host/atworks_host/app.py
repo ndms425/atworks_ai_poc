@@ -9,21 +9,26 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar
+from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from atworks_agent import (
+    AskOutcome,
     AttachedItem,
     AtworksSessionContext,
     AtworksSessionState,
     RunsQuery,
     RunStatusFilter,
     ScreenState,
+    classify_turn,
+    policy_from_config,
 )
 from atworks_agent.serialization import (
     api_record,
+    ask_record,
     audit_record,
     format_batch_record,
     format_record,
@@ -191,13 +196,68 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     async def operators() -> dict:
         return {"operators": [p.model_dump(mode="json") for p in await backend.list_operators(None)]}
 
+    def _require_growth() -> None:
+        if not agent.config.enable_growth:
+            raise HTTPException(status_code=404, detail="growth view disabled")
+
+    async def record_ask(record: Record, turn_id: str, failure: BaseException | None,
+                         message: str) -> None:
+        """The turn-end hook (self-growth spec §6): ONE ask_log row per chat turn, written from
+        the per-turn counters the executor filled, classified by `asklog.classify_turn` — a pure
+        function of what the turn actually called. The model never writes this row and never sees
+        it; `note_unmet_ask` only leaves a triple in session scratch for the classifier to read.
+
+        A turn that raised still leaves its row (`failure` is logged, not raised): the questions
+        that break a turn are exactly the ones the Growth view must show. The row is written even
+        when the model answered from prose alone — that is what `partial` means."""
+        del failure   # already logged by stream_turn; the row itself records what the turn did
+        state = record.state
+        spec = (state.last_query_result.spec
+                if state.last_query_result is not None
+                and state.last_query_result.turn_id == turn_id else None)
+        entry = classify_turn(
+            question=message, tool_names=list(state.turn_tool_names), cards=state.turn_cards,
+            unmet=state.turn_unmet, spec=spec, policy=policy_from_config(agent.config),
+            session=context(record), turn_id=turn_id, now=datetime.now().astimezone(),
+        )
+        await backend.record_ask(context(record), entry)
+
     @router.post("/chat")
     async def chat(request: ChatRequest, record: CurrentSession) -> StreamingResponse:
         append_user_turn(record, request.message, "Portal events")
+        turn_id = uuid4().hex
+        message = request.message
+
+        async def on_turn_end(rec: Record, tid: str, failure: BaseException | None) -> None:
+            if agent.config.enable_growth:
+                await record_ask(rec, tid, failure, message)
+
         return stream_turn(
             agent, sessions, record, context(record), env_hint=".env",
             attached_items=request.attached_items, screen_state=request.screen_state,
+            turn_id=turn_id, on_turn_end=on_turn_end,
         )
+
+    # -- 자가발전: 질문 기록과 성장 요약 (spec §6/§10) ------------------------------------
+    # Both are read-only and gated on `enable_growth` — off, they 404 like the insight panel,
+    # so a deployment that does not want the Growth view exposes no part of it.
+    @router.get("/ask-log")
+    async def ask_log(record: CurrentSession, outcome: AskOutcome | None = None,
+                      cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
+        """질문 기록(최신순, keyset 커서). 저장된 question은 이미 마스킹된 요약이다."""
+        _require_growth()
+        page = await _paged(
+            backend.list_asks(context(record), outcome=outcome, cursor=cursor, limit=limit))
+        return {"items": [ask_record(e) for e in page.items], "next_cursor": page.next_cursor,
+                "total": page.total}
+
+    @router.get("/growth/summary")
+    async def growth_summary(record: CurrentSession, days: int = Query(7, ge=1, le=365)) -> dict:
+        """Growth 뷰 '이번 주' 타일 — 전부 COUNT다."""
+        _require_growth()
+        since = datetime.now(UTC) - timedelta(days=days)
+        summary = await backend.growth_summary(context(record), since=since)
+        return {**summary.model_dump(mode="json"), "window_days": days}
 
     # Every list route answers in ONE shape: the paged envelope {items, next_cursor, total}
     # (Task 10 — the legacy `apis` / `runs` + `population` keys are gone, and the 500-row default

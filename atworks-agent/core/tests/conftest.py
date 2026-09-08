@@ -17,9 +17,11 @@ from atworks_agent.types import (
     ActorKind,
     ApiSpec,
     ApiWatermark,
+    AskEntry,
     AtworksSessionContext,
     AtworksSessionState,
     AuditEntry,
+    GrowthSummary,
     Page,
     QueryResult,
     QueryRow,
@@ -114,6 +116,7 @@ class InMemoryBackend(AtworksBackend):
             RunResult(run_id="run-3", api_id="api-1", executed_at=T0 + timedelta(minutes=9), target_env="dev", status=RunStatus.PASS, http_status=200),
         ]
         self.executed: list[str] = []
+        self.asks: list[AskEntry] = []
 
     async def search_apis(self, session, query="", group=None, updated_after=None, cursor=None, limit=20,
                           path_prefix=None):
@@ -325,6 +328,30 @@ class InMemoryBackend(AtworksBackend):
 
     async def append_audit(self, session, action, target_kind, target_id):
         return None
+
+    # -- ask_log (self-growth spec §6). An in-memory list, idempotent on turn_id like the Store.
+    async def record_ask(self, session, entry):
+        if any(e.turn_id == entry.turn_id for e in self.asks):
+            return next(e for e in self.asks if e.turn_id == entry.turn_id)
+        stored = entry.model_copy(update={"seq": len(self.asks) + 1})
+        self.asks.append(stored)
+        return stored
+
+    async def list_asks(self, session, outcome=None, cursor=None, limit=50):
+        items = [e for e in self.asks if outcome is None or e.outcome == outcome]
+        items = sorted(items, key=lambda e: (e.at, e.seq or 0), reverse=True)
+        return Page[AskEntry](items=items[:limit], next_cursor=None, total=len(items))
+
+    async def growth_summary(self, session, since):
+        window = [e for e in self.asks if e.at >= since]
+        return GrowthSummary(
+            asks_total=len(window),
+            answered=sum(1 for e in window if e.outcome == "answered"),
+            partial=sum(1 for e in window if e.outcome == "partial"),
+            unmet=sum(1 for e in window if e.outcome == "unmet"),
+            up=sum(1 for e in window if e.feedback == "up"),
+            down=sum(1 for e in window if e.feedback == "down"),
+        )
 
     async def stage_job(self, session, draft: JobDraft, actor_kind: ActorKind):
         return self.ledger.stage(draft, actor=session.operator, actor_kind=actor_kind)

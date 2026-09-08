@@ -7,7 +7,7 @@ from atworks_agent.tools.registry import build_tools
 from atworks_agent.types import Dimension, Measure, QueryFilters, QuerySpec
 
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
-            "query_runs",
+            "query_runs", "note_unmet_ask",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
             "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
             "find_apis_with_param", "recommend_rules_for_api",

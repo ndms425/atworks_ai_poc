@@ -15,11 +15,14 @@ from .types import (
     AggregateQuery,
     ApiSpec,
     ApiWatermark,
+    AskEntry,
+    AskOutcome,
     AtworksSessionContext,
     AuditEntry,
     CellState,
     ComparisonProfile,
     FormatBatch,
+    GrowthSummary,
     Insights,
     JobSpec,
     OperatorProfile,
@@ -451,6 +454,39 @@ class AtworksBackend(ABC):
         self, session: AtworksSessionContext, action: str, target_kind: str, target_id: str
     ) -> None:
         """감사 로그에 한 행을 남긴다(append-only) — seq는 구현이 전역 순서로 부여한다."""
+
+    # -- 질문 기록 ask_log (자가발전 spec §6: 한 턴 = 한 행) --------------------------------
+    @abstractmethod
+    async def record_ask(self, session: AtworksSessionContext, entry: AskEntry) -> AskEntry:
+        """턴 하나의 기록을 남긴다. 호스트의 턴 종료 훅만 부른다 — 모델이 닿는 도구는 없다.
+
+        REST 구현 의무(자가발전 spec §6):
+        * **``turn_id``에 대해 멱등**이어야 한다(UNIQUE + 무시하는 삽입). 훅은 best-effort라 한
+          턴에 두 번 불릴 수 있고, 그때 행이 둘이 되면 Growth 뷰가 세는 모든 비율이 틀어진다.
+          이미 있는 행이 이기고 그대로 돌아온다 — 재시도가 과거를 바꾸지 못한다.
+        * ``entry.question``은 **마스킹된 요약**(≤300자)이다. 원문 메시지를 저장해서는 안 된다:
+          이 테이블은 대화 보관소가 아니라 "무엇을 물었나"의 집계 재료이고, 여기 담긴 예시는
+          Growth 뷰가 그대로 화면에 보여준다.
+        * ``outcome``/``intent``/``cluster_key``를 다시 계산하지 않는다. 그 셋은 호스트의
+          결정론 분류기(``asklog.classify_turn``)가 이미 정했다 — 백엔드가 제 나름으로 다시
+          매기면 같은 턴이 저장소마다 다르게 분류된다."""
+
+    @abstractmethod
+    async def list_asks(
+        self, session: AtworksSessionContext, outcome: AskOutcome | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[AskEntry]:
+        """질문 기록을 최신순으로 읽는다. REST 구현 의무: ``at`` DESC, ``seq`` DESC 순서,
+        ``cursor``는 서버가 만든 불투명 문자열, ``Page.total``은 ``outcome`` 필터를 적용한 뒤의
+        건수이고 ``limit``과 무관하다."""
+
+    @abstractmethod
+    async def growth_summary(
+        self, session: AtworksSessionContext, since: datetime
+    ) -> GrowthSummary:
+        """Growth 뷰 '이번 주' 타일. REST 구현 의무: 전부 **COUNT 질의**로 답한다 — 행 목록을
+        받아 애플리케이션에서 세면 안 된다(그 목록엔 상한이 있고, 상한은 곧 틀린 비율이다).
+        ``unmet_clusters``의 예시는 저장된 마스킹 요약 그대로다."""
 
     # -- 실행 (스케줄러가 부른다, LLM 경로 아님) ------------------------------------------
     @abstractmethod

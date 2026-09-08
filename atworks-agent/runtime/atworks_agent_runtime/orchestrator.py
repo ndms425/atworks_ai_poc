@@ -138,13 +138,25 @@ class AtworksAgent:
         state: AtworksSessionState | None = None,
         attached_items: Sequence[AttachedItem] = (),
         screen_state: ScreenState | None = None,
+        turn_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run one turn. ``messages`` ends with the operator's message and is extended
         in place with the turn's assistant messages, tool results, and any reminder, so
         the host stores it as is; ``state`` carries the session's provenance and comes
-        back on every turn."""
+        back on every turn.
+
+        ``turn_id`` is the host's id for this turn (``app.py`` mints one per ``/chat``): the
+        query_table card carries it so a 👍/👎 finds its ask_log row, and the host's turn-end
+        hook reads the three per-turn counters reset just below to classify the turn."""
         state = state if state is not None else AtworksSessionState()
         state.current_screen = screen_state
+        # Per-turn scratch, cleared HERE and nowhere else — a turn must never be classified with
+        # the previous turn's tool names or card count, and a stream that dies mid-way must leave
+        # only what this turn actually did (asklog.classify_turn).
+        state.current_turn_id = turn_id
+        state.turn_tool_names = []
+        state.turn_cards = 0
+        state.turn_unmet = None
         turn_started = time.monotonic()
         usage = usage_totals()
         atworks_context = await fetched(self.backend.get_context(session))

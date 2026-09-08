@@ -14,6 +14,7 @@ from atworks_agent import (
     AggregateQuery,
     ApiSpec,
     ApiWatermark,
+    AskEntry,
     AtworksAgentConfig,
     AtworksBackend,
     AuditEntry,
@@ -24,6 +25,7 @@ from atworks_agent import (
     FormatBatchLedger,
     FormatDefinition,
     FormatLibrary,
+    GrowthSummary,
     Insights,
     JobDraft,
     JobLedger,
@@ -503,6 +505,29 @@ class MockAtworks(AtworksBackend):
 
     async def append_audit(self, session, action: str, target_kind: str, target_id: str) -> None:
         self._audit(session, action, target_kind, target_id)
+
+    # -- ask_log (자가발전 spec §6) --------------------------------------------------------
+
+    async def record_ask(self, session, entry: AskEntry) -> AskEntry:
+        # Idempotent on turn_id inside the Store (INSERT OR IGNORE): the host's turn-end hook is
+        # best-effort and may fire twice for one turn, and two rows would skew every ratio the
+        # Growth view publishes. Nothing is classified here — the entry arrives already decided.
+        return self.store.insert_ask(entry)
+
+    async def list_asks(self, session, outcome=None, cursor=None, limit=50) -> Page[AskEntry]:
+        return self.store.list_asks(outcome, cursor, limit)
+
+    async def growth_summary(self, session, since: datetime) -> GrowthSummary:
+        # COUNTs and one GROUP BY, never a row list this method then counts.
+        counts = self.store.ask_counts(since)
+        return GrowthSummary(
+            asks_total=counts["total"], answered=counts["answered"], partial=counts["partial"],
+            unmet=counts["unmet"], up=counts["up"], down=counts["down"],
+            # Vocabulary (§7) and saved questions (§8) land in Tasks 6/7; until then these two are
+            # honestly zero rather than a number invented from another table.
+            new_terms=0, new_saved=0,
+            unmet_clusters=self.store.unmet_clusters(since),
+        )
 
     def _audit(self, session, action: str, target_kind: str, target_id: str) -> None:
         """Append-only audit row (spec §2). Every `apply_*` below writes one the moment the

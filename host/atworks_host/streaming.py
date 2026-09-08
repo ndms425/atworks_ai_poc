@@ -92,6 +92,7 @@ class TurnAgent(Protocol):
         *,
         attached_items: Any = (),
         screen_state: Any = None,
+        turn_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]: ...
 
 
@@ -120,21 +121,32 @@ def stream_turn(
     env_hint: str,
     attached_items: Any = (),
     screen_state: Any = None,
+    turn_id: str | None = None,
+    on_turn_end: Callable[[SessionRecord[Any], str, BaseException | None], Awaitable[None]] | None = None,
 ) -> StreamingResponse:
     """Stream one turn as SSE; the record is written back once the stream has ended (the
     request dependency wrote back before it began). Credential failures become a readable
     error event naming ``env_hint`` (the repo-root ``.env`` path); anything else is logged
-    and reported generically."""
+    and reported generically.
+
+    ``on_turn_end(record, turn_id, failure)`` runs in the generator's ``finally`` — exactly once
+    per turn, whether the turn completed, raised, or was abandoned mid-stream, and before the
+    write-back task. It is the ask_log hook (self-growth spec §6); it is passed whatever the turn
+    raised so a failed turn is still recorded, and anything it raises itself is swallowed and
+    logged: a bookkeeping row must never be able to break a turn the operator already saw."""
 
     async def event_stream() -> AsyncIterator[str]:
+        failure: BaseException | None = None
         try:
             async for event in agent.stream_turn(
-                record.messages, session, record.state, attached_items=attached_items, screen_state=screen_state
+                record.messages, session, record.state, attached_items=attached_items,
+                screen_state=screen_state, turn_id=turn_id,
             ):
                 if event.type == "turn_complete" and event.data.get("results_cleared"):
                     record.stored_messages = 0  # earlier messages changed: rewrite the transcript
                 yield to_sse(event)
-        except anthropic.AuthenticationError:
+        except anthropic.AuthenticationError as error:
+            failure = error
             logger.exception("chat turn failed: API authentication")
             yield to_sse(
                 AgentEvent.error(
@@ -144,6 +156,7 @@ def stream_turn(
                 )
             )
         except Exception as error:  # the client gets a safe event, the log gets the rest
+            failure = error
             logger.exception("chat turn failed")
             described = str(error).lower()
             if any(word in described for word in ("authentication", "credential", "api_key")):
@@ -158,6 +171,14 @@ def stream_turn(
                 yield to_sse(
                     AgentEvent.error("Something went wrong on our side. Please try again.")
                 )
+        finally:
+            if on_turn_end is not None and turn_id is not None:
+                try:
+                    await on_turn_end(record, turn_id, failure)
+                except Exception:
+                    # Includes the RuntimeError an await raises when the client disconnected and
+                    # the generator is being closed: that turn simply leaves no row.
+                    logger.exception("turn-end hook failed; the turn is unaffected")
 
     def write_back() -> None:
         try:

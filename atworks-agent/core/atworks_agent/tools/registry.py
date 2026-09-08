@@ -219,6 +219,23 @@ def build_tools(
             "description": _query_runs_description(),
             "input_schema": _query_spec_schema(),
         },
+        {
+            "name": "note_unmet_ask",
+            "description": ("Call this BEFORE you explain, whenever the catalogue above cannot answer what was asked — a "
+                            "dimension that does not exist, evidence this deployment never recorded, a question outside "
+                            "API testing, or something you must refuse. It renders no card and reads nothing; it records "
+                            "the gap so the deployment can grow a dimension for it. Then answer in one sentence saying "
+                            "WHAT WOULD LET YOU ANSWER — ending on '지원하지 않습니다' is a rule violation. / 카탈로그로 "
+                            "답할 수 없다고 판단하면 설명하기 전에 부른다. 카드는 없다."),
+            "input_schema": {"type": "object", "properties": {
+                "reason": {"type": "string", "enum": ["no_dimension", "no_evidence", "out_of_scope", "refused"],
+                           "description": ("no_dimension: the grouping or filter is not in the catalogue. no_evidence: the "
+                                           "catalogue has it but this deployment recorded nothing to answer from. "
+                                           "out_of_scope: not an API-testing question. refused: answering would break a rule.")},
+                "summary": {"type": "string", "maxLength": 200, "description": "One line: what the operator asked. No values you were not shown."},
+                "wanted": {"type": "string", "maxLength": 200, "description": "One line: what dimension, filter or record WOULD have answered it."}},
+                "required": ["reason", "summary"], "additionalProperties": False},
+        },
         # -- 실행 계획 ------------------------------------------------------------------
         {
             "name": "get_pending_jobs",
