@@ -39,7 +39,11 @@ export interface ScreenState {
 
 /** `screen_navigate` directive payload. */
 export interface ScreenNavigatePayload {
-  view: PortalViewId;
+  /** `ScreenState.view`는 "growth"를 포함하지만(포털이 매 턴 지금 보고 있는 뷰를 보낸다), 이
+   *  **목적지**는 아니다: `navigate_screen`의 서버 쪽 스키마는 다섯 뷰만 받고, Growth의 행
+   *  종류(어휘 term·저장 질문 id)는 `ScreenTargetKind`에 아예 없다. 두 곳을 같은 넓은 타입으로
+   *  써 두면, 언젠가 여기로 "growth"가 들어와도 타입 검사기가 아무 말을 하지 않는다. */
+  view: Exclude<PortalViewId, "growth">;
   focus?: { kind: ScreenTargetKind; ref_id: string };
   filter?: ScreenFilter;
   note?: string;

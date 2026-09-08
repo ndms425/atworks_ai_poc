@@ -67,8 +67,21 @@ function HeadCell({ children, className = "" }: { children?: ReactNode; classNam
 
 // -- 배운 어휘 -------------------------------------------------------------------------
 
+/** [삭제]가 팔에 닿을 때까지의 시간 — 두 번째 클릭이 진짜 삭제가 되는 창. */
+const DELETE_ARM_MS = 4000;
+
 function VocabularyRow({ entry, busy, onAct }: { entry: VocabularyEntry; busy: boolean; onAct: (action: "confirm" | "reject" | "delete") => void }) {
   const status = VOCABULARY_STATUS[entry.status];
+  // [삭제]는 [거부] 바로 옆에 있는데 둘의 결과가 다르다: 거부는 되돌릴 수 있고(다시 확인),
+  // 삭제는 항과 그 사실(fact)이 함께 사라진다 — 잘못 누르면 되돌릴 화면이 없다. 그래서 한 번
+  // 누르면 "정말 삭제"로 팔이 서고, 두 번째 클릭만 실제로 보낸다. 4초 뒤 저절로 내려가므로
+  // 다른 행으로 옮겨 간 사이 팔이 계속 서 있지 않는다.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), DELETE_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [armed]);
   return (
     // data-ref는 화면 지시어 오버레이/포커스가 질의하는 앵커와 같은 형식으로 달아 둔다. 다만
     // 지시어 **대상 kind**는 이번 라운드에 넓히지 않는다(spec §10): `ScreenTargetKind`에 "vocab"은
@@ -99,8 +112,19 @@ function VocabularyRow({ entry, busy, onAct }: { entry: VocabularyEntry; busy: b
               거부
             </Button>
           ) : null}
-          <Button size="sm" disabled={busy} onClick={() => onAct("delete")}>
-            삭제
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              if (armed) {
+                setArmed(false);
+                onAct("delete");
+              } else {
+                setArmed(true);
+              }
+            }}
+          >
+            {armed ? "정말 삭제" : "삭제"}
           </Button>
         </span>
       </Cell>
@@ -217,7 +241,10 @@ function SavedRow({
           </div>
         </div>
         <span className="inline-flex gap-1.5">
-          <Button size="sm" disabled={running} onClick={onRun}>
+          {/* 숨긴 질문의 [실행]은 서버에서 언제나 404다(`POST /saved-questions/{id}/run`은 active만
+              돈다) — 누를 수 있게 두면 "질문을 실행하지 못했습니다"라는 거짓 고장으로 읽힌다.
+              복원이 먼저다. */}
+          <Button size="sm" disabled={running || question.status === "hidden"} onClick={onRun}>
             {running ? "실행 중…" : "실행"}
           </Button>
           <Button size="sm" onClick={onToggle}>
@@ -245,6 +272,13 @@ function SavedTab({ refreshKey }: { refreshKey: number }) {
   const load = useCallback((cursor: string | null) => fetchSavedQuestions(status, cursor), [status]);
   const page = usePagedList<SavedQuestion>(load, status, [refreshKey, seq]);
   const { data: summary } = useResource(() => fetchGrowthSummary(), [refreshKey]);
+
+  // 실행 결과는 **그때의 창으로 지금 계산된** 표다. 세그먼트를 바꾸거나 새로고침을 누르면
+  // 목록은 다시 읽히는데 표만 남아 있으면, 화면의 두 반쪽이 서로 다른 시점을 말한다.
+  useEffect(() => {
+    setResults({});
+    setError(null);
+  }, [refreshKey, status]);
 
   const onRun = async (savedId: string) => {
     setRunning(savedId);
@@ -372,7 +406,10 @@ function UnmetTab({ refreshKey, days, onDays }: { refreshKey: number; days: numb
         <Notice>기록에 남은 미충족 질문이 없습니다.</Notice>
       ) : (
         <>
-          <Panel title="미충족 질문 기록" subtitle={`${formatNumber(page.total)}건 · 최신순`}>
+          {/* 위 군집 표는 `days` 창을 쓰지만 이 기록은 `GET /ask-log?outcome=unmet` — 창 인자가
+              없는 전체 기간이다. 같은 화면에 "최근 7일" 옆에 창 없는 목록을 놓고 부제를 비워
+              두면, 7일이 이 표에도 걸린 것처럼 읽힌다. */}
+          <Panel title="미충족 질문 기록" subtitle={`${formatNumber(page.total)}건 · 전체 기간 · 최신순`}>
             <div className="panel-scroll overflow-x-auto px-[18px] pb-3">
               <table className="w-full border-collapse">
                 <thead>
@@ -438,17 +475,27 @@ function WeekTab({ refreshKey, days, onDays }: { refreshKey: number; days: numbe
   return (
     <div className="flex flex-col gap-3">
       <DaysPicker days={days} onDays={onDays} />
+      {/* 두 줄로 나눠 놓은 것은 취향이 아니라 `StatStrip`의 계약이다: 그 그리드는 4칸 한 줄을
+          전제로 테두리를 넣는다(xl에서 `[&>*+*]:border-l`, 그 아래에서 3번째부터 `border-t`).
+          8개를 한 스트립에 넣으면 xl에서 두 번째 줄에 가로줄이 없고 5번째 칸에 세로줄이 생겨
+          두 줄이 한 줄처럼 이어져 보인다. web-shared는 두 역할이 함께 쓰는 코드라 여기서
+          고치지 않는다 — 부르는 쪽이 4개씩 부른다. 나뉜 자리도 뜻이 있다: 위는 질문의 결말,
+          아래는 그 결과 시스템이 배운 것. */}
       <Panel title={`최근 ${windowDays}일`} subtitle="전부 서버가 센 건수입니다 (비율 없음)">
         <StatStrip>
           <StatTile label="질문 수" value={formatNumber(data.asks_total)} />
           <StatTile label="답변" value={formatNumber(data.answered)} />
           <StatTile label="부분" value={formatNumber(data.partial)} />
           <StatTile label="미충족" value={formatNumber(data.unmet)} />
-          <StatTile label="👍" value={formatNumber(data.up)} />
-          <StatTile label="👎" value={formatNumber(data.down)} />
-          <StatTile label="새 어휘" value={formatNumber(data.new_terms)} />
-          <StatTile label="새 저장 질문" value={formatNumber(data.new_saved)} />
         </StatStrip>
+        <div className="border-t border-(--line)">
+          <StatStrip>
+            <StatTile label="👍" value={formatNumber(data.up)} />
+            <StatTile label="👎" value={formatNumber(data.down)} />
+            <StatTile label="새 어휘" value={formatNumber(data.new_terms)} />
+            <StatTile label="새 저장 질문" value={formatNumber(data.new_saved)} />
+          </StatStrip>
+        </div>
       </Panel>
       {data.asks_total === 0 ? <Notice>이 창에는 기록된 질문이 없습니다.</Notice> : null}
     </div>
@@ -466,6 +513,11 @@ export default function GrowthView({
 }) {
   const [tab, setTab] = useState<Tab>("vocabulary");
   const [days, setDays] = useState(7);
+  // 성장 기능이 꺼진 배포에서는 이 뷰의 네 라우트가 모두 404다. 탭마다 제 Notice를 띄우면
+  // 사람이 네 번 눌러 네 번 같은 실패를 읽는다 — 한 번만 말하고, 탭 자체를 내린다. 네비게이션은
+  // 그대로 둔다(포털은 호스트 config를 모른다): 들어와서 왜 비었는지 읽는 편이, 눌리지 않는
+  // 메뉴보다 정직하다.
+  const { data: probe, failed: probeFailed } = useResource(() => fetchGrowthSummary(days), [refreshKey]);
 
   // Growth의 행(어휘 term·저장 질문 id)은 `ScreenTargetKind`에 없는 종류라 **보고할 대상이 없다**:
   // 빈 목록을 보내 api.screenState의 view만 현재로 유지한다(HomeView와 같은 자리, 같은 이유).
@@ -477,12 +529,18 @@ export default function GrowthView({
   return (
     <div className="ac-reveal flex flex-col gap-4">
       <PageHeader title="Growth" subtitle="시스템이 배운 것과, 아직 답하지 못한 것">
-        <Segmented<Tab> label="Growth 탭" value={tab} onChange={setTab} options={TABS} />
+        {probeFailed && !probe ? null : <Segmented<Tab> label="Growth 탭" value={tab} onChange={setTab} options={TABS} />}
       </PageHeader>
-      {tab === "vocabulary" ? <VocabularyTab refreshKey={refreshKey} /> : null}
-      {tab === "saved" ? <SavedTab refreshKey={refreshKey} /> : null}
-      {tab === "unmet" ? <UnmetTab refreshKey={refreshKey} days={days} onDays={setDays} /> : null}
-      {tab === "week" ? <WeekTab refreshKey={refreshKey} days={days} onDays={setDays} /> : null}
+      {probeFailed && !probe ? (
+        <Notice>성장 기능이 꺼져 있습니다 — 호스트의 `enable_growth`가 꺼져 있거나 호스트에 닿지 않습니다.</Notice>
+      ) : (
+        <>
+          {tab === "vocabulary" ? <VocabularyTab refreshKey={refreshKey} /> : null}
+          {tab === "saved" ? <SavedTab refreshKey={refreshKey} /> : null}
+          {tab === "unmet" ? <UnmetTab refreshKey={refreshKey} days={days} onDays={setDays} /> : null}
+          {tab === "week" ? <WeekTab refreshKey={refreshKey} days={days} onDays={setDays} /> : null}
+        </>
+      )}
     </div>
   );
 }

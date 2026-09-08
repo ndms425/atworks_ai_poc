@@ -60,17 +60,21 @@ function SavedRow({
 }
 
 export default function SavedQuestionsCard({ refreshKey }: { refreshKey: number }) {
-  const { data, failed } = useResource(() => fetchSavedQuestions("active", null, SHOWN), [refreshKey]);
+  // [숨기기]가 성공하면 `seq`가 오르고 카드는 **서버에서 다시 읽는다**. 숨긴 id를 클라이언트
+  // 배열에 모아 걸러 내던 앞 판은 두 가지를 틀렸다: 5개 중 하나를 숨겨도 6번째가 올라오지
+  // 않아 목록이 4개로 줄고, 마지막 하나를 숨기면 `total`은 여전히 1인데 "아직 승격된 질문이
+  // 없습니다"가 떴다. 서버가 센 `total`과 서버가 고른 5개가 언제나 같은 응답에서 온다.
+  const [seq, setSeq] = useState(0);
+  const { data, failed } = useResource(() => fetchSavedQuestions("active", null, SHOWN), [refreshKey, seq]);
   // 빈 상태 문구의 숫자는 호스트 config에서 온다 — 화면에 "3명·5회"를 박아 두면 문턱을 바꾼
   // 배포에서 조용히 거짓말이 된다.
   const { data: summary } = useResource(fetchGrowthSummary, [refreshKey]);
-  const [hidden, setHidden] = useState<string[]>([]);
   const [running, setRunning] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, QueryResult>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setHidden([]);
+    // 실행 결과는 그때의 창으로 계산된 값이다 — 새로고침을 눌렀으면 낡은 표를 남겨 두지 않는다.
     setResults({});
     setError(null);
   }, [refreshKey]);
@@ -87,7 +91,7 @@ export default function SavedQuestionsCard({ refreshKey }: { refreshKey: number 
     );
   }
 
-  const items = data.items.filter((q) => !hidden.includes(q.id));
+  const items = data.items;
   const thresholds = summary?.thresholds ?? {};
   const emptyCopy =
     thresholds.min_users && thresholds.min_asks
@@ -106,7 +110,7 @@ export default function SavedQuestionsCard({ refreshKey }: { refreshKey: number 
   const onHide = async (savedId: string) => {
     setError(null);
     const response = await actOnSavedQuestion(savedId, "hide");
-    if (response?.ok) setHidden((prev) => [...prev, savedId]);
+    if (response?.ok) setSeq((n) => n + 1);
     else setError("숨기지 못했습니다.");
   };
 
@@ -117,7 +121,9 @@ export default function SavedQuestionsCard({ refreshKey }: { refreshKey: number 
           <Notice>{error}</Notice>
         </div>
       ) : null}
-      {items.length === 0 ? (
+      {data.total === 0 ? (
+        // 빈 상태는 **서버가 센 total**로만 판단한다. 이 페이지에 행이 없다는 것과 승격된
+        // 질문이 하나도 없다는 것은 다른 말이다.
         <div className="px-[18px] py-3 text-[12.5px] text-(--ink-soft)">{emptyCopy}</div>
       ) : (
         <ul className="divide-y divide-(--line)">
