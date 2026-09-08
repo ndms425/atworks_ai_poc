@@ -18,7 +18,15 @@ def test_thinking_fields_off_by_default_for_non_anthropic_models():
 def test_absent_tools_follow_switches():
     cfg = AtworksAgentConfig(model="m", enable_jobs=False)
     assert {"stage_job", "apply_job", "discard_job", "get_pending_jobs"} <= cfg.absent_tools()
-    assert AtworksAgentConfig(model="m").absent_tools() == frozenset()
+    assert AtworksAgentConfig(model="m").absent_tools() == frozenset({"save_memory", "recall_memories"})
+
+
+def test_memory_tools_are_absent_unconditionally():
+    # Not a switch: both are absent with memory off AND with memory on. The store exists in
+    # this deployment (the org vocabulary lives on it), so the dispatch gate is the only thing
+    # keeping the model out of it.
+    for cfg in (AtworksAgentConfig(model="m"), AtworksAgentConfig(model="m", enable_memory=True)):
+        assert {"save_memory", "recall_memories"} <= cfg.absent_tools()
 
 
 def test_max_apis_per_job_default_is_below_the_provenance_cap():

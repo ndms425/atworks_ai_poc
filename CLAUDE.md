@@ -490,7 +490,9 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   contract over `memory_facts`/`memory_meta` in the same SQLite file as the runs and the audit
   log), and `memory_extract_facts = False`: the reference agent's post-turn free-fact extraction
   (`extract_and_store`) is never run, so nothing a person says in passing is remembered. There are
-  still no `save_memory` / `recall_memories` tools (`absent_tools` keeps both), and the model
+  still no `save_memory` / `recall_memories` tools: `absent_tools` names both UNCONDITIONALLY
+  (not under a switch — `BaseToolExecutor` registers their handlers as soon as a store exists, so
+  the dispatch gate, not the tool list, is what seals them), and the model
   cannot write memory at all: the only writer is a person's click on a vocabulary card, through
   the backend, and `memory_facts` is kept EQUAL to the confirmed set (a property test walks 120
   random operations). The subject id is the project, not the operator — the vocabulary is the

@@ -1,8 +1,11 @@
 import json
 from typing import get_args
 
+from commerce_common.memory import InMemoryMemoryStore
+
 from atworks_agent.catalog import catalog_hint
 from atworks_agent.config import AtworksAgentConfig
+from atworks_agent.executor import AtworksToolExecutor, build_memory
 from atworks_agent.tools.registry import build_tools
 from atworks_agent.types import Dimension, Measure, QueryFilters, QuerySpec
 
@@ -278,6 +281,27 @@ def test_memory_tools_are_never_built_even_with_memory_enabled():
         AtworksAgentConfig(model="m", enable_memory=True), ["failed-triage"])]
     assert "save_memory" not in names and "recall_memories" not in names
     assert "propose_alias" in names
+
+
+async def test_memory_tools_are_refused_at_dispatch_with_a_live_store(backend, skills, session, state):
+    """Absence from the tool list is not the seal -- `BaseToolExecutor` REGISTERS both handlers
+    whenever a store exists, and `dispatch` (the host-prefetch path, and anything that calls a
+    tool by name) reaches a handler without consulting the tool list. `absent_tools` names them
+    unconditionally, so both paths refuse before the handler runs and the store stays untouched."""
+    config = AtworksAgentConfig(model="m", enable_memory=True)
+    store = InMemoryMemoryStore()
+    ex = AtworksToolExecutor(backend=backend, config=config, skills=skills, session=session,
+                             state=state, memory=build_memory(config, store))
+    assert ex._memory.enabled and ex._memory.store is store
+    saved = await ex.dispatch("save_memory", {"key": "계약번호", "value": "contractNo", "category": "context"})
+    recalled = await ex.dispatch("recall_memories", {"query": "계약번호"})
+    assert saved.is_error and recalled.is_error
+    assert "not something this deployment does" in saved.result_text
+    assert "not something this deployment does" in recalled.result_text
+    assert await store.get_facts(session.project_id) == []
+    # And `execute` (the model's own path) refuses the same way.
+    assert (await ex.execute("save_memory", {"key": "k", "value": "v"})).is_error
+    assert await store.get_facts(session.project_id) == []
 
 
 def test_propose_alias_disappears_with_query_runs():

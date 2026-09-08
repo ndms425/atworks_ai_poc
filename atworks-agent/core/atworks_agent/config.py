@@ -180,7 +180,13 @@ class AtworksAgentConfig(BaseAgentConfig):
         return super().thinking_request_fields() if self.send_thinking_fields else {}
 
     def absent_tools(self) -> frozenset[str]:
-        names: set[str] = set()
+        # `save_memory`/`recall_memories` are ALWAYS absent, whatever `enable_memory` says.
+        # `BaseToolExecutor` registers both handlers whenever a memory store exists, and the
+        # store exists now (self-growth §7 puts the org vocabulary on it) -- so without this
+        # line the model could write and read the team's shared memory subject with no
+        # approval click and no audit row. They are not in `build_tools`, so naming them here
+        # changes no tool byte; it only seals the dispatch path.
+        names: set[str] = {"save_memory", "recall_memories"}
         if not self.enable_jobs:
             names |= {"stage_job", "apply_job", "discard_job", "get_pending_jobs", "present_job_preview"}
         if not self.enable_rules:
