@@ -45,7 +45,7 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   LLM-free, idempotent per date — file existence is the guard) and then runs the retention job
   (`retention.maybe_run(now)`, also LLM-free, once per local day).
 - **Language / path / shell:** Python 3.11+, pydantic v2, FastAPI + SSE. Role package
-  `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (5), turn loop
+  `atworks-agent/core/atworks_agent/`, skills `atworks-agent/skills/` (6), turn loop
   `atworks-agent/runtime/atworks_agent_runtime/orchestrator.py`, host `host/atworks_host/`, web
   `web/` (Task 15). Windows; Git Bash; `.venv/Scripts/python.exe`; `pytest -q` from the repo root.
 - **Backend:** one ABC, `AtworksBackend` (`atworks-agent/core/atworks_agent/backend.py`) — the only
@@ -65,6 +65,11 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   sole state change); `audit` / `append_audit` → the append-only audit log;
   `execute_job_once` → the execution engine, called by the scheduler with no LLM in it;
   `get_context` → the project profile that fills the per-request context block;
+  `query_runs` → the self-growth query engine (Self-growth bullet); `record_ask` / `list_asks` /
+  `set_feedback` / `growth_summary` → the `ask_log`; `propose_alias` / `list_vocabulary` /
+  `confirm_alias` / `reject_alias` / `delete_alias` / `confirmed_vocabulary` /
+  `note_vocabulary_use` → the shared vocabulary; `list_saved_questions` / `run_saved_question` /
+  `set_saved_question_status` → the promoted saved questions;
   `stage_rule` / `apply_rule` / `discard_rule` / `get_pending_rules` / `get_rule` / `list_rules` /
   `simulate_rule`
   → the rule ledger (`stage` drafts a structured `ValidationRule` on a session-seen API param,
@@ -196,6 +201,98 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   produced and interpreted by the server only; `total` is the count after the filter and
   independent of `limit`; list order is `executed_at DESC, run_id DESC`; and operator scope is a
   server-side join, never an id list.
+- **Self-growth** (`docs/superpowers/specs/2026-09-07-self-growth-design.md`): the deployment
+  answers questions its five fixed aggregate axes cannot, and gets better at it without anyone
+  editing code. Five parts, and a person's click is still the only thing that changes shared
+  state.
+  **(1) The query engine.** `QuerySpec` (`atworks-agent/core/atworks_agent/types.py`) is a fixed
+  CATALOGUE, not a query language: 14 `Dimension`s (`api`, `path_segment_1|2|3`, `path_prefix_2`,
+  `method`, `api_group`, `target_env`, `test_data_label`, `failed_rule`, `http_status`,
+  `executed_by`, `day`, `week`) x 9 `Measure`s (`runs`, `pass`, `fail`, `error`, `non_pass`,
+  `fail_rate`, `apis`, `transitions`, `p95_duration_ms`), <=2 dimensions, 1-5 measures,
+  `extra="forbid"`, `limit <= 50`. `catalog.py` holds the labels and the two deterministic
+  string-makers (`title_for_spec`, `cluster_key_for_spec`) and computes no number, so the
+  `query_runs` tool bytes stay a pure function of config (cache-stable). `Store.query` /
+  `query_sql.compile_query` (`host/`) turn one spec into ONE ranked statement plus its totals
+  statement, choosing among four sources by the spec alone (`select_source`): `rollup_day` for
+  cell axes, `rollup_key_day` for an UNSCOPED `failed_rule`/`http_status` axis,
+  **`rollup_operator_day`** (a new ingest-folded table) for an `executed_by` axis alone or with
+  `day`/`week` — including an `executed_by` FILTER on that axis, since the rollup's key column IS
+  the executor — and `runs` for everything else, notably an `executed_by` filter under any other
+  dimension. Python sees at most `limit` rows; the rank and the cut are in the statement.
+  `apis.path_segment_1|2|3` and `path_prefix_2` are pre-split at write
+  (`query_sql.path_segments`), so an endpoint-family GROUP BY is an index scan rather than a
+  SUBSTR expression over 50k rows — and the demo catalogue's family lives in the THIRD segment
+  (`/v1/product/history/001796`). Two rules are refusals rather than guesses: `fail_rate` together
+  with a `status` filter is rejected by a `QuerySpec` validator (the denominator is whatever the
+  filter kept, so it reads 1.0 under `non_pass` and 0.0 under `pass`), and
+  `compare_previous_window` runs the SAME statement over the previous window with the SAME
+  `LIMIT` — so the card labels the column as a comparison of two TOP LISTS, not of two
+  populations, and a measure the chosen source never computed comes back `None`/`None` rather than
+  compared against a fabricated zero. A 300-test oracle (`host/tests/test_query.py`) re-derives
+  every measure in plain python from `fetch_runs()` and asserts every spec on two stores, and
+  asserts that the matrix actually reaches all four sources.
+  **(2) The ask log.** Every chat turn writes exactly one `ask_log` row from a turn-end hook in
+  `streaming.py` (a `finally`, so a turn that raised still leaves a `partial` row), keyed on the
+  `turn_id` the `/chat` route generates and the card carries. `outcome`
+  (`answered|partial|unmet|action`), `intent` and `cluster_key` are DETERMINISTIC
+  (`atworks_agent/asklog.py`) — computed from the tool names the turn actually called and the
+  cards it actually emitted, never from the model's own account of itself; `cluster_key` is
+  `catalog.cluster_key_for_spec` (filter KINDS, never filter VALUES, never an operator id). The
+  question text is masked at write (`masking.mask_body`) and cut at 300 chars. `ask_log` is the
+  one self-growth table that rotates: `ask_log_retention_days` (365), deleted by the retention
+  job's own step with its own `retention_state` row.
+  **(3) The vocabulary.** `propose_alias(term, fragment)` is the model's only write-shaped tool
+  here, and it writes nothing: it records a `pending` proposal that renders ONLY on the proposing
+  session's own card ("‘결제 계열’을 … 로 해석했습니다 — 맞나요? [예][아니오]"), and returns an
+  `AliasProposal {outcome, entry}` so a re-proposal of a term that already exists is reported as
+  `existing`, not shown as fresh. An alias may only name a SHAPE — path, method, group, env, rule,
+  status code; `vocabulary.REJECTED_FRAGMENT_FIELDS` refuses `since`/`until`/`window_days`
+  (true only today) and `api_ids`/`executed_by`/`scope_operator` (a target, not a shape: a
+  confirmed term reaches EVERYONE, so an operator id frozen into one would silently narrow other
+  people's questions to that person). `POST /vocabulary/{term}/confirm` is the only thing that
+  confirms; `reject` stamps `cooldown_until = now + vocabulary_cooldown_days` (30) so the model
+  cannot re-ask, and `rejections >= vocabulary_auto_demote_rejections` (3) with
+  `rejections > confirmations` demotes a confirmed term back to pending. Injection is
+  `vocabulary.match_terms` — the CONFIRMED terms that literally appear in this turn's message,
+  longest first (so "결제 계열" wins over "결제"), <= `vocabulary_max_inject` (8) — rendered into
+  the per-request dynamic context, never the cache-stable prefix. See the Memory bullet for the
+  store.
+  **(4) Promotion.** `Promoter` (`host/atworks_host/promoter.py`) runs at the scheduler tick's
+  tail after retention, LLM-free, once per local day (`promote:<YYYY-MM-DD>` guard): a
+  `cluster_key` asked by >= `promote_min_users` (3) distinct operators, >= `promote_min_asks` (5)
+  times within `promote_window_days` (7), not mostly downvoted, becomes a `SavedQuestion` whose
+  title is `catalog.title_for_spec` (a catalogue sentence, never a model one) and whose spec is
+  the cluster's newest. `GET /saved-questions/{id}/run` re-runs it NOW through the same executor —
+  a saved question is a question, not a saved answer.
+  **(5) Feedback and evals.** The card's 👍/👎 posts to `/feedback` and writes NO audit row —
+  the audit log answers "what did a person approve", and a vote approves nothing, moves no ledger,
+  and is invisible to everyone else; loading votes into it would cost the log that property. A 👎
+  counts a rejection against the vocabulary the turn actually used; a 👍 on an `answered` turn
+  with a stored spec writes one regression case to `evals/cases/` (`ATWORKS_EVALS_DIR` overrides
+  the location) holding the turn's text plus `expected {calls_tool, spec_equals {dimensions,
+  measures, filters_kinds}, ui_components, never_calls, max_tool_calls}` — filter KINDS, not
+  values. `evals/run_evals.py` has two modes: replay (the default, no model, no network — it
+  rebuilds a spec from the shape with a placeholder per filter kind and checks that today's
+  catalogue still accepts it and today's Store still runs it) and live (`--live` /
+  `ATWORKS_EVAL_LIVE=1`, a real model with code graders, each failing case retried once). Run
+  them with `pytest -m evals` (deselected by default, like `scale`).
+  **Audit and gates.** Vocabulary and saved-question clicks go through ONE `growth_action` helper
+  in `app.py` — the audit pair (`<action>` then `<action>:<ok|blocked|error>`) and the try/except
+  of `host_action`, but **no approval mark**: these are not job approvals, and spending that
+  one-shot permission here would blur what the word means. A 404 for an unknown target is raised
+  INSIDE the wrapped call, so a click that did nothing can never be recorded as `:ok`.
+  `enable_query_runs` gates the four tools (`absent_tools` drops all four when off);
+  `enable_growth` gates the routes and the Growth view.
+  **REST-adapter obligations** (in the ABC docstrings): `query_runs` must compile the spec
+  server-side and return `QueryResult` with the source it read, `population` and `total_groups`
+  after the filter and independent of `limit`; `list_asks` orders `at DESC, seq DESC`;
+  `growth_summary` answers with COUNT queries, never by counting a row list; `list_vocabulary`
+  orders `proposed_at DESC, term DESC`; `confirmed_vocabulary` is unpaged and its cache must be
+  invalidated by EVERY vocabulary write; `reject_alias` and `delete_alias` must remove the fact
+  from the memory store as well as the sidecar (`memory_facts` == the confirmed set, always);
+  `list_saved_questions` orders `uses DESC, created_at DESC, id DESC`. Cursors are keyset,
+  server-made and opaque throughout, as everywhere else.
 - **Identity and credentials:** auth mechanism is none in MVP. Operator profiles
   (`host/atworks_host/fixtures/operators.json`, roles `developer`/`qa`/`pm`) are bound once at
   `POST /api/atworks/session {operator_id}` via `sessions.start(operator_id)`; unknown id → 400,
@@ -271,7 +368,18 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   insight panel, 404 when `enable_insight_panel=False` — the panel is read-only, touching no
   approval mark or ledger. Its narration is cached per operator per local day at
   `insights_out/<operator>/<YYYY-MM-DD>/narrative.json`, tagged `generated_by: agent|deterministic`
-  for provenance.
+  for provenance. Self-growth adds a **sixth view, Growth** (`배운 어휘` / `저장 질문` /
+  `미충족 질문` / `이번 주`) and its own routes, all in the same paged envelope: `GET /ask-log`
+  (`?outcome=`), `GET /growth/summary` (`?days=`, COUNT queries only — never a row list),
+  `POST /feedback` (the card's 👍/👎), `GET /vocabulary` (`?status=`) plus
+  `POST /vocabulary/{term}/confirm|reject|delete`, `GET /saved-questions` (`?status=`) plus
+  `GET /saved-questions/{id}/run` and `POST /saved-questions/{id}/hide|unhide`. `/ask-log` and
+  `/growth/summary` are GLOBAL, not session-scoped — the Growth view is a team view. The chat card
+  is `query_table` (`present_query_table {title, note}`, reading the session's single
+  `last_query_result` slot the way `present_run_groups` does); the table itself is one component
+  (`web/atworks-web/components/QueryTableView.tsx` `QueryTable`), rendered by both the chat card
+  and the saved-question view, and the card's JSON block carries the spec, the window the server
+  resolved and the source it read.
 - **Approval surface / `require_host_approval`:** `require_host_approval = True`; the surface is
   **the Jobs page approve button**. `POST /api/atworks/changes/{job_id}/apply` → `job_action` in
   `host/atworks_host/app.py` (mirror of `change_action`, `demo_common/merchant.py:238-283`) is the
@@ -326,6 +434,17 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   person approves every profile before it affects a report; and re-diffing over stored bodies
   never re-judges or rewrites a past `RunResult`, the same immutability guarantee validation
   rules already give. Screen attachments scope a turn to the ref_ids the operator attached.
+  **The self-growth query engine** is likewise not a seventh skill — three rules appended to
+  `failed-triage` and `api-lookup` (the two skills a figures question loads), plus two sentences
+  in the always-on prompt because skills load on demand: (a) when the grouping or filter is
+  outside `aggregate_runs`' five axes — endpoint segment, HTTP method, API group, week or day,
+  operator, two axes at once, this window against the one before — call `query_runs` and show it
+  with `present_query_table`; `aggregate_runs` stays the tool for the axes it already covers;
+  (b) when the catalogue cannot express it either, call `note_unmet_ask(reason, summary, wanted)`
+  FIRST and then say in one sentence what would make it answerable — an answer that ends on
+  "지원하지 않습니다 / not supported" without `note_unmet_ask` is a rule violation; (c) when one of
+  the operator's own words is read as a filter value, say so in one clause and call
+  `propose_alias(term, fragment)` so a person can confirm it once.
   **Screen interaction** is not a seventh skill — no new skill file, just a hint added to
   existing skills (`failed-triage`, `api-lookup`) — but a capability layered over all six: the
   reverse direction, chat moves the screen and points at it. Two tools, gated together by
@@ -365,7 +484,17 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   evaluation in `execute_job_once` is additive over the legacy stub and only ever considers runs
   with `executed_at >= effective_from` — past `RunResult`s, success rates, reports and briefings are
   never re-judged or rewritten.
-- **Memory:** off. `enable_memory = False`, no `save_memory` / `recall_memories` tools, `store=None`;
-  nothing crosses sessions. Phase 2 may add field-name aliases via `commerce_common.memory`'s filter.
+- **Memory:** ON, and it holds exactly one thing — the shared vocabulary. The config DEFAULT is
+  still `enable_memory = False` (a library default nobody should have to opt out of); the host
+  turns it on where it also supplies the store (`host/atworks_host/main.py`), with a `SqliteMemoryStore` (`host/atworks_host/memory_store.py`, the `commerce_common.memory`
+  contract over `memory_facts`/`memory_meta` in the same SQLite file as the runs and the audit
+  log), and `memory_extract_facts = False`: the reference agent's post-turn free-fact extraction
+  (`extract_and_store`) is never run, so nothing a person says in passing is remembered. There are
+  still no `save_memory` / `recall_memories` tools (`absent_tools` keeps both), and the model
+  cannot write memory at all: the only writer is a person's click on a vocabulary card, through
+  the backend, and `memory_facts` is kept EQUAL to the confirmed set (a property test walks 120
+  random operations). The subject id is the project, not the operator — the vocabulary is the
+  team's, by design. What crosses sessions is a confirmed term and its filter fragment, nothing
+  else; see the Self-growth bullet for what an alias may and may not name.
 
 Model endpoint: Anthropic Messages format via ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (OpenRouter in dev, LiteLLM proxy in the closed network); send_thinking_fields=False.

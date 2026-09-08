@@ -136,7 +136,7 @@ Jobs/Rules 페이지의 사람 버튼 클릭만이 한다.
 
 보존은 스케줄러 tick 꼬리에서 하루 1회(LLM 0회): 핫 `runs` 180일 → `runs_archive`로 **이관**(삭제 아님,
 `archived=true`로만 조회), `bodies` 90일 **삭제**(유일하게 지우는 데이터, 캡처 시 마스킹 필수), 인사이트
-서술 캐시 30일 회전, 세션 유휴 24시간 스윕. 롤업·워터마크·현재상태·리포트·브리핑·감사 로그는 영구다.
+서술 캐시 30일 회전, 세션 유휴 24시간 스윕, 질문 기록 `ask_log` 365일 **삭제**(`ask_log_retention_days`). 롤업·워터마크·현재상태·리포트·브리핑·감사 로그는 영구다.
 승인 클릭마다 감사 로그 2행(실행 전/후)이 남고 `GET /api/atworks/audit`로 읽는다 — 채팅 턴은 0행이다.
 
 Mock 백엔드는 dict가 아니라 **SQLite**(`host/atworks_host/store.py`) 위에서 돈다. 그 DDL·인덱스·쿼리가
@@ -175,8 +175,27 @@ SLO 상한은 전부 `AtworksAgentConfig`의 `slo_*` 필드다(코드가 곧 기
 | 브리핑 생성 | 5 s | 157.1 ms |
 | 400셀 실행 중 채팅 SSE 지연 | 100 ms | 55.0 ms |
 | 보존 작업 1일치(한 파티션) | 30 s | 306.6 ms |
+| `query_runs` 경로 축(rollup_day) | 300 ms | 164~177 ms (축소 세트) |
+| `query_runs` 2축 method×env(rollup_day) | 300 ms | 264~294 ms (축소 세트) |
+| `query_runs` failed_rule(key arm) | 300 ms | **295~566 ms** (축소 세트) |
+| `query_runs` executed_by×api(runs arm) | 300 ms | **630~854 ms** (축소 세트) |
+| `query_runs` 이전 기간 비교(rollup_day) | 300 ms | 27~40 ms (축소 세트) |
 
-굵은 줄 **하나**가 상한을 넘겨 기록으로 남긴 항목이다(상한을 낮추지 않았다). Task 11에서 붉었던
+자가발전의 `query_runs` 다섯 줄(축소 세트 6만 run, 두 번 측정)은 **소스가 아니라 근거 표본
+채움**이 비용이라는 것을 그대로 보여준다. 집계 자체는 어느 소스든 상한 안이다 — 6만 run 데모
+세트에서 key arm 0.6 ms, `rollup_day` 28 ms, runs arm 53 ms. 나머지는 전부
+`Store._fill_query_samples`가 **반환된 행마다 두 문장**을 더 도는 값이고(카드가 기억하는
+`seen_apis`/`seen_runs` 증거), 키 축에서는 그 한 문장이 인덱스 없는 `json_each` EXISTS라 창
+전체를 훑는다 — 카드 하나에 40번. runs arm은 다른 이유로 같은 값을 낸다: `executed_by IS ?`와
+`api_id IS ?`가 둘 다 인덱스로 쓸 수 있는데 테이블 통계가 없어 SQLite가 훨씬 덜 선택적인 쪽을
+고른다.
+
+**후속 작업 두 가지, 순서대로**: ① 보존 작업 꼬리에 `PRAGMA analysis_limit` + `ANALYZE` 한 단계
+(데모 세트 사본에서 재보니 runs arm 790 ms → 166 ms, 스키마 변경 없음), ② 근거 표본을 행마다가
+아니라 **페이지 전체에 대해 한 쌍의 문장**으로 채우기. 상한(`slo_query_ms`)은 건드리지 않았다.
+
+굵은 줄 셋(자가발전 두 줄과 `insights.build`)이 상한을 넘겨 기록으로 남긴 항목이다 — 어느 상한도
+낮추지 않았다. Task 11에서 붉었던
 세 줄 중 둘은 해결됐다: 두 맵 축(`failed_rule`/`http_status`)은 `rollup_key_day`라는 자체 롤업
 행으로 물질화돼 30일 창이 (일수 × 키) 몇백 행이 됐고(346.5 → 13.6 ms, 180일 전체가 3,077행),
 보존 행은 **하루치 한 파티션**만 만료시키도록 고쳐 재면서 실제 값(306.6 ms)이 나왔다 — 이전의
@@ -201,6 +220,62 @@ SLO 상한은 전부 `AtworksAgentConfig`의 `slo_*` 필드다(코드가 곧 기
 전체다. 같은 데이터셋의 중앙값 오퍼레이터(948개 API)는 **199 ms**, 최소 오퍼레이터(441개)는
 269 ms로 상한 안에 넉넉히 들어온다. 자세한 진단은
 `.superpowers/sdd/2026-09-06-scale-architecture/final-fix-wave-report.md`.
+
+## 자가발전 — 질의 엔진, 어휘, 저장 질문, 회귀 케이스
+
+집계 카드의 고정 5축으로 답할 수 없는 질문에 답하고, 쓸수록 그 답이 나아진다 — 코드를 고치지 않고.
+다섯 조각이고, 공유 상태를 바꾸는 것은 여전히 **사람의 클릭 하나뿐**이다.
+
+1. **질의 엔진**(`query_runs`). 모델이 채우는 것은 질의 언어가 아니라 고정 카탈로그다: 차원 14개
+   (`api` · `path_segment_1|2|3` · `path_prefix_2` · `method` · `api_group` · `target_env` ·
+   `test_data_label` · `failed_rule` · `http_status` · `executed_by` · `day` · `week`) × 측정값 9개
+   (`runs` `pass` `fail` `error` `non_pass` `fail_rate` `apis` `transitions` `p95_duration_ms`),
+   차원 ≤2 · 측정값 1~5 · `limit ≤ 50`. 호스트가 스펙 하나를 **한 문장의 SQL**로 컴파일하고
+   소스(`rollup_day` / `rollup_key_day` / `rollup_operator_day` / `runs`)를 스펙만 보고 고른다.
+   숫자는 전부 `QueryResult`에서 오고 카드는 그것을 그리기만 한다. `fail_rate`는 `status` 필터와
+   함께 못 쓴다(분모가 필터가 남긴 행이라 1.0/0.0이 된다 — 대안을 말하며 거절한다).
+2. **질문 기록**(`ask_log`). 채팅 턴마다 정확히 한 행. `outcome`/`intent`/`cluster_key`는 그 턴이
+   **실제로 부른 도구 이름**과 **실제로 낸 카드**에서 결정론으로 나온다(모델의 자기 보고가 아니다).
+   질문 텍스트는 저장 전에 마스킹된다. 365일 뒤 보존 작업이 지운다.
+3. **조직 공용 어휘**. 모델이 "결제 계열"을 `path_prefix=/v1/payment`로 읽으면 `propose_alias`로
+   **제안만** 한다 — 카드의 [예]를 누른 순간에만 확정되고, 그때부터 팀 전원의 컨텍스트에 들어간다.
+   별칭은 **모양**(경로·메서드·그룹·환경·규칙·상태코드)에만 이름을 붙인다: 기간(`window_days`,
+   `since`/`until`)과 대상(`api_ids`, `executed_by`, `scope_operator`)은 거부된다.
+4. **질문 승격**. 최근 7일 안에 서로 다른 운영자 3명 이상이 5번 이상 물은 군집은 스케줄러 tick
+   꼬리에서(LLM 0회, 하루 1회) Home의 **저장 질문**이 된다. [실행]은 저장된 답이 아니라 저장된
+   질문을 **지금** 다시 돌린다.
+5. **피드백 → 회귀 케이스**. 카드의 👍/👎는 감사 로그를 쓰지 않는다(표는 승인이 아니다). 👎는 그
+   턴이 쓴 어휘에 거부를 세고, 답한 턴의 👍는 `evals/cases/`에 회귀 케이스 한 장을 쓴다 — 필터의
+   **값**이 아니라 **종류**만 고정한다.
+
+여섯 번째 화면 **Growth**(배운 어휘 / 저장 질문 / 미충족 질문 / 이번 주)가 이 네 가지를 다 보여준다.
+게이트는 `enable_query_runs`(도구 4개)와 `enable_growth`(라우트와 화면)다.
+
+### 손으로 해보기
+
+| 무엇 | 어떻게 | 무엇이 보여야 하나 |
+|---|---|---|
+| 인계 질문 5개 | 채팅에 "실패한 결과 중 가장 많이 발생한 케이스는?" / "endpoint 기준으로 grouping해줘" / "그중 history 계열만 환경별로" / "메서드별 실패율은?" / "내가 실행한 거 몇 개야?" | `query_table` 카드. 푸터의 `실행된 질의(JSON)`에 스펙·창·소스가 그대로 있다 |
+| 답할 수 없는 질문 | "이 run들 왜 실패했어? 서버 로그 보여줘" | `note_unmet_ask` 뒤 "무엇이 있으면 답할 수 있는지" 한 문장. `GET /ask-log?outcome=unmet`에 행이 생긴다 |
+| 어휘(2세션) | ① 운영자 A로 "결제 계열 실패만 보여줘" → 카드의 [예] 클릭 ② 운영자 B로 바꿔 새 세션에서 "결제 계열 실패 추이" | ①에서 `GET /vocabulary?status=confirmed`에 용어가 생기고 감사 로그에 `vocabulary_confirm` 짝이 남는다. ②는 뜻을 되묻지 않고 바로 결제 경로로 좁힌다 |
+| 승격 | 같은 질문을 서로 다른 운영자 3명이 5번 이상(7일 창) → `POST /scheduler/tick` | Home에 **저장 질문** 카드. [실행]이 표를 그리고, Growth의 저장 질문 탭에 같은 행이 있다. [숨기기]는 감사 2행을 남긴다 |
+| 👍 → eval | 표 카드의 👍 | `evals/cases/`에 JSON 한 장(`expected.spec_equals`). `.venv/Scripts/python.exe -m pytest -m evals -q`가 그 케이스를 포함해 통과한다 |
+| Growth 화면 | 좌측 6번째 탭 | 네 탭이 실제 행으로 그려지고 "이번 주" 숫자는 `GET /growth/summary?days=7`와 같다 |
+
+```bash
+# 회귀 스위트(기본 suite에서는 제외). 리포지토리 어느 디렉터리에서 돌려도 된다(루트 conftest.py).
+.venv/Scripts/python.exe -m pytest -m evals -q
+
+# 러너 직접 실행: 재생(모델 없음) / 라이브(실제 모델, 실패한 케이스만 1회 재시도)
+.venv/Scripts/python.exe -m evals.run_evals
+ATWORKS_EVAL_LIVE=1 .venv/Scripts/python.exe -m evals.run_evals
+
+# 라이브 스모크(실제 모델 + 6만 run 데모 데이터셋, msedge headless)
+.venv-pw/Scripts/python.exe scripts/smoke/growth_shots.py --restart --phase 2
+```
+
+`ATWORKS_EVALS_DIR`는 👍가 케이스를 쓰는 디렉터리다(기본 `<repo>/evals/cases`). 배포에서 리포지토리
+바깥에 두고 싶을 때 쓴다 — 러너의 `--cases-dir`와 짝이다.
 
 ## 사용자별 AI 인사이트 패널
 
