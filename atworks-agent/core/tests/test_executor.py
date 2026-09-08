@@ -1092,3 +1092,134 @@ async def test_open_question_form_blocks_staging_profile_this_turn(backend, conf
     assert not form.refused
     out = await ex.execute("stage_profile", {"job_id": job_id, "ignore_paths": ["$.serverTime"], "summary": "s"})
     assert out.blocked == "question_form"
+
+
+# -- query_runs (self-growth spec §5) ----------------------------------------------------
+
+async def test_query_runs_envelope_repeats_the_backend_result(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {
+        "filters": {"window_days": 180}, "dimensions": ["api"],
+        "measures": ["runs", "non_pass"], "order_by": "runs",
+    })
+    assert not out.refused
+    payload = _payload(out)
+    result = state.last_query_result
+    # Every figure in the envelope is the backend's, verbatim -- the executor computes none.
+    assert payload["population"] == result.population == 3
+    assert payload["total_groups"] == result.total_groups == 2
+    assert payload["source"] == result.source
+    assert [row["keys"] for row in payload["rows"]] == [row.keys for row in result.rows]
+    assert [row["measures"] for row in payload["rows"]] == [row.measures for row in result.rows]
+    assert payload["rows"][0]["keys"] == {"api": "api-1"}
+    assert payload["rows"][0]["measures"] == {"runs": 2, "non_pass": 1}
+    assert "present_query_table" in payload["note"]
+
+
+async def test_query_runs_spec_summary_names_the_resolved_default_window(backend, config, skills, session, state):
+    # No window in the spec: the title must say the window the host actually applied, never
+    # "기본 기간" (ledger ruling, Task 1 review).
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {"dimensions": ["api"], "measures": ["runs"]})
+    assert not out.refused
+    summary = _payload(out)["spec_summary"]
+    assert f"{config.max_aggregate_window_days}일" in summary and "기본 기간" not in summary
+
+
+async def test_query_runs_rejects_a_spec_outside_the_catalogue(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {"dimensions": ["nonsense_axis"], "measures": ["runs"]})
+    assert out.refused and "not a valid query spec" in out.result_text
+    assert state.last_query_result is None
+
+
+async def test_query_runs_rejects_an_unknown_filter_key(backend, config, skills, session, state):
+    # extra="forbid" is the point of QueryFilters: an invented filter is a schema error, never
+    # a silently ignored key.
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {"filters": {"invented": "x"}, "measures": ["runs"]})
+    assert out.refused and "not a valid query spec" in out.result_text
+
+
+async def test_query_runs_rejects_an_unseen_api_id(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {"filters": {"api_ids": ["api-1"]}, "measures": ["runs"]})
+    assert out.refused and "search_apis" in out.result_text and state.last_query_result is None
+
+
+async def test_query_runs_accepts_a_seen_api_id(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    await ex.execute("get_api", {"api_id": "api-1"})
+    out = await ex.execute("query_runs", {
+        "filters": {"api_ids": ["api-1"], "window_days": 180}, "dimensions": ["api"], "measures": ["runs"],
+    })
+    assert not out.refused and _payload(out)["population"] == 2
+
+
+async def test_query_runs_refuses_another_operators_scope(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {"filters": {"scope_operator": "someone-else"}, "measures": ["runs"]})
+    assert out.refused and "own operator" in out.result_text and state.last_query_result is None
+
+
+async def test_query_runs_allows_the_sessions_own_scope(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {
+        "filters": {"scope_operator": session.operator}, "measures": ["runs"],
+    })
+    assert not out.refused and state.last_query_result is not None
+
+
+async def test_query_runs_remembers_its_evidence_samples(backend, config, skills, session, state):
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {
+        "filters": {"window_days": 180}, "dimensions": ["api"], "measures": ["runs"],
+    })
+    assert not out.refused
+    # api ids and run ids the rows cite are session-seen afterwards, so a card or a screen
+    # directive may name them (spec §2 clause 2).
+    assert {"api-1", "api-2"} <= set(state.seen_apis)
+    assert {"run-1", "run-2", "run-3"} <= set(state.seen_runs)
+    assert state.last_population == 3
+    assert state.last_listed_run_ids[0] == "run-3"   # newest first
+
+
+async def test_query_runs_caps_the_remembered_run_ids(backend, config, skills, session, state):
+    backend.apis = {
+        f"api-{i:03d}": ApiSpec(api_id=f"api-{i:03d}", method="GET", path=f"/v1/x{i}", name=f"n{i}",
+                                group="g", updated_at=T0)
+        for i in range(60)
+    }
+    backend.runs = [
+        RunResult(run_id=f"run-{i:03d}-{j}", api_id=f"api-{i:03d}", executed_at=T0 + timedelta(minutes=i * 10 + j),
+                  target_env="dev", status=RunStatus.FAIL, http_status=500)
+        for i in range(60) for j in range(5)
+    ]
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {
+        "filters": {"window_days": 180}, "dimensions": ["api"], "measures": ["runs"], "limit": 50,
+    })
+    assert not out.refused
+    # 50 rows x 5 sampled run ids = 250 cited; the session keeps the newest PROVENANCE_CAP.
+    assert len(state.last_listed_run_ids) == PROVENANCE_CAP
+    assert state.last_population == 300 and state.last_query_result.total_groups == 60
+
+
+async def test_query_runs_envelope_trims_row_samples_to_three(backend, config, skills, session, state):
+    backend.runs = [
+        RunResult(run_id=f"run-{j}", api_id="api-1", executed_at=T0 + timedelta(minutes=j),
+                  target_env="dev", status=RunStatus.FAIL, http_status=500)
+        for j in range(8)
+    ]
+    ex = _exec(backend, config, skills, session, state)
+    out = await ex.execute("query_runs", {
+        "filters": {"window_days": 180}, "dimensions": ["api"], "measures": ["runs"],
+    })
+    assert len(_payload(out)["rows"][0]["run_ids"]) == 3
+    assert len(state.last_query_result.rows[0].run_ids) == 5
+
+
+async def test_query_runs_is_absent_when_the_feature_is_off(backend, skills, session, state):
+    off = AtworksAgentConfig(model="m", enable_query_runs=False)
+    out = await _exec(backend, off, skills, session, state).execute("query_runs", {"measures": ["runs"]})
+    assert state.last_query_result is None and "query_runs" in out.result_text

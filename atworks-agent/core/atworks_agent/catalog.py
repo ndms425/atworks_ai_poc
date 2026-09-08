@@ -90,10 +90,16 @@ _STATUS_LABEL_KO: dict[str, str] = {
 }
 
 
-def title_for_spec(spec: QuerySpec) -> str:
+def title_for_spec(spec: QuerySpec, *, default_window_days: int | None = None) -> str:
     """카탈로그 라벨로 결정론 생성하는 사람이 읽는 제목(≤120자) -- 예: '실패·에러 · 경로 2조각별 ·
     30일 · 상위 20'. saved_questions.title과 query_table 카드 제목이 여기서 나온다. 숫자는
-    spec 필드에서만 온다, 모델이 지어낸 문장이 아니다."""
+    spec 필드에서만 온다, 모델이 지어낸 문장이 아니다.
+
+    ``default_window_days``는 창을 안 적은 스펙(``window_days``도 ``since``/``until``도 없음)에
+    호스트가 실제로 적용한 기본 창이다 -- 주면 제목이 "기본 기간" 대신 그 일수를 적는다. 실행기는
+    ``max_aggregate_window_days``를 넘긴다(``Store.query``의 ``default_window_days``와 같은 값),
+    그래서 카드 제목의 기간이 실제로 조회된 기간과 어긋나지 않는다. 호출자가 창을 모르면
+    (승격기 등) 생략하고 "기본 기간"으로 남는다."""
     status = spec.filters.status or "all"
     status_part = _STATUS_LABEL_KO.get(status, "전체")
 
@@ -109,6 +115,8 @@ def title_for_spec(spec: QuerySpec) -> str:
         since_part = filters.since.date().isoformat() if filters.since else "…"
         until_part = filters.until.date().isoformat() if filters.until else "…"
         window_part = f"{since_part}~{until_part}"
+    elif default_window_days is not None:
+        window_part = f"{default_window_days}일"
     else:
         window_part = "기본 기간"
 

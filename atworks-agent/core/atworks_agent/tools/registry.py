@@ -2,14 +2,17 @@
 규칙만 담고, 툴을 가로지르는 계약(스테이징·판정 금지)은 프롬프트에, 흐름은 스킬에 있다."""
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, get_args
 
 from commerce_common.execution import LOAD_SKILL, with_status
 from commerce_common.presentation import PresentationExtension
 
+from ..catalog import catalog_hint
 from ..config import AtworksAgentConfig
 from ..question_form import QUESTION_FORM_INPUT_SCHEMA
+from ..types import Dimension, HttpMethod, Measure, RunStatusFilter
 from .presentation import (
     DIGEST_TOOL,
     FORMAT_BATCH_TOOL,
@@ -19,6 +22,7 @@ from .presentation import (
     PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
     PROFILE_PREVIEW_TOOL,
+    QUERY_TABLE_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
 )
@@ -42,6 +46,85 @@ def _batch_id() -> dict[str, Any]:
 
 def _profile_id() -> dict[str, Any]:
     return {"type": "string", "description": "profile_id staged this conversation or listed by get_pending_profiles."}
+
+
+# -- query_runs (self-growth spec §3/§5) ----------------------------------------------------
+# The schema MIRRORS QuerySpec/QueryFilters field for field, with the catalogue enums read from
+# the Dimension/Measure literals themselves (get_args) rather than retyped -- so a catalogue that
+# grows moves the tool bytes and pydantic together. It is hand-written rather than
+# `QuerySpec.model_json_schema()` because that emits $defs/$ref and `anyOf: [T, null]` wrappers
+# for every optional field; every other tool here is a flat hand-written schema, and
+# test_registry asserts the property names match the models so the two cannot drift apart.
+# Nothing below reads config: these bytes are a constant, which is what keeps the tool list a
+# pure function of config (cache-stable prefix).
+_QUERY_EXAMPLES = (
+    {"filters": {"status": "non_pass", "window_days": 30}, "dimensions": ["path_segment_2"],
+     "measures": ["non_pass", "apis", "fail_rate"], "limit": 20},
+    {"filters": {"scope_operator": "<operator_id>", "window_days": 14}, "dimensions": ["day"],
+     "measures": ["runs", "non_pass"], "order_by": "key", "descending": False},
+)
+
+
+def _query_filters_schema() -> dict[str, Any]:
+    return {
+        "type": "object", "additionalProperties": False, "properties": {
+            "status": {"type": "string", "enum": list(get_args(RunStatusFilter))},
+            "since": {"type": "string", "description": _ISO_DATETIME + " Use since/until OR window_days, never both."},
+            "until": {"type": "string", "description": _ISO_DATETIME},
+            "window_days": {"type": "integer", "minimum": 1, "maximum": 180,
+                            "description": "The window ends now and runs back this many days. Cannot be combined with since/until."},
+            "api_ids": {"type": "array", "maxItems": 100, "items": {"type": "string", "description": _SESSION_API_ID}},
+            "path_contains": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 120},
+                              "description": "Lowercase substring match on the API path; several entries are OR-ed."},
+            "path_prefix": {"type": "string", "maxLength": 120, "description": "API paths starting with this prefix."},
+            "method": {"type": "array", "items": {"type": "string", "enum": list(get_args(HttpMethod))}},
+            "api_group": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 60}},
+            "target_env": {"type": "array", "items": {"type": "string", "maxLength": 40}},
+            "test_data_label": {"type": "array", "items": {"type": "string", "maxLength": 40}},
+            "executed_by": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 60},
+                            "description": "Runs THOSE operators executed. Different from scope_operator."},
+            "scope_operator": {"type": "string", "maxLength": 60,
+                               "description": "Narrow to the APIs this operator has run ('내가 실행한 것'). Only the operator of this session; naming anyone else is refused."},
+            "failed_rule": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 120}},
+            "http_status": {"type": "array", "maxItems": 10, "items": {"type": "integer"}},
+        },
+    }
+
+
+def _query_spec_schema() -> dict[str, Any]:
+    return {
+        "type": "object", "additionalProperties": False, "required": ["measures"], "properties": {
+            "filters": _query_filters_schema(),
+            "dimensions": {"type": "array", "maxItems": 2, "items": {"type": "string", "enum": list(get_args(Dimension))},
+                           "description": "How to group, 0-2 axes. Omit (or []) for one grand-total row."},
+            "measures": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "enum": list(get_args(Measure))},
+                         "description": "What to compute per group."},
+            "order_by": {"type": "string", "enum": [*get_args(Measure), "key"],
+                         "description": "One of the measures you asked for, or 'key' for the group key. Defaults to the first measure."},
+            "descending": {"type": "boolean", "description": "Default true; use false with order_by 'key' for a chronological trend."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "How many groups come back. Default 20."},
+            "compare_previous_window": {"type": "boolean",
+                                        "description": "Also run the immediately preceding window of the same length and attach _prev/_delta per measure. It compares two TOP lists, not two populations."},
+            "include_samples": {"type": "boolean", "description": "Default true: each row carries up to 20 api_ids and the 5 newest run_ids as evidence."},
+        },
+    }
+
+
+def _query_runs_description() -> str:
+    examples = "\n".join(json.dumps(e, ensure_ascii=False, sort_keys=True) for e in _QUERY_EXAMPLES)
+    return (
+        "Ask one structured question of the run history and get host-computed group figures back. "
+        "You pick the axes (dimensions), the numbers (measures), the filters, the order and the cut; "
+        "the host compiles and runs it over its own materialized data — you never write SQL and you "
+        "never compute a figure yourself. Read-only: it stages nothing and judges nothing. Reach for "
+        "it whenever the operator's grouping or filter is outside aggregate_runs' five axes (by "
+        "endpoint segment, by method, by week, by operator, two axes at once, a window comparison). "
+        "Every returned row carries evidence ids you may then cite. Show the result with "
+        "present_query_table — never restate its numbers in prose. / 실행 이력에 구조화 질의 1회. "
+        "축·측정값·필터·정렬은 네가 고르고 숫자는 호스트가 계산한다. 읽기 전용이고, 결과는 "
+        "present_query_table 카드로 보여준다.\n\n"
+        "Catalogue (dimensions then measures):\n" + catalog_hint() + "\n\nExamples:\n" + examples
+    )
 
 
 def build_tools(
@@ -130,6 +213,11 @@ def build_tools(
                 "status": {"type": "string", "enum": ["pass", "fail", "error", "non_pass"]},
                 "api_id": {"type": "string", "description": _SESSION_API_ID}},
                 "required": ["group_by"], "additionalProperties": False},
+        },
+        {
+            "name": "query_runs",
+            "description": _query_runs_description(),
+            "input_schema": _query_spec_schema(),
         },
         # -- 실행 계획 ------------------------------------------------------------------
         {
@@ -401,6 +489,17 @@ def build_tools(
                 "group_keys": {"type": "array", "minItems": 1, "maxItems": config.max_group_items, "items": {"type": "string", "maxLength": 200}},
                 "note": {"type": "string", "maxLength": 200}},
                 "required": ["group_keys"], "additionalProperties": False},
+        },
+        {
+            "name": QUERY_TABLE_TOOL,
+            "description": ("Show the table for the last query_runs call: you supply only a title and an optional "
+                            "note; the card fills every column, every figure, the population, the group count, the "
+                            "window, the source and the spec summary from that result. Call it right after "
+                            "query_runs — the numbers belong on the card, not in your sentence."),
+            "input_schema": {"type": "object", "properties": {
+                "title": {"type": "string", "maxLength": 80, "description": "What this table answers, in the operator's words."},
+                "note": {"type": "string", "maxLength": 200}},
+                "required": ["title"], "additionalProperties": False},
         },
         {
             "name": PREVIEW_TOOL,

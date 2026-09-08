@@ -24,6 +24,8 @@ from .types import (
     JobSpec,
     OperatorProfile,
     Page,
+    QueryResult,
+    QuerySpec,
     RuleRecommendation,
     RunGroup,
     RunResult,
@@ -119,6 +121,36 @@ class AtworksBackend(ABC):
         ``q.scope_operator``는 **서버 측 조인/필터**로 구현한다 — 오퍼레이터의 API id 목록을 받아
         ``scope_api_ids``에 싣는 방식은 금지다(그 목록엔 상한이 있고, 상한은 곧 커버리지 구멍이다).
         스코프 = "이 오퍼레이터가 창 안에서 실행한 API"이고, 창의 하한은 이 질의의 ``since``다."""
+
+    @abstractmethod
+    async def query_runs(self, session: AtworksSessionContext, spec: QuerySpec) -> QueryResult:
+        """자가발전 질의(self-growth spec §3-5) 1회. ``spec``은 모델이 채운 **구조화** 질의이고,
+        SQL은 서버가 컴파일한다 -- 모델이 쓴 SQL 문자열은 이 경로 어디에도 없다. 읽기 전용이다:
+        무엇도 스테이징하지 않고, 무엇도 판정하지 않으며, 숫자는 전부 서버가 계산한다.
+
+        REST 구현 의무(자가발전 spec §4):
+        * **자기 물질화 데이터 위에서 컴파일한다.** 소스 선택은 spec §4의 표 그대로다 -- 차원이
+          없거나 ``api``/``path_*``/``method``/``api_group``/``target_env``/``test_data_label``/
+          ``day``/``week``면 일별 롤업 ⋈ API 카탈로그, ``failed_rule``/``http_status`` 단독이고 API
+          범위 필터가 없으면 키 축 롤업, ``executed_by`` 단독(또는 ``day``/``week``와만 조합)이면
+          오퍼레이터×일 롤업, 그 밖의 ``executed_by`` 조합과 ``executed_by`` **필터**는 run
+          테이블이다. ``QueryResult.source``는 실제로 읽은 소스의 이름이어야 한다 -- 카드와
+          벤치가 그 문자열을 읽는다.
+        * **창**: ``filters.window_days``가 있으면 ``[now - window_days, now]``, ``since``/
+          ``until``이 있으면 그대로, 둘 다 없으면 서버의 기본 창(``max_aggregate_window_days``).
+          ``day``/``week``와 창 경계는 서버의 ``briefing_tz`` 기준 로컬 날짜다.
+        * **정렬과 절단은 집계 질의 안에서** (``ORDER BY … LIMIT``). 애플리케이션이 전체 그룹을
+          받아 정렬하면 셀 축에서 프로젝트 크기만큼 행이 넘어온다 -- scale 브랜치의 상시 규칙.
+        * ``total_groups``는 **LIMIT 전** 그룹 수, ``population``은 필터를 적용한 run COUNT.
+          둘 다 필터 적용 후의 값이고 ``limit``과 무관하다 -- 표본이 아니다.
+        * ``rows[*].api_ids``(≤20) / ``run_ids``(≤5, 최신순)는 **증거 표본**이다. 호출자가 그
+          id를 인용할 수 있게 서버가 채우며(그래서 실행기가 세션 ``seen_*``에 기억한다),
+          모집단이 아니다. ``include_samples=False``면 비운다.
+        * 어떤 측정값을 이 소스가 아예 못 내면 그 자리는 **NULL**로 둔다 -- 0으로 채우면 아무도
+          계산하지 않은 수를 발표하는 것이다. ``compare_previous_window``도 같다: 바로 앞
+          같은 길이의 창을 같은 스펙으로 돌려 그룹 키 기준으로 이어 붙이고, 못 낸 측정값은
+          ``_prev``/``_delta`` 둘 다 NULL이다.
+        * **응답 바디는 절대 싣지 않는다.** 이 읽기는 집계와 id뿐이다(scale spec의 바디 규율)."""
 
     @abstractmethod
     async def summarize_insights(

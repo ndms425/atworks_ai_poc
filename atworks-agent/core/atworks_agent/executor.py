@@ -14,9 +14,11 @@ from commerce_common.presentation import PresentationComponent, PresentationExte
 from commerce_common.skills import SkillRegistry
 from commerce_common.streaming import AgentEvent, ToolOutcome
 from commerce_common.types import PROVENANCE_CAP
+from pydantic import ValidationError
 
 from .aggregation import GROUP_BY
 from .backend import AtworksBackend
+from .catalog import title_for_spec
 from .config import AtworksAgentConfig
 from .enrichment import PRESENTATION_COMPONENTS
 from .fencing import ATWORKS_FENCE
@@ -86,6 +88,7 @@ from .types import (
     AtworksSessionState,
     FormatBatch,
     JobSpec,
+    QuerySpec,
     RunResult,
     RunsQuery,
     RunStatus,
@@ -104,6 +107,10 @@ RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
 _AGGREGATE_GROUP_LIMIT = 50
 # Candidate evidence ids gathered from those groups before the newest PROVENANCE_CAP are kept.
 _AGGREGATE_RUN_ID_FETCH = 1000
+# Evidence run ids per row in the query_runs envelope. The backend stores up to 5 per row (and
+# the card shows them all); the fenced text carries fewer, because the model only ever needs one
+# or two to cite -- the rest are for the card and for provenance, not for the prompt's bytes.
+_QUERY_ROW_RUN_IDS = 3
 
 
 def _matches_filter(run: RunResult, filt: str) -> bool:
@@ -119,12 +126,17 @@ def _matches_filter(run: RunResult, filt: str) -> bool:
 
 class InvalidToolArgument(ValueError):
     """A tool argument failed a manual (non-pydantic) check; ``domain_error`` reports it
-    by field name instead of the generic unavailable ladder."""
+    by field name instead of the generic unavailable ladder.
 
-    def __init__(self, field: str, *, kind: str = "datetime") -> None:
+    ``detail`` carries a specific reason when there is one (the pydantic message behind a
+    ``kind="schema"`` failure) so the model is told WHICH field of a nested object it got
+    wrong, rather than only that the object was rejected."""
+
+    def __init__(self, field: str, *, kind: str = "datetime", detail: str | None = None) -> None:
         super().__init__(field)
         self.field = field
         self.kind = kind
+        self.detail = detail
 
 
 def _iso(value: Any, field: str) -> datetime | None:
@@ -253,6 +265,17 @@ class AtworksToolExecutor(BaseToolExecutor):
                 return ToolOutcome.error(f"{error.field} must be one of pass, fail, error, non_pass; adjust and call again.")
             if error.kind == "enum":
                 return ToolOutcome.error(f"{error.field} must be one of {', '.join(GROUP_BY)}; adjust and call again.")
+            if error.kind == "schema":
+                detail = f" ({self._sanitize(error.detail, 300)})" if error.detail else ""
+                return ToolOutcome.error(
+                    f"{error.field} is not a valid query spec{detail}; fix it against the catalogue "
+                    "in the tool description and call again."
+                )
+            if error.kind == "scope":
+                return ToolOutcome.error(
+                    f"{error.field} may only be this session's own operator; drop it or use the "
+                    "executed_by filter to name whose runs you mean."
+                )
             if error.kind == "provenance":
                 return ToolOutcome.error(f"{error.field} must be an api_id that search_apis or get_api returned this session; call search_apis first.")
             if error.kind == "selection":
@@ -316,6 +339,7 @@ class AtworksToolExecutor(BaseToolExecutor):
             "get_run": self._get_run,
             "rank_failed_runs": self._rank_failed_runs,
             "aggregate_runs": self._aggregate_runs,
+            "query_runs": self._query_runs,
             "get_pending_jobs": self._get_pending_jobs,
             "stage_job": self._stage_job,
             "apply_job": self._apply_job,
@@ -472,6 +496,62 @@ class AtworksToolExecutor(BaseToolExecutor):
             ],
             "more": max(0, len(groups) - len(shown)),
             "note": "Figures are host-computed; show them with present_run_groups (group keys above), never in prose.",
+        })
+
+    async def _query_runs(self, tool_input: dict[str, Any]) -> ToolOutcome:
+        """The self-growth structured query (spec §5). The whole tool input IS the QuerySpec:
+        pydantic (extra="forbid", catalogue enums, limit<=50) is the only thing that decides what
+        a valid question looks like, and the SQL behind it is the host's — no model string
+        reaches a statement. Two checks live here rather than in the model because they are about
+        this SESSION, not about the shape: an api_id filter must name an API the session has
+        seen, and scope_operator may only be the session's own operator."""
+        try:
+            spec = QuerySpec.model_validate(tool_input)
+        except ValidationError as invalid:
+            first = invalid.errors()[0]
+            location = ".".join(str(part) for part in first["loc"]) or "spec"
+            raise InvalidToolArgument("spec", kind="schema", detail=f"{location}: {first['msg']}") from invalid
+        unseen = [i for i in (spec.filters.api_ids or []) if i not in self._state.seen_apis]
+        if unseen:
+            raise InvalidToolArgument("filters.api_ids", kind="provenance")
+        # "내가 실행한 것" is the operator asking about THEIR OWN scope. A spec naming another
+        # operator there would use one person's session to profile another's work, so it is
+        # refused outright rather than silently rewritten; `executed_by` is the honest filter for
+        # "runs someone else made" and stays open.
+        if spec.filters.scope_operator is not None and spec.filters.scope_operator != self._session.operator:
+            raise InvalidToolArgument("filters.scope_operator", kind="scope")
+        result = await self._backend.query_runs(self._session, spec)
+        if result.turn_id is None and self._state.current_turn_id:
+            result = result.model_copy(update={"turn_id": self._state.current_turn_id})
+        # Provenance (spec §2 clause 2): the evidence ids the rows cite become session-seen, so a
+        # card or a screen directive may name them under exactly the same rule as any other id.
+        # These are SAMPLES -- the population stays the backend's own `population` count.
+        missing = [i for i in dict.fromkeys(i for row in result.rows for i in row.api_ids)
+                   if i not in self._state.seen_apis]
+        if missing:
+            for api in await self._backend.get_apis(self._session, missing):
+                self._state.remember_api(api)
+        cited = list(dict.fromkeys(i for row in result.rows for i in row.run_ids))
+        runs = await self._backend.runs_by_ids(self._session, cited) if cited else []
+        runs.sort(key=lambda r: (r.executed_at, r.run_id), reverse=True)
+        for run in runs:
+            self._state.remember_run(run)
+        self._state.last_listed_run_ids = [r.run_id for r in runs][:PROVENANCE_CAP]
+        self._state.last_listed_filter = spec.filters.status or "all"
+        self._state.last_population = result.population
+        self._state.last_query_result = result
+        since, until = result.window
+        return self._fenced({
+            "spec_summary": title_for_spec(spec, default_window_days=self._config.max_aggregate_window_days),
+            "source": result.source,
+            "window": {"since": since.isoformat(), "until": until.isoformat()},
+            "population": result.population,
+            "total_groups": result.total_groups,
+            "rows": [
+                {"keys": row.keys, "measures": row.measures, "run_ids": row.run_ids[:_QUERY_ROW_RUN_IDS]}
+                for row in result.rows[: spec.limit]
+            ],
+            "note": "Figures are host-computed; show them with present_query_table, never in prose.",
         })
 
     # -- 실행 계획 ----------------------------------------------------------------------

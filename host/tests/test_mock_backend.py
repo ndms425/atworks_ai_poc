@@ -5,11 +5,14 @@ from pathlib import Path
 from atworks_agent import (
     ActorKind,
     AtworksAgentConfig,
+    AtworksBackend,
     AtworksSessionContext,
     AuditEntry,
     Binding,
     JobDraft,
     JobKind,
+    QueryFilters,
+    QuerySpec,
     RuleDraft,
     RunsQuery,
     RunStatus,
@@ -399,3 +402,55 @@ async def test_audit_pages_same_timestamp_rows_by_seq_numerically_not_lexicograp
     ])
     page = await b.audit(SESSION, limit=50)
     assert [e.seq for e in page.items] == [10, 9]
+
+
+async def test_query_runs_returns_the_store_result_with_the_config_window():
+    """Mock.query_runs is a pure pass-through to Store.query: the two context values it adds
+    (the session's now, the config's tz + default window) are what makes an identical call
+    through the backend and through the store produce the identical result."""
+    b = _backend()
+    spec = QuerySpec(filters=QueryFilters(status="non_pass"), dimensions=["api"],
+                     measures=["runs", "non_pass", "apis"], order_by="non_pass", limit=10)
+    through_backend = await b.query_runs(SESSION, spec)
+    cfg = AtworksAgentConfig(model="m")
+    direct = b.store.query(spec, now=SESSION.local_now(), tz=cfg.briefing_tz,
+                           default_window_days=cfg.max_aggregate_window_days)
+    assert through_backend.model_dump() == direct.model_dump()
+    # The window a spec that names none gets is the config's aggregate window, to the day.
+    since, until = through_backend.window
+    assert (until - since).days == cfg.max_aggregate_window_days
+    assert through_backend.source == "rollup_day"
+    # population/total_groups are filter-applied and limit-independent (the ABC's contract):
+    # the ten rows that came back are a page of the groups, never the whole population.
+    assert through_backend.rows and len(through_backend.rows) <= 10
+    assert through_backend.total_groups >= len(through_backend.rows)
+    assert through_backend.population >= sum(r.measures["runs"] for r in through_backend.rows)
+
+
+async def test_query_runs_window_days_beats_the_default():
+    b = _backend()
+    spec = QuerySpec(filters=QueryFilters(window_days=7), dimensions=["day"], measures=["runs"], order_by="key")
+    result = await b.query_runs(SESSION, spec)
+    since, until = result.window
+    assert (until - since).days == 7
+
+
+async def test_query_runs_samples_are_ids_the_store_really_has():
+    b = _backend()
+    result = await b.query_runs(SESSION, QuerySpec(
+        filters=QueryFilters(status="non_pass"), dimensions=["api"], measures=["non_pass"], limit=5))
+    cited = [i for row in result.rows for i in row.run_ids]
+    assert cited, "the fixtures should have non-pass runs to sample"
+    assert len(cited) == len(await b.runs_by_ids(SESSION, cited))
+    for row in result.rows:
+        assert len(row.api_ids) <= 20 and len(row.run_ids) <= 5
+
+
+def test_every_backend_subclass_implements_query_runs():
+    """query_runs is abstract on the ABC, so nothing instantiable can omit it -- and every
+    subclass loaded in this run really defines its own, rather than inheriting the stub."""
+    assert "query_runs" in AtworksBackend.__abstractmethods__
+    subclasses = list(AtworksBackend.__subclasses__())
+    assert MockAtworks in subclasses
+    for subclass in subclasses:
+        assert "query_runs" in vars(subclass), subclass.__name__

@@ -16,6 +16,7 @@ import type {
   JobSpec,
   ParitySummaryPayload,
   ProfilePreviewPayload,
+  QueryTablePayload,
   QuestionFormPayload,
   RulePreviewPayload,
   RunDigestPayload,
@@ -26,6 +27,7 @@ import FormatBatchCard from "./FormatBatchCard";
 import JobPreviewCard from "./JobPreviewCard";
 import ParitySummaryCard from "./ParitySummaryCard";
 import ProfilePreviewCard from "./ProfilePreviewCard";
+import QueryTableCard from "./QueryTableCard";
 import QuestionFormCard from "./QuestionFormCard";
 import RulePreviewCard from "./RulePreviewCard";
 import RunDigestCard from "./RunDigestCard";
@@ -58,6 +60,8 @@ export default function GenerativeBlock({
       return <RunDigestCard payload={block.payload as RunDigestPayload} onPrefill={onPrefill} onAttach={onAttach} />;
     case "run_groups":
       return <RunGroupsCard payload={block.payload as RunGroupsPayload} onPrefill={onPrefill} onAttach={onAttach} />;
+    case "query_table":
+      return <QueryTableCard payload={block.payload as QueryTablePayload} onPrefill={onPrefill} onAttach={onAttach} />;
     case "job_preview":
       return <JobPreviewCard payload={block.payload as JobPreviewPayload} onAct={onChangeAction} />;
     case "rule_preview":

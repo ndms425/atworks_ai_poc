@@ -215,6 +215,9 @@ class RecordingBackend(AtworksBackend):
     async def aggregate_runs(self, session, q):
         raise NotImplementedError
 
+    async def query_runs(self, session, spec):
+        raise NotImplementedError
+
     async def summarize_insights(self, session, since, until=None, scope_operator=None):
         raise NotImplementedError
 

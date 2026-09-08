@@ -32,6 +32,8 @@ from atworks_agent import (
     Page,
     ProfileDraft,
     ProfileLedger,
+    QueryResult,
+    QuerySpec,
     RuleDraft,
     RuleImpact,
     RuleLedger,
@@ -265,6 +267,20 @@ class MockAtworks(AtworksBackend):
         return self.store.aggregate_rollups(
             q, flaky_min=self._config.flaky_min_transitions, apis=self.apis,
             briefing_tz=self._config.briefing_tz,
+        )
+
+    async def query_runs(self, session, spec: QuerySpec) -> QueryResult:
+        # The whole method is one Store call: compilation, source selection, the window rule,
+        # the ranked page, the totals and the evidence samples all live in `Store.query` /
+        # `query_sql` (self-growth spec §4), so this backend adds nothing but the two pieces of
+        # deployment context the compiler cannot know -- "now" (the session's clock) and the
+        # config's timezone plus the default window a spec that names none falls back to. Same
+        # `max_aggregate_window_days` the executor hands `title_for_spec`, so the card's title
+        # and the rows below it always describe the same window.
+        now = session.local_now() if session is not None else None
+        return self.store.query(
+            spec, now=now or datetime.now(UTC), tz=self._config.briefing_tz,
+            default_window_days=self._config.max_aggregate_window_days,
         )
 
     async def summarize_insights(self, session, since, until=None, scope_operator=None) -> Insights:

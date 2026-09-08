@@ -10,6 +10,7 @@ from ..types import ScreenFilter, ScreenTarget, ScreenTargetKind
 
 DIGEST_TOOL = "present_run_digest"
 GROUPS_TOOL = "present_run_groups"
+QUERY_TABLE_TOOL = "present_query_table"
 PREVIEW_TOOL = "present_job_preview"
 RULE_PREVIEW_TOOL = "present_rule_preview"
 FORMAT_BATCH_TOOL = "present_format_batch"
@@ -36,6 +37,13 @@ class PresentRunGroupsPayload(PresentationPayload):
     """모델은 제목과 보여줄 그룹 키만 고른다; 숫자는 aggregate_runs가 세션에 남긴 RunGroup에서 온다."""
     title: str | None = Field(default=None, max_length=80)
     group_keys: list[str] = Field(min_length=1, max_length=50)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class PresentQueryTablePayload(PresentationPayload):
+    """모델은 제목(과 선택적 한 줄)만 고른다; 열·행·숫자·창·소스는 전부 마지막 query_runs가 세션에
+    남긴 QueryResult에서 온다. 결과가 없으면 enrichment가 거절한다."""
+    title: str = Field(max_length=80)
     note: str | None = Field(default=None, max_length=200)
 
 

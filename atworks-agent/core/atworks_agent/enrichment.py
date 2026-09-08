@@ -17,6 +17,7 @@ from commerce_common.presentation import (
 )
 from pydantic import BaseModel
 
+from .catalog import DIMENSIONS, MEASURES, title_for_spec
 from .gates import PROVENANCE_GATE
 from .question_form import QuestionFormPayload
 from .rules import FORMAT_EXAMPLES, NAMED_FORMATS
@@ -31,6 +32,7 @@ from .tools.presentation import (
     PARITY_SUMMARY_TOOL,
     PREVIEW_TOOL,
     PROFILE_PREVIEW_TOOL,
+    QUERY_TABLE_TOOL,
     QUESTION_TOOL,
     RULE_PREVIEW_TOOL,
     HighlightScreenPayload,
@@ -39,6 +41,7 @@ from .tools.presentation import (
     PresentJobPreviewPayload,
     PresentParitySummaryPayload,
     PresentProfilePreviewPayload,
+    PresentQueryTablePayload,
     PresentRulePreviewPayload,
     PresentRunDigestPayload,
     PresentRunGroupsPayload,
@@ -154,6 +157,67 @@ async def enrich_run_groups(payload: PresentRunGroupsPayload, context: Enrichmen
         "population": state.last_population, "population_filter": state.last_listed_filter,
         "since": state.last_aggregate_since.isoformat() if state.last_aggregate_since else None,
         "shown": len(items), "items": items,
+    }
+
+
+COMPARE_NOTE = (
+    "이전 기간 열은 두 기간의 **상위 목록끼리** 비교한 값입니다 — 이번 기간 상위에 없는 키는 행으로 "
+    "올라오지 않고, 이전 기간 상위 밖이던 키는 이전 값이 0으로 보입니다. 두 모집단 전체의 비교가 아닙니다."
+)
+
+
+async def enrich_query_table(payload: PresentQueryTablePayload, context: EnrichmentContext) -> dict[str, Any]:
+    """The query_table card. Every figure here is copied out of the QueryResult the last
+    query_runs call left in the session — this function computes no number and derives no
+    verdict, exactly like enrich_run_groups. The model contributes a title and one optional
+    line."""
+    result = context.state.last_query_result
+    if result is None:
+        raise PresentationRefused(
+            "There is no query result to show — call query_runs first; it records the rows, the "
+            "population and the window this card reads.",
+            gate=PROVENANCE_GATE,
+        )
+    spec = result.spec
+    compare = spec.compare_previous_window
+    columns: list[dict[str, str]] = [
+        {"key": dimension, "label": DIMENSIONS[dimension].label_ko, "kind": "dimension"}
+        for dimension in spec.dimensions
+    ]
+    if not spec.dimensions:
+        # 0 dimensions is the spec's "one grand-total row"; the table still needs a first column
+        # to hang that row on, and its cell is the same 전체 the title uses.
+        columns.append({"key": "_total", "label": "전체", "kind": "dimension"})
+    for measure in spec.measures:
+        label = MEASURES[measure].label_ko
+        columns.append({"key": measure, "label": label, "kind": "measure"})
+        if compare:
+            # Present for every requested measure whenever compare is on: the host writes both
+            # keys on every row, using null (not 0) where its source could not measure them.
+            columns.append({"key": f"{measure}_prev", "label": f"{label} (이전)", "kind": "prev"})
+            columns.append({"key": f"{measure}_delta", "label": f"{label} (증감)", "kind": "delta"})
+    since, until = result.window
+    return {
+        "title": payload.title,
+        "note": payload.note,
+        "columns": columns,
+        "rows": [
+            {"keys": {**row.keys, "_total": "전체"} if not spec.dimensions else dict(row.keys),
+             "measures": dict(row.measures), "api_ids": list(row.api_ids), "run_ids": list(row.run_ids)}
+            for row in result.rows
+        ],
+        "total_groups": result.total_groups,
+        "population": result.population,
+        "window": {"since": since.isoformat(), "until": until.isoformat()},
+        "source": result.source,
+        "spec": spec.model_dump(mode="json", exclude_none=True),
+        "spec_summary": title_for_spec(spec, default_window_days=context.config.max_aggregate_window_days),
+        "compare": compare,
+        "compare_note": COMPARE_NOTE if compare else None,
+        "turn_id": result.turn_id or context.state.current_turn_id,
+        # Task 6 fills this (a vocabulary alias the turn proposed); until then the card renders
+        # nothing for it, and Task 8 does the same for the 👍/👎 row.
+        "pending_alias": None,
     }
 
 
@@ -355,6 +419,7 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
     for spec in (
         PresentationComponent(name=DIGEST_TOOL, component="run_digest", payload_model=PresentRunDigestPayload, enrich=enrich_run_digest),
         PresentationComponent(name=GROUPS_TOOL, component="run_groups", payload_model=PresentRunGroupsPayload, enrich=enrich_run_groups),
+        PresentationComponent(name=QUERY_TABLE_TOOL, component="query_table", payload_model=PresentQueryTablePayload, enrich=enrich_query_table),
         PresentationComponent(name=PREVIEW_TOOL, component="job_preview", payload_model=PresentJobPreviewPayload, enrich=enrich_job_preview),
         PresentationComponent(name=RULE_PREVIEW_TOOL, component="rule_preview", payload_model=PresentRulePreviewPayload, enrich=enrich_rule_preview),
         PresentationComponent(name=FORMAT_BATCH_TOOL, component="format_batch", payload_model=PresentFormatBatchPayload, enrich=enrich_format_batch),

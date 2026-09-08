@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import product
 
 import pytest
 from commerce_common.skills import Skill, SkillRegistry
@@ -20,6 +21,8 @@ from atworks_agent.types import (
     AtworksSessionState,
     AuditEntry,
     Page,
+    QueryResult,
+    QueryRow,
     RuleRecommendation,
     RunResult,
     RunStatus,
@@ -27,6 +30,69 @@ from atworks_agent.types import (
 )
 
 T0 = datetime(2026, 9, 1, 9, tzinfo=UTC)
+
+
+def _double_api_matches(api, filters) -> bool:
+    """The API-catalogue half of QueryFilters, for the double's own run list."""
+    if api is None:
+        return not (filters.path_contains or filters.path_prefix or filters.method or filters.api_group)
+    path = api.path.lower()
+    return (
+        (filters.path_contains is None or any(t.lower() in path for t in filters.path_contains))
+        and (filters.path_prefix is None or api.path.startswith(filters.path_prefix))
+        and (filters.method is None or api.method in filters.method)
+        and (filters.api_group is None or api.group in filters.api_group)
+    )
+
+
+def _double_keys(run, api, dimension: str) -> list:
+    """Every group key ONE run contributes on one dimension -- a list, not a value: a run that
+    failed three rules belongs to three ``failed_rule`` groups (the fan-out the key-axis rollup
+    materializes), and a run with no failed rule, no status or no operator belongs to none."""
+    segments = api.path.strip("/").split("/") if api is not None else []
+    if dimension == "api":
+        return [run.api_id]
+    if dimension == "path_segment_1":
+        return [segments[0]] if segments else [None]
+    if dimension == "path_segment_2":
+        return [segments[1]] if len(segments) >= 2 else [None]
+    if dimension == "path_prefix_2":
+        return ["/".join(segments[:2])] if segments else [None]
+    if dimension == "method":
+        return [api.method if api is not None else None]
+    if dimension == "api_group":
+        return [api.group if api is not None else None]
+    if dimension == "target_env":
+        return [run.target_env]
+    if dimension == "test_data_label":
+        return [run.test_data_label]
+    if dimension == "failed_rule":
+        return list(run.failed_rules)
+    if dimension == "http_status":
+        return [str(run.http_status)] if run.http_status is not None else []
+    if dimension == "executed_by":
+        return [run.executed_by] if run.executed_by else []
+    if dimension == "day":
+        return [run.executed_at.date().isoformat()]
+    if dimension == "week":
+        year, week, _ = run.executed_at.isocalendar()
+        return [f"{year}-W{week:02d}"]
+    return [None]
+
+
+def _double_measures(names, group) -> dict:
+    """The seven measures a plain run list can answer; the other two stay None (the ABC's rule:
+    a measure this source cannot produce is NULL, never 0)."""
+    total = len(group)
+    counts = {s: sum(1 for r in group if r.status.value == s) for s in ("pass", "fail", "error")}
+    values = {
+        "runs": total, "pass": counts["pass"], "fail": counts["fail"], "error": counts["error"],
+        "non_pass": counts["fail"] + counts["error"],
+        "fail_rate": round((counts["fail"] + counts["error"]) / total, 4) if total else 0.0,
+        "apis": len({r.api_id for r in group}),
+        "transitions": None, "p95_duration_ms": None,
+    }
+    return {name: values[name] for name in names}
 
 
 class InMemoryBackend(AtworksBackend):
@@ -138,6 +204,62 @@ class InMemoryBackend(AtworksBackend):
             for g in groups:
                 g.run_ids = []
         return groups
+
+    async def query_runs(self, session, spec):
+        """A naive in-Python stand-in for ``Store.query`` -- enough for the executor and card
+        tests (grouping, totals, evidence samples), never an oracle. Measures this double cannot
+        derive from a plain run list (``transitions``, ``p95_duration_ms``) come back None, which
+        is exactly what the ABC says a source that cannot measure something must do. Days/weeks
+        are UTC here, not ``briefing_tz``: the double has no rollups to be consistent with.
+        ``compare_previous_window`` is not implemented -- a test that needs `_prev`/`_delta` sets
+        ``state.last_query_result`` itself."""
+        now = (session.local_now() if session is not None else None) or datetime.now(UTC)
+        f = spec.filters
+        if f.window_days is not None:
+            since, until = now - timedelta(days=f.window_days), now
+        else:
+            since = f.since or now - timedelta(days=self._config.max_aggregate_window_days)
+            until = f.until or now
+        scope = self._operator_scope_runs(f.scope_operator, since)
+        rows = [r for r in self.runs
+                if since <= r.executed_at <= until
+                and (f.status in (None, "all")
+                     or (f.status == "non_pass" and r.status.value != "pass")
+                     or r.status.value == f.status)
+                and (f.api_ids is None or r.api_id in f.api_ids)
+                and (scope is None or r.api_id in scope)
+                and (f.target_env is None or r.target_env in f.target_env)
+                and (f.test_data_label is None or r.test_data_label in f.test_data_label)
+                and (f.executed_by is None or r.executed_by in f.executed_by)
+                and (f.http_status is None or r.http_status in f.http_status)
+                and (f.failed_rule is None or any(x in f.failed_rule for x in r.failed_rules))
+                and _double_api_matches(self.apis.get(r.api_id), f)]
+        buckets: dict[tuple, list] = {}
+        for run in rows:
+            api = self.apis.get(run.api_id)
+            per_dimension = [_double_keys(run, api, d) for d in spec.dimensions]
+            for key in product(*per_dimension) if spec.dimensions else [()]:
+                buckets.setdefault(key, []).append(run)
+        result_rows = [
+            QueryRow(
+                keys=dict(zip(spec.dimensions, key, strict=True)),
+                measures=_double_measures(spec.measures, group),
+                api_ids=(list(dict.fromkeys(r.api_id for r in group))[:20] if spec.include_samples else []),
+                run_ids=([r.run_id for r in sorted(group, key=lambda r: (r.executed_at, r.run_id), reverse=True)][:5]
+                         if spec.include_samples else []),
+            )
+            for key, group in buckets.items()
+        ]
+        # Ties break on the group key ascending, so the cut is deterministic: sort by key first,
+        # then stable-sort by the ranked measure (the same two-level order the SQL states).
+        result_rows.sort(key=lambda r: tuple("" if v is None else str(v) for v in r.keys.values()),
+                         reverse=spec.order_by == "key" and spec.descending)
+        if spec.order_by != "key":
+            result_rows.sort(key=lambda r: r.measures.get(spec.order_by) or 0, reverse=spec.descending)
+        return QueryResult(
+            spec=spec, rows=result_rows[: spec.limit], total_groups=len(result_rows),
+            population=len(rows), window=(since, until), source="runs",
+        )
 
     async def summarize_insights(self, session, since, until=None, scope_operator=None):
         scope = self._operator_scope_runs(scope_operator, since)

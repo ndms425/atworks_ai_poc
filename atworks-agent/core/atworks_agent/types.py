@@ -788,6 +788,14 @@ class AtworksSessionState(BaseModel):
     host_action_profile_ids: set[str] = Field(default_factory=set)
     # Typed with the real model so it survives the session JSON round-trip
     current_screen: ScreenState | None = None
+    # -- 자가발전 질의 (self-growth) --------------------------------------------------
+    # The last query_runs result, typed with the real model (the seen_rules lesson) so a card
+    # rendered after a session round-trip still reads real numbers. present_query_table is the
+    # only reader: the card's every figure comes from here, never from a model sentence.
+    last_query_result: QueryResult | None = None
+    # The turn id the runtime stamps on this turn (set by Task 4's stream_turn); the query_table
+    # card carries it so a 👍/👎 on the card can be matched back to the ask_log row.
+    current_turn_id: str | None = None
 
     def remember_api(self, api: ApiSpec) -> None:
         remember(self.seen_apis, api.api_id, api)

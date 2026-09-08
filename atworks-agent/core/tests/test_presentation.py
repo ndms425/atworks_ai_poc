@@ -9,6 +9,7 @@ from atworks_agent.enrichment import (
     PRESENTATION_COMPONENTS,
     enrich_highlight_screen,
     enrich_navigate_screen,
+    enrich_query_table,
 )
 from atworks_agent.gates import PROVENANCE_GATE
 from atworks_agent.rules import RuleImpact, ValidationRule
@@ -16,6 +17,7 @@ from atworks_agent.tools.presentation import (
     HighlightScreenPayload,
     HighlightTarget,
     NavigateScreenPayload,
+    PresentQueryTablePayload,
 )
 from atworks_agent.types import (
     ApiSpec,
@@ -27,6 +29,10 @@ from atworks_agent.types import (
     FormatBatchEntry,
     JobKind,
     JobSpec,
+    QueryFilters,
+    QueryResult,
+    QueryRow,
+    QuerySpec,
     RunGroup,
     RunResult,
     RunStatus,
@@ -614,3 +620,117 @@ def test_highlight_payload_pydantic_cap_is_a_loose_ceiling_above_the_default_reg
     targets = [HighlightTarget(kind="run", ref_id=f"run-{i:04d}") for i in range(12)]
     payload = HighlightScreenPayload(targets=targets)
     assert len(payload.targets) == 12
+
+
+# -- query_table (self-growth spec §5) ---------------------------------------------------
+
+def _query_result(**overrides):
+    fields = {"filters": QueryFilters(status="non_pass", window_days=30),
+              "dimensions": ["path_segment_2"], "measures": ["non_pass", "apis"],
+              "order_by": "non_pass", "limit": 20} | overrides.pop("spec", {})
+    spec = QuerySpec(**fields)
+    base = {
+        "spec": spec,
+        "rows": [
+            QueryRow(keys={"path_segment_2": "contracts"}, measures={"non_pass": 12, "apis": 3},
+                     api_ids=["api-1", "api-2"], run_ids=["run-9", "run-8"]),
+            QueryRow(keys={"path_segment_2": "orders"}, measures={"non_pass": 4, "apis": 1},
+                     api_ids=["api-3"], run_ids=["run-2"]),
+        ],
+        "total_groups": 7, "population": 431,
+        "window": (datetime(2026, 8, 9, tzinfo=UTC), datetime(2026, 9, 8, tzinfo=UTC)),
+        "source": "rollup_day",
+    }
+    return QueryResult(**(base | overrides))
+
+
+async def _query_table(state, tool_input=None):
+    return await run_presentation(
+        PRESENTATION_COMPONENTS["present_query_table"],
+        tool_input or {"title": "엔드포인트별 실패"}, _ctx(state), "Shown.",
+    )
+
+
+async def test_query_table_numbers_come_from_the_last_query_result():
+    state = AtworksSessionState()
+    state.last_query_result = _query_result()
+    outcome = await _query_table(state)
+    ui = outcome.events[0]
+    assert ui.data["component"] == "query_table"
+    payload = ui.data["payload"]
+    assert payload["population"] == 431 and payload["total_groups"] == 7
+    assert payload["source"] == "rollup_day"
+    assert payload["window"]["since"].startswith("2026-08-09")
+    assert [r["measures"] for r in payload["rows"]] == [{"non_pass": 12, "apis": 3}, {"non_pass": 4, "apis": 1}]
+    assert payload["rows"][0]["run_ids"] == ["run-9", "run-8"]
+    assert payload["title"] == "엔드포인트별 실패" and payload["note"] is None
+
+
+async def test_query_table_columns_are_catalogue_labels_in_spec_order():
+    state = AtworksSessionState()
+    state.last_query_result = _query_result()
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert [(c["key"], c["kind"]) for c in payload["columns"]] == [
+        ("path_segment_2", "dimension"), ("non_pass", "measure"), ("apis", "measure"),
+    ]
+    assert payload["columns"][0]["label"] == "경로 2조각별"
+    assert payload["columns"][1]["label"] == "실패+에러 수"
+    assert payload["compare"] is False and payload["compare_note"] is None
+
+
+async def test_query_table_compare_adds_prev_and_delta_columns_and_the_two_top_lists_note():
+    state = AtworksSessionState()
+    result = _query_result(spec={"compare_previous_window": True})
+    for row in result.rows:
+        row.measures |= {"non_pass_prev": 0, "non_pass_delta": row.measures["non_pass"],
+                         "apis_prev": None, "apis_delta": None}
+    state.last_query_result = result
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert [(c["key"], c["kind"]) for c in payload["columns"]] == [
+        ("path_segment_2", "dimension"),
+        ("non_pass", "measure"), ("non_pass_prev", "prev"), ("non_pass_delta", "delta"),
+        ("apis", "measure"), ("apis_prev", "prev"), ("apis_delta", "delta"),
+    ]
+    # The ledger's ruling: the compare column is a comparison of two TOP LISTS, and the card
+    # must say so -- a key below the earlier window's cut reads 0, not "it did not happen".
+    assert payload["compare"] is True
+    assert "상위 목록" in payload["compare_note"]
+    assert payload["rows"][0]["measures"]["apis_prev"] is None   # unmeasurable stays null, not 0
+
+
+async def test_query_table_summary_names_the_window_and_carries_the_spec():
+    state = AtworksSessionState()
+    state.last_query_result = _query_result()
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert payload["spec_summary"] == "실패·에러 · 경로 2조각별 · 30일 · 상위 20"
+    assert payload["spec"]["dimensions"] == ["path_segment_2"]
+    assert payload["spec"]["filters"]["window_days"] == 30
+    assert json.dumps(payload["spec"])   # the footer's collapsible JSON must serialize
+
+
+async def test_query_table_without_dimensions_still_has_a_first_column():
+    state = AtworksSessionState()
+    result = _query_result(spec={"dimensions": []})
+    result.rows = [QueryRow(keys={}, measures={"non_pass": 431, "apis": 12})]
+    state.last_query_result = result
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert payload["columns"][0] == {"key": "_total", "label": "전체", "kind": "dimension"}
+    assert payload["rows"][0]["keys"] == {"_total": "전체"}
+
+
+async def test_query_table_carries_the_turn_id_and_no_alias_yet():
+    state = AtworksSessionState()
+    state.current_turn_id = "turn-77"
+    state.last_query_result = _query_result()
+    payload = (await _query_table(state)).events[0].data["payload"]
+    assert payload["turn_id"] == "turn-77" and payload["pending_alias"] is None
+
+
+async def test_query_table_refuses_without_a_query_result():
+    outcome = await _query_table(AtworksSessionState())
+    assert outcome.blocked == PROVENANCE_GATE and not outcome.events
+    assert "query_runs" in outcome.result_text
+    # And the enrichment hook itself refuses, not just the wrapper.
+    with pytest.raises(PresentationRefused) as refused:
+        await enrich_query_table(PresentQueryTablePayload(title="t"), _ctx(AtworksSessionState()))
+    assert refused.value.gate == PROVENANCE_GATE

@@ -1,15 +1,19 @@
 import json
+from typing import get_args
 
+from atworks_agent.catalog import catalog_hint
 from atworks_agent.config import AtworksAgentConfig
 from atworks_agent.tools.registry import build_tools
+from atworks_agent.types import Dimension, Measure, QueryFilters, QuerySpec
 
 EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "rank_failed_runs", "aggregate_runs",
+            "query_runs",
             "get_pending_jobs", "stage_job", "apply_job", "discard_job",
             "stage_rule", "apply_rule", "discard_rule", "get_pending_rules",
             "find_apis_with_param", "recommend_rules_for_api",
             "stage_format_batch", "apply_format_batch", "discard_format_batch", "get_pending_format_batches",
             "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles", "recommend_ignore_paths",
-            "present_run_digest", "present_run_groups", "present_job_preview", "present_rule_preview",
+            "present_run_digest", "present_run_groups", "present_query_table", "present_job_preview", "present_rule_preview",
             "present_format_batch", "present_parity_summary", "present_profile_preview",
             "present_question_form", "navigate_screen", "highlight_screen", "present_suggestions"]
 
@@ -205,3 +209,62 @@ def test_screen_directive_tools_pair_toggles_together():
     assert "navigate_screen" not in off_names and "highlight_screen" not in off_names
     on_names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_screen_directives=True), [])]
     assert "navigate_screen" in on_names and "highlight_screen" in on_names
+
+
+# -- query_runs (self-growth spec §5) ----------------------------------------------------
+
+def _tool(name, config=None):
+    return next(t for t in build_tools(config or AtworksAgentConfig(model="m"), []) if t["name"] == name)
+
+
+def test_query_runs_schema_carries_the_catalogue_enums():
+    schema = _tool("query_runs")["input_schema"]
+    assert schema["additionalProperties"] is False and schema["required"] == ["measures"]
+    assert schema["properties"]["dimensions"]["items"]["enum"] == list(get_args(Dimension))
+    assert schema["properties"]["measures"]["items"]["enum"] == list(get_args(Measure))
+    assert schema["properties"]["order_by"]["enum"] == [*get_args(Measure), "key"]
+    assert schema["properties"]["filters"]["additionalProperties"] is False
+
+
+def test_query_runs_schema_mirrors_the_pydantic_models_field_for_field():
+    # The schema is hand-written (flat, like every other tool here) rather than generated, so
+    # this is the guard that it cannot drift away from what pydantic will actually accept.
+    schema = _tool("query_runs")["input_schema"]
+    properties = dict(schema["properties"])
+    properties.pop("status", None)   # with_status' narration line, not a QuerySpec field
+    assert set(properties) == set(QuerySpec.model_fields)
+    assert set(schema["properties"]["filters"]["properties"]) == set(QueryFilters.model_fields)
+
+
+def test_query_runs_description_carries_the_catalogue_and_two_examples():
+    description = _tool("query_runs")["description"]
+    assert catalog_hint() in description
+    specs = [json.loads(line) for line in description.split("Examples:\n", 1)[1].strip().split("\n")]
+    assert len(specs) == 2
+    # Both examples must themselves be valid specs -- an example the model copies verbatim and
+    # gets rejected for would teach it the wrong shape.
+    for example in specs:
+        example["filters"].pop("scope_operator", None)
+        QuerySpec.model_validate(example)
+    assert specs[0]["dimensions"] == ["path_segment_2"] and specs[1]["dimensions"] == ["day"]
+
+
+def test_query_table_tool_takes_only_a_title_and_a_note():
+    schema = _tool("present_query_table")["input_schema"]
+    assert set(schema["properties"]) == {"title", "note"} and schema["required"] == ["title"]
+
+
+def test_query_runs_switch_removes_both_tools():
+    names = [t["name"] for t in build_tools(AtworksAgentConfig(model="m", enable_query_runs=False), [])]
+    assert not {"query_runs", "present_query_table"} & set(names)
+    assert "aggregate_runs" in names and "present_run_groups" in names
+
+
+def test_query_tools_are_byte_stable_across_builds():
+    # The whole tool list must stay a pure function of config (cache-stable prefix); the two
+    # query tools carry the catalogue hint and two JSON examples, the most likely place for a
+    # dict-order or float-repr wobble to creep in.
+    a = json.dumps(build_tools(AtworksAgentConfig(model="m"), ["a"]), sort_keys=True, ensure_ascii=False)
+    b = json.dumps(build_tools(AtworksAgentConfig(model="m"), ["a"]), sort_keys=True, ensure_ascii=False)
+    assert a == b
+    assert json.dumps(_tool("query_runs"), sort_keys=True) == json.dumps(_tool("query_runs"), sort_keys=True)

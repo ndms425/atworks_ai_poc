@@ -255,6 +255,50 @@ export interface RunGroupsPayload {
   items: RunGroup[];
 }
 
+/** 자가발전 질의 카드 (query_table) — 열·행·숫자는 전부 서버가 채운 QueryResult에서 온다. */
+export type QueryDimension =
+  | "api" | "path_segment_1" | "path_segment_2" | "path_prefix_2" | "method" | "api_group"
+  | "target_env" | "test_data_label" | "failed_rule" | "http_status" | "executed_by" | "day" | "week";
+
+export type QueryMeasure =
+  | "runs" | "pass" | "fail" | "error" | "non_pass" | "fail_rate" | "apis" | "transitions" | "p95_duration_ms";
+
+export type QuerySource = "rollup_day" | "rollup_key_day" | "rollup_operator_day" | "runs";
+
+export interface QueryTableColumn {
+  /** dimension 이름, measure 이름, `${measure}_prev`, `${measure}_delta`, 또는 차원 없는 질의의 "_total". */
+  key: string;
+  label: string;
+  kind: "dimension" | "measure" | "prev" | "delta";
+}
+
+export interface QueryTableRow {
+  keys: Record<string, string | null>;
+  measures: Record<string, number | null>;
+  api_ids: string[];
+  run_ids: string[];
+}
+
+export interface QueryTablePayload {
+  title: string;
+  note?: string | null;
+  columns: QueryTableColumn[];
+  rows: QueryTableRow[];
+  total_groups: number;
+  population: number;
+  window: { since: string; until: string };
+  source: QuerySource;
+  /** 실행된 QuerySpec 그대로 — 푸터의 접히는 JSON. */
+  spec: Record<string, unknown>;
+  spec_summary: string;
+  compare: boolean;
+  compare_note?: string | null;
+  /** T4가 채운다. T8의 👍/👎가 이 값으로 ask_log 행을 찾는다. */
+  turn_id?: string | null;
+  /** T6이 채운다 — 그때까지 null이고 카드는 아무것도 그리지 않는다. */
+  pending_alias?: { term: string; fragment_summary: string } | null;
+}
+
 export type RuleKind = "compare" | "membership" | "required" | "format";
 
 export interface ValidationRule {
