@@ -98,3 +98,24 @@ body {
   padding: 0 5px;
   z-index: 1;
 }
+
+/*
+ * A picked chip in a `question_form` card.
+ *
+ * `.chip` lives in web-shared/portal/portal.css, which this file imports AFTER Tailwind (line 8),
+ * as plain unlayered CSS. Unlayered rules outrank everything in Tailwind's `@layer utilities`
+ * whatever the specificity, so `.chip`'s own `background`/`border-color`/`color` beat any
+ * `bg-(--…)` utility a component adds for the selected state: the class landed in the DOM and
+ * changed nothing on screen. The selected state therefore has to be declared here, in the same
+ * unlayered cascade and after that import.
+ *
+ * Solid accent rather than the soft tint `.chip:hover` already uses — otherwise hovering an
+ * UNSELECTED chip looks exactly like a selected one. `:hover` is pinned to the same fill so a
+ * selected chip does not appear to switch off under the cursor.
+ */
+.chip-selected,
+.chip-selected:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--surface);
+}

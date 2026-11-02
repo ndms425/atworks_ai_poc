@@ -8,8 +8,14 @@ import { Button, GenCard, GenCardHeader } from "web-shared";
 import type { FormQuestion, QuestionFormPayload } from "@/lib/types";
 
 /** `.chip-on`/`.btn-primary` are storefront-only classes (see web-shared/base.css); this merchant
- * portal marks a picked chip and the submit button with tokens `.chip`/`Button` already carry. */
-const CHIP_ON = "border-(--accent) bg-(--accent-soft) text-(--accent-ink)";
+ * portal declares its own picked-chip rule in `app/globals.css` and the submit button uses the
+ * tokens `Button` already carries.
+ *
+ * It has to be a CLASS, not Tailwind utilities: `.chip` comes from web-shared/portal/portal.css,
+ * which globals.css imports after Tailwind as plain unlayered CSS, and unlayered rules outrank
+ * `@layer utilities` regardless of specificity — so `bg-(--accent-soft)` here never reached the
+ * screen and a picked chip looked exactly like an unpicked one. */
+const CHIP_ON = "chip-selected";
 
 function initial(qs: FormQuestion[]): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
