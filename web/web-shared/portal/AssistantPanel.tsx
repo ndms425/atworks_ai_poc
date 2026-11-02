@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useEffect } from "react";
+import { type ReactNode, useEffect } from "react";
 import { ActivityButton } from "../ActivityButton";
 import { Composer, type Prefill } from "../Composer";
 import { Icon } from "../icons";
@@ -36,6 +36,7 @@ export function AssistantPanel({
   onClose,
   fullscreen = false,
   onToggleFullscreen,
+  aboveComposer,
 }: {
   chat: AgentTurn;
   copy: AssistantPanelCopy;
@@ -46,6 +47,10 @@ export function AssistantPanel({
   onClose: () => void;
   fullscreen?: boolean;
   onToggleFullscreen?: () => void;
+  /** Rendered inside the composer's box, directly above the message field — the seat for
+   * whatever the next send will carry (a portal's attached records, say). Layout only: this
+   * file stays domain-agnostic, so the app owns what goes in here. */
+  aboveComposer?: ReactNode;
 }) {
   const { scrollRef, onScroll, showLatest, jumpToLatest } = useStickToBottom(chat.items, chat.busy, {
     onlyWhileBusy: true,
@@ -126,6 +131,7 @@ export function AssistantPanel({
       </div>
 
       <div className="border-t border-(--line) p-3">
+        {aboveComposer ? <div className={`mb-2 ${column}`}>{aboveComposer}</div> : null}
         <Composer
           send={chat.send}
           ready={chat.ready}

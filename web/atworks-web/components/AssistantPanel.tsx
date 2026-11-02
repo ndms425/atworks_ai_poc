@@ -26,17 +26,50 @@ const COPY = {
   placeholder: "API, 실행, 승인에 대해 물어보세요…",
 };
 
+const ATTACH_KIND_LABEL: Record<AttachedItem["kind"], string> = { api: "API", run: "실행", job: "작업" };
+
+/** What the next message will carry, directly above the field it will be typed in. Attaching used
+ * to update state and `api.pendingAttachments` and show nothing anywhere, so on a wide screen —
+ * where the rail is already open — the button looked dead; the records still rode the next turn,
+ * which is worse than doing nothing: invisible and unremovable. */
+function Attachments({ items, onRemove }: { items: AttachedItem[]; onRemove: (order: number) => void }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1" aria-label={`첨부 ${items.length}건`}>
+      <span className="text-[11.5px] font-medium text-(--ink-soft)">이 질문에 첨부:</span>
+      {items.map((item) => (
+        <span key={`${item.kind}:${item.ref_id}:${item.order}`} className="chip max-w-full gap-1 py-0.5 pr-1">
+          <span className="text-(--ink-soft)">{ATTACH_KIND_LABEL[item.kind]}</span>
+          <span className="truncate">{item.label}</span>
+          <button
+            type="button"
+            onClick={() => onRemove(item.order)}
+            aria-label={`${item.label} 첨부 해제`}
+            className="grid h-4 w-4 shrink-0 place-items-center rounded-full text-(--ink-faint) transition hover:bg-(--well) hover:text-(--ink)"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function AssistantPanel({
   chat,
   prefill,
   onPrefill,
   onAttach,
+  attachments,
+  onRemoveAttachment,
   ...shell
 }: {
   chat: MerchantChat<JobSpec>;
   prefill: Prefill | null;
   onPrefill: (text: string) => void;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  attachments: AttachedItem[];
+  onRemoveAttachment: (order: number) => void;
   newMemoryCount: number;
   onOpenActivity: () => void;
   onClose: () => void;
@@ -80,6 +113,7 @@ export default function AssistantPanel({
       chat={shown}
       copy={COPY}
       prefill={prefill}
+      aboveComposer={<Attachments items={attachments} onRemove={onRemoveAttachment} />}
       renderBlock={(segment) => (
         <GenerativeBlock
           block={segment.block}

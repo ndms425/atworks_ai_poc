@@ -206,6 +206,17 @@ export default function PortalPage() {
     });
   }, []);
 
+  // Taking one back off. `order` is the identity the send/cleanup effect below also keys on, and
+  // it has to stay 1..n without gaps, so the survivors are renumbered — and `api.pendingAttachments`
+  // is the copy the next send actually reads, so it is rewritten here too, never left behind.
+  const onRemoveAttachment = useCallback((order: number) => {
+    setAttached((current) => {
+      const next = current.filter((item) => item.order !== order).map((item, index) => ({ ...item, order: index + 1 }));
+      api.pendingAttachments = next;
+      return next;
+    });
+  }, []);
+
   // A report page links back here with ?attach=run:<id>; take it once, then clean the URL.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -284,6 +295,8 @@ export default function PortalPage() {
                 prefill={prefill}
                 onPrefill={askAssistant}
                 onAttach={onAttach}
+                attachments={attached}
+                onRemoveAttachment={onRemoveAttachment}
                 newMemoryCount={chat.newMemoryKeys.size}
                 onOpenActivity={() => setActivityOpen(true)}
                 {...rail}
