@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AskButton, formatDate, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton } from "web-shared";
 import { fetchRuns } from "@/lib/api";
+import { attachToggle } from "@/lib/attachments";
 import Pager from "@/components/Pager";
 import { RUN_STATUS } from "@/lib/kinds";
 import { usePagedList } from "@/lib/usePagedList";
@@ -18,12 +19,14 @@ export default function RunsView({
   refreshKey,
   attachedCount,
   onAttach,
+  attachedRefs,
   intent,
   onScreen,
 }: {
   refreshKey: number;
   attachedCount: number;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
@@ -122,16 +125,17 @@ export default function RunsView({
                       </td>
                       <td className="py-2 pl-3 pr-[18px]">
                         <AskButton
-                          label="채팅에 첨부"
-                          onClick={() =>
-                            onAttach({
+                          {...attachToggle(
+                            attachedRefs,
+                            {
                               kind: "run",
                               ref_id: run.run_id,
                               label: labelFor(run),
                               field: run.failed_rules?.[0]?.split(/\s/)[0],
                               expected: run.failed_rules?.[0],
-                            })
-                          }
+                            },
+                            onAttach,
+                          )}
                         />
                       </td>
                     </tr>

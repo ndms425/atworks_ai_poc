@@ -285,15 +285,25 @@ export function StatStrip({ children }: { children: ReactNode }) {
   );
 }
 
-/** The small hand-off button on rows and cards: a portal prefills the assistant with it, a storefront sends. */
-export function AskButton({ label, onClick }: { label: string; onClick: () => void }) {
+/** The small hand-off button on rows and cards: a portal prefills the assistant with it, a storefront sends.
+ *
+ * `on` makes it a toggle that shows its own state — a filled button and a check instead of a spark,
+ * so a row the operator already acted on reads as picked at a glance and not only from its label.
+ * Leaving `on` out keeps the plain one-shot button and emits no `aria-pressed`, which would claim a
+ * toggle that isn't there. */
+export function AskButton({ label, onClick, on }: { label: string; onClick: () => void; on?: boolean }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-(--line-strong) bg-(--card) px-2.5 py-[5px] text-[12px] font-semibold text-(--ink-2) transition-colors hover:border-(--accent) hover:bg-(--accent-soft) hover:text-(--accent-ink)"
+      aria-pressed={on}
+      className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 py-[5px] text-[12px] font-semibold transition-colors ${
+        on
+          ? "border-(--accent) bg-(--accent-soft) text-(--accent-ink)"
+          : "border-(--line-strong) bg-(--card) text-(--ink-2) hover:border-(--accent) hover:bg-(--accent-soft) hover:text-(--accent-ink)"
+      }`}
     >
-      <Icon name="spark" size={13} className="text-(--accent)" />
+      <Icon name={on ? "check" : "spark"} size={13} className="text-(--accent)" />
       {label}
     </button>
   );

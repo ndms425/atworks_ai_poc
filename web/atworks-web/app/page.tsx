@@ -15,6 +15,7 @@ import JobsView from "@/components/views/JobsView";
 import RulesView from "@/components/views/RulesView";
 import RunsView from "@/components/views/RunsView";
 import { actOnRule, api, fetchOperators, UNREACHABLE } from "@/lib/api";
+import { attachKey } from "@/lib/attachments";
 import { useScreenHighlight } from "@/lib/useScreenHighlight";
 import type { RuleAction } from "@/lib/useRuleActions";
 import type {
@@ -197,14 +198,28 @@ export default function PortalPage() {
     setPrefill({ text, nonce: Date.now() });
   }, []);
 
+  // One button, both directions: attaching a record that is already attached takes it back off,
+  // which is what the row's own label now promises. The identity is `kind:ref_id`, never `order` —
+  // `order` is positional, has to stay 1..n without gaps (the send/cleanup effect below keys on it)
+  // and is therefore renumbered on the way out. `api.pendingAttachments` is the copy the next send
+  // actually reads, so it is rewritten in both directions, never left behind.
   const onAttach = useCallback((item: Omit<AttachedItem, "order">) => {
     setAssistantOpen(true);
     setAttached((current) => {
-      const next = [...current, { ...item, order: current.length + 1 }];
+      const key = attachKey(item.kind, item.ref_id);
+      const kept = current.filter((a) => attachKey(a.kind, a.ref_id) !== key);
+      const next =
+        kept.length === current.length
+          ? [...current, { ...item, order: current.length + 1 }]
+          : kept.map((a, index) => ({ ...a, order: index + 1 }));
       api.pendingAttachments = next;
       return next;
     });
   }, []);
+
+  // What the rows' toggles read to label and fill themselves. `attached` holds a handful of items
+  // at most, so rebuilding the set on every change costs nothing.
+  const attachedRefs = useMemo(() => new Set(attached.map((a) => attachKey(a.kind, a.ref_id))), [attached]);
 
   // Taking one back off. `order` is the identity the send/cleanup effect below also keys on, and
   // it has to stay 1..n without gaps, so the survivors are renumbered — and `api.pendingAttachments`
@@ -295,6 +310,7 @@ export default function PortalPage() {
                 prefill={prefill}
                 onPrefill={askAssistant}
                 onAttach={onAttach}
+                attachedRefs={attachedRefs}
                 attachments={attached}
                 onRemoveAttachment={onRemoveAttachment}
                 newMemoryCount={chat.newMemoryKeys.size}
@@ -315,19 +331,34 @@ export default function PortalPage() {
               <HomeView refreshKey={refreshKey} operatorId={operatorId} onAskAssistant={askAssistant} onScreen={onScreen} />
             ) : null}
             {view === "apis" ? (
-              <ApisView refreshKey={refreshKey} onAskAssistant={askAssistant} onAttach={onAttach} intent={screenIntent} onScreen={onScreen} />
+              <ApisView
+                refreshKey={refreshKey}
+                onAskAssistant={askAssistant}
+                onAttach={onAttach}
+                attachedRefs={attachedRefs}
+                intent={screenIntent}
+                onScreen={onScreen}
+              />
             ) : null}
             {view === "runs" ? (
               <RunsView
                 refreshKey={refreshKey}
                 attachedCount={attached.length}
                 onAttach={onAttach}
+                attachedRefs={attachedRefs}
                 intent={screenIntent}
                 onScreen={onScreen}
               />
             ) : null}
             {view === "jobs" ? (
-              <JobsView refreshKey={refreshKey} onAct={chat.actOnChange} onAttach={onAttach} intent={screenIntent} onScreen={onScreen} />
+              <JobsView
+                refreshKey={refreshKey}
+                onAct={chat.actOnChange}
+                onAttach={onAttach}
+                attachedRefs={attachedRefs}
+                intent={screenIntent}
+                onScreen={onScreen}
+              />
             ) : null}
             {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} intent={screenIntent} onScreen={onScreen} /> : null}
             {/* Growth는 화면 지시어의 목적지가 아니다(kind를 넓히지 않는 라운드) — `intent`를 받지

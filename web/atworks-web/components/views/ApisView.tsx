@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AskButton, formatDate, Notice, PageHeader, Panel, Pill, plural, SearchField, Skeleton } from "web-shared";
 import { fetchApis } from "@/lib/api";
+import { attachToggle } from "@/lib/attachments";
 import Pager from "@/components/Pager";
 import { usePagedList } from "@/lib/usePagedList";
 import { useScreenFocus } from "@/lib/useScreenFocus";
@@ -15,12 +16,14 @@ export default function ApisView({
   refreshKey,
   onAskAssistant,
   onAttach,
+  attachedRefs,
   intent,
   onScreen,
 }: {
   refreshKey: number;
   onAskAssistant: (text: string) => void;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
@@ -91,8 +94,7 @@ export default function ApisView({
                     <td className="py-2 pl-3 pr-[18px] flex items-center gap-2">
                       <AskButton label="지금 실행 물어보기" onClick={() => onAskAssistant(`${api.path} 지금 실행해줘`)} />
                       <AskButton
-                        label="채팅에 첨부"
-                        onClick={() => onAttach({ kind: "api", ref_id: api.api_id, label: `${api.method} ${api.path}` })}
+                        {...attachToggle(attachedRefs, { kind: "api", ref_id: api.api_id, label: `${api.method} ${api.path}` }, onAttach)}
                       />
                     </td>
                   </tr>

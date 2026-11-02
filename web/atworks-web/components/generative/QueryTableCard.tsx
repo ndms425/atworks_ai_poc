@@ -6,6 +6,7 @@
 import { useState } from "react";
 import { AskButton, formatDate, GenCard, GenCardHeader, Pill } from "web-shared";
 import { actOnVocabulary, sendFeedback } from "@/lib/api";
+import { attachToggle } from "@/lib/attachments";
 import { QUERY_SOURCE_LABEL } from "@/lib/kinds";
 import { QueryTable } from "@/components/QueryTableView";
 import type { AttachedItem, QueryTablePayload } from "@/lib/types";
@@ -92,10 +93,12 @@ export default function QueryTableCard({
   payload,
   onPrefill,
   onAttach,
+  attachedRefs,
 }: {
   payload: QueryTablePayload;
   onPrefill?: (text: string) => void;
   onAttach?: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
 }) {
   const scope = `${payload.population.toLocaleString()}건 · 그룹 ${payload.total_groups.toLocaleString()}개 · ${QUERY_SOURCE_LABEL[payload.source] ?? payload.source}`;
   const hasSamples = payload.rows.some((r) => r.run_ids.length > 0);
@@ -119,14 +122,15 @@ export default function QueryTableCard({
               ? (row) =>
                   row.run_ids[0] ? (
                     <AskButton
-                      label="채팅에 첨부"
-                      onClick={() =>
-                        onAttach?.({
+                      {...attachToggle(
+                        attachedRefs,
+                        {
                           kind: "run",
                           ref_id: row.run_ids[0],
                           label: Object.values(row.keys).map((v) => v ?? "—").join(" · ") || row.run_ids[0],
-                        })
-                      }
+                        },
+                        (item) => onAttach?.(item),
+                      )}
                     />
                   ) : null
               : undefined

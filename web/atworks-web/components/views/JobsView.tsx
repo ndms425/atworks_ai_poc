@@ -19,6 +19,7 @@ import {
   useChangeActions,
 } from "web-shared";
 import { fetchJobs, reportUrl } from "@/lib/api";
+import { attachToggle } from "@/lib/attachments";
 import Pager from "@/components/Pager";
 import { usePagedList } from "@/lib/usePagedList";
 import { useScreenFocus } from "@/lib/useScreenFocus";
@@ -28,10 +29,12 @@ function JobRow({
   job,
   onAct,
   onAttach,
+  attachedRefs,
 }: {
   job: JobSpec;
   onAct: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
 }) {
   const { change, busy, error, act, canAct } = useChangeActions(job, onAct);
   return (
@@ -48,7 +51,7 @@ function JobRow({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <AskButton label="채팅에 첨부" onClick={() => onAttach({ kind: "job", ref_id: change.job_id, label: change.summary })} />
+          <AskButton {...attachToggle(attachedRefs, { kind: "job", ref_id: change.job_id, label: change.summary }, onAttach)} />
           <ChangeStatusPill status={change.status} />
         </div>
       </div>
@@ -68,12 +71,14 @@ export default function JobsView({
   refreshKey,
   onAct,
   onAttach,
+  attachedRefs,
   intent,
   onScreen,
 }: {
   refreshKey: number;
   onAct: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
@@ -110,7 +115,7 @@ export default function JobsView({
             {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
             <ul className="cv-rows divide-y divide-(--line)">
               {jobs.map((job) => (
-                <JobRow key={job.job_id} job={job} onAct={onAct} onAttach={onAttach} />
+                <JobRow key={job.job_id} job={job} onAct={onAct} onAttach={onAttach} attachedRefs={attachedRefs} />
               ))}
             </ul>
           </Panel>

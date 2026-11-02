@@ -46,7 +46,7 @@ export function DigestRow({
   headline: ReactNode;
   why?: ReactNode;
   context?: ReactNode;
-  action?: { label: string; onClick: () => void } | null;
+  action?: { label: string; onClick: () => void; on?: boolean } | null;
 }) {
   return (
     <li className="flex gap-2.5 px-2 py-2">
@@ -57,7 +57,7 @@ export function DigestRow({
         {context || action ? (
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] tabular-nums text-(--ink-soft)">
             {context}
-            {action ? <AskButton label={action.label} onClick={action.onClick} /> : null}
+            {action ? <AskButton label={action.label} onClick={action.onClick} on={action.on} /> : null}
           </div>
         ) : null}
       </div>

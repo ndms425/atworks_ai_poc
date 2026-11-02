@@ -43,6 +43,7 @@ export default function GenerativeBlock({
   onPrefill,
   onSend,
   onAttach,
+  attachedRefs,
 }: GenerativeBlockProps & {
   onChangeAction?: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
   /** /changes/ 가 아니라 /rules/{id}/{action}으로 나간다 — onChangeAction과는 별개 경로. */
@@ -54,14 +55,15 @@ export default function GenerativeBlock({
   onPrefill?: (text: string) => void;
   onSend?: (text: string) => void;
   onAttach?: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
 }) {
   switch (block.component) {
     case "run_digest":
-      return <RunDigestCard payload={block.payload as RunDigestPayload} onPrefill={onPrefill} onAttach={onAttach} />;
+      return <RunDigestCard payload={block.payload as RunDigestPayload} onPrefill={onPrefill} onAttach={onAttach} attachedRefs={attachedRefs} />;
     case "run_groups":
-      return <RunGroupsCard payload={block.payload as RunGroupsPayload} onPrefill={onPrefill} onAttach={onAttach} />;
+      return <RunGroupsCard payload={block.payload as RunGroupsPayload} onPrefill={onPrefill} onAttach={onAttach} attachedRefs={attachedRefs} />;
     case "query_table":
-      return <QueryTableCard payload={block.payload as QueryTablePayload} onPrefill={onPrefill} onAttach={onAttach} />;
+      return <QueryTableCard payload={block.payload as QueryTablePayload} onPrefill={onPrefill} onAttach={onAttach} attachedRefs={attachedRefs} />;
     case "job_preview":
       return <JobPreviewCard payload={block.payload as JobPreviewPayload} onAct={onChangeAction} />;
     case "rule_preview":

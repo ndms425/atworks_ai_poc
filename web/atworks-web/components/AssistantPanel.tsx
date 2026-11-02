@@ -60,6 +60,7 @@ export default function AssistantPanel({
   prefill,
   onPrefill,
   onAttach,
+  attachedRefs,
   attachments,
   onRemoveAttachment,
   ...shell
@@ -68,6 +69,7 @@ export default function AssistantPanel({
   prefill: Prefill | null;
   onPrefill: (text: string) => void;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
   attachments: AttachedItem[];
   onRemoveAttachment: (order: number) => void;
   newMemoryCount: number;
@@ -125,6 +127,7 @@ export default function AssistantPanel({
           onPrefill={onPrefill}
           onSend={(text) => void chat.send(text)}
           onAttach={onAttach}
+          attachedRefs={attachedRefs}
         />
       )}
       {...shell}

@@ -4,17 +4,20 @@
 "use client";
 
 import { AskButton, DigestList, DigestRow, GenCard, GenCardHeader } from "web-shared";
+import { attachToggle } from "@/lib/attachments";
 import { DIGEST_KINDS, POPULATION_FILTER_LABEL } from "@/lib/kinds";
-import type { RunDigestPayload } from "@/lib/types";
+import type { AttachedItem, RunDigestPayload } from "@/lib/types";
 
 export default function RunDigestCard({
   payload,
   onPrefill,
   onAttach,
+  attachedRefs,
 }: {
   payload: RunDigestPayload;
   onPrefill?: (text: string) => void;
-  onAttach?: (item: { kind: "run"; ref_id: string; label: string; field?: string; expected?: string }) => void;
+  onAttach?: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
 }) {
   const scope = `${POPULATION_FILTER_LABEL[payload.population_filter]} ${payload.population}건 중 먼저 볼 ${payload.shown}건`;
   return (
@@ -57,15 +60,17 @@ export default function RunDigestCard({
               action={
                 item.run
                   ? {
-                      label: "채팅에 첨부",
-                      onClick: () =>
-                        onAttach?.({
+                      ...attachToggle(
+                        attachedRefs,
+                        {
                           kind: "run",
-                          ref_id: item.run!.run_id,
+                          ref_id: item.run.run_id,
                           label: `${item.api?.method ?? ""} ${item.api?.path ?? ""}`.trim(),
-                          field: item.run!.failed_rules?.[0]?.split(/\s/)[0],
-                          expected: item.run!.failed_rules?.[0],
-                        }),
+                          field: item.run.failed_rules?.[0]?.split(/\s/)[0],
+                          expected: item.run.failed_rules?.[0],
+                        },
+                        (item) => onAttach?.(item),
+                      ),
                     }
                   : null
               }

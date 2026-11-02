@@ -16,6 +16,8 @@ host/atworks_host/insights_out/
 web/package-lock.json.bak
 web/atworks-web/AGENTS.md
 web/atworks-web/CLAUDE.md
+# `tsc --noEmit` incremental cache, written by a typecheck, never source.
+web/atworks-web/tsconfig.tsbuildinfo
 scripts/scale/out/
 *.sqlite
 *.sqlite-wal

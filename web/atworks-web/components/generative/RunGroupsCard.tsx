@@ -4,6 +4,7 @@
 "use client";
 
 import { AskButton, formatDate, GenCard, GenCardHeader, Pill } from "web-shared";
+import { attachToggle } from "@/lib/attachments";
 import { GROUP_BY_LABEL, POPULATION_FILTER_LABEL } from "@/lib/kinds";
 import type { AttachedItem, RunGroupsPayload } from "@/lib/types";
 
@@ -11,10 +12,12 @@ export default function RunGroupsCard({
   payload,
   onPrefill,
   onAttach,
+  attachedRefs,
 }: {
   payload: RunGroupsPayload;
   onPrefill?: (text: string) => void;
   onAttach?: (item: Omit<AttachedItem, "order">) => void;
+  attachedRefs: ReadonlySet<string>;
 }) {
   const scope = `${POPULATION_FILTER_LABEL[payload.population_filter]} ${payload.population}건 · ${GROUP_BY_LABEL[payload.group_by]} · 그룹 ${payload.shown}개`;
   const showTiming = payload.group_by === "api" || payload.group_by === "api_env_data";
@@ -59,7 +62,7 @@ export default function RunGroupsCard({
                 <td className="py-1.5 pl-2">
                   <span className="flex gap-1">
                     {g.run_ids?.[0] ? (
-                      <AskButton label="채팅에 첨부" onClick={() => onAttach?.({ kind: "run", ref_id: g.run_ids![0], label: g.label })} />
+                      <AskButton {...attachToggle(attachedRefs, { kind: "run", ref_id: g.run_ids[0], label: g.label }, (item) => onAttach?.(item))} />
                     ) : null}
                     <AskButton label="자세히" onClick={() => onPrefill?.(`${g.label} 그룹 자세히 보여줘`)} />
                   </span>
