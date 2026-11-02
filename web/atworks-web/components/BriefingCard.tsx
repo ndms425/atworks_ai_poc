@@ -3,7 +3,7 @@
 
 "use client";
 
-import { Panel, StatStrip, StatTile, useResource } from "web-shared";
+import { formatDate, formatDateTime, Panel, StatStrip, StatTile, useResource } from "web-shared";
 import { briefingUrl, fetchBriefing } from "@/lib/api";
 
 export default function BriefingCard({ refreshKey, onAskAssistant }: { refreshKey: number; onAskAssistant: (text: string) => void }) {
@@ -12,7 +12,7 @@ export default function BriefingCard({ refreshKey, onAskAssistant }: { refreshKe
     return <p className="text-[13px] text-(--ink-soft)">오늘 브리핑은 09:00에 생성됩니다.</p>;
   }
   return (
-    <Panel title={`일일 브리핑 ${data.date}`} subtitle={`${data.window.from.slice(0, 16)} → ${data.window.to.slice(0, 16)}`}>
+    <Panel title={`일일 브리핑 ${formatDate(data.date)}`} subtitle={`${formatDateTime(data.window.from)} → ${formatDateTime(data.window.to)}`}>
       <StatStrip>
         <StatTile label="전체" value={String(data.counts.total)} onClick={() => onAskAssistant("어제 실행 결과 요약해줘")} ariaLabel="전체: 어시스턴트에게 물어보기" />
         <StatTile label="실패" value={String(data.counts.fail)} onClick={() => onAskAssistant("어제 실패 원인별로 묶어줘")} ariaLabel="실패: 어시스턴트에게 물어보기" />

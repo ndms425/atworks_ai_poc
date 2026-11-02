@@ -131,6 +131,43 @@ const PATHS = {
       <path d="m5 17 4.5-4 3.5 3 2.5-2 4 3.5" />
     </>
   ),
+  // A chat bubble with a plus: start a new conversation.
+  "chat-plus": (
+    <>
+      <path d="M20 12.5a7.5 7.5 0 0 1-10.9 6.7L4.5 20l1-4.1A7.5 7.5 0 1 1 20 12.5z" />
+      <path d="M12.5 9.5v6M9.5 12.5h6" />
+    </>
+  ),
+  // A clock with a back-arrow: earlier conversations.
+  history: (
+    <>
+      <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9" />
+      <path d="M4.5 4.5V9H9M12 8v4.5l3 1.8" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l1 12.5h9l1-12.5" />
+      <path d="M10.5 11v5.5M13.5 11v5.5" />
+    </>
+  ),
+  copy: (
+    <>
+      <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" />
+    </>
+  ),
+  // Six dots: a drag handle.
+  grip: (
+    <>
+      <circle cx="9" cy="6.5" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="6.5" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="17.5" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="17.5" r="1.1" fill="currentColor" stroke="none" />
+    </>
+  ),
 } as const;
 
 export type IconName = keyof typeof PATHS | "spark";

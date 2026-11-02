@@ -144,14 +144,53 @@ export class AgentApi {
   async *chatStream(message: string): AsyncGenerator<AgentEvent> {
     const attached_items = this.pendingAttachments;
     this.pendingAttachments = [];
+    yield* this.chatStreamFor(this.session, message, attached_items, this.screenState);
+  }
+
+  /**
+   * The session's running turn, replayed from its first event (host `GET /chat/live`), or null
+   * when nothing is running (204) or the host cannot be reached.
+   */
+  async resumeTurn(): Promise<ResumedTurn | null> {
+    try {
+      const response = await fetch(`${this.base}/chat/live`, { headers: this.headers() });
+      if (response.status !== 200 || !response.body) return null;
+      const events = readEventStream(response.body);
+      const first = await events.next();
+      if (first.done || (first.value.type as string) !== "turn_resume") return null;
+      return { userText: String(first.value.data.user_text ?? ""), events };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One turn on an explicit session, with explicit attachments and screen state: what a
+   * background turn uses, since the portal's own session, attachments and screen may belong to
+   * another conversation by then. Throws when the request itself fails.
+   */
+  async *chatStreamFor(
+    sessionId: string | null,
+    message: string,
+    attachedItems: unknown[],
+    screenState: unknown | null,
+  ): AsyncGenerator<AgentEvent> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (sessionId) headers[SESSION_HEADER] = sessionId;
     const response = await fetch(`${this.base}/chat`, {
       method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ message, attached_items, screen_state: this.screenState }),
+      headers,
+      body: JSON.stringify({ message, attached_items: attachedItems, screen_state: screenState }),
     });
     if (!response.ok || !response.body) throw new Error(`chat request failed: ${response.status}`);
     yield* readEventStream(response.body);
   }
+}
+
+/** A running turn the host is still producing, picked back up after a dropped connection. */
+export interface ResumedTurn {
+  userText: string;
+  events: AsyncGenerator<AgentEvent>;
 }
 
 async function* readEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<AgentEvent> {

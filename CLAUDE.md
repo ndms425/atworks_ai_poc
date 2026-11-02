@@ -339,6 +339,30 @@ copied, and the role package `atworks-agent/core/atworks_agent/` mirrors `mercha
   LF by `.gitattributes`; the invariant is that no character of the content differs): a versioned document under a compare-and-set plus an
   appended transcript, written at request end and again when a streamed turn ends (the turn wins
   the race). Actions taken outside the chat queue as `pending_app_events` for the next turn.
+  **Saved conversations** (2026-11-02): one session IS one conversation. `SqliteSessionStore`
+  (`host/atworks_host/conversations.py`, a `TimestampedSessionStore`) puts the six storage methods
+  over its OWN SQLite file (`ATWORKS_CONVERSATIONS_PATH`, default
+  `host/atworks_host/conversations.sqlite`; own connection + lock, because `stream_turn` writes back
+  from Starlette's threadpool) — `sessions.py` is untouched. Next to the state and transcript it
+  keeps a per-turn DISPLAY record (prose, final `ui` blocks, chips; screen directives excluded),
+  folded host-side from the event stream by `TurnDisplay` via `RecordingAgent` and written in the
+  turn-end hook, never by a client. Routes, all scoped to the current session's operator (a foreign
+  id answers like a missing one): `GET /conversations` (turn_count > 0, `?q=` title search),
+  `GET /conversations/{id}` (turns; approval cards re-read by id so a reopened card shows today's
+  status), `PATCH` (rename), `DELETE` (the current one is `reset`, so the write-back cannot
+  recreate it). "New chat" is just `POST /session` again; the portal reopens a conversation by
+  verifying it with the current session and then adopting its id. The daily sweep removes only
+  sessions with NO turns; a conversation with turns is kept until its operator deletes it.
+  Summarising long conversations is NOT implemented (neither reference has it).
+  **State is read NOW, every turn** (2026-11-02): `atworks_agent/live_state.py` runs at the start
+  of each turn (orchestrator, next to `get_context`) and puts `state_now` in the dynamic context —
+  every pending queue (`get_pending_jobs/rules/profiles/format_batches`) and the CURRENT record of
+  each item the conversation already knows (`get_job/get_rule/get_profile/get_format_batch`, newest
+  10 per kind), which also REPLACES the stale copy in `seen_*` so cards show today's status. The
+  hard lines say any pending/approved/ran claim comes from `state_now` or a tool call this turn,
+  approval is asked only for items in `state_now.pending_approvals`, the reply starts from what
+  `screen-state` shows (rows now carry their `status`), and no chip approves/applies/discards.
+  ABC calls only, so the REST adapter answers it unchanged.
 - **Marketplace posture:** none. Single-tenant internal tool, closed network, no third-party
   sellers, no `web_search`, no external content source. **Checkout handoff:** n/a (merchant role).
 - **Surfaces and renderer modes:** the host serves the chat turn as SSE (`POST /api/atworks/chat`),

@@ -42,7 +42,8 @@ def render_screen_state_hint(screen: ScreenState | None) -> str:
             lines.append("filter: " + ", ".join(parts))
     lines.append(f"visible ({len(screen.visible)}):")
     for t in screen.visible:
-        lines.append(f"- {t.kind}:{_s(t.ref_id, 64)}" + (f" — {_s(t.label, 120)}" if t.label else ""))
+        lines.append(f"- {t.kind}:{_s(t.ref_id, 64)}" + (f" [{_s(t.status, 32)}]" if t.status else "")
+                     + (f" — {_s(t.label, 120)}" if t.label else ""))
     lines.append("</screen-state>")
     return "\n".join(lines)
 

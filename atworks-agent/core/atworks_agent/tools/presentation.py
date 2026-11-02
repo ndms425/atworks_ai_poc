@@ -19,6 +19,9 @@ PROFILE_PREVIEW_TOOL = "present_profile_preview"
 QUESTION_TOOL = "present_question_form"
 NAVIGATE_SCREEN_TOOL = "navigate_screen"
 HIGHLIGHT_SCREEN_TOOL = "highlight_screen"
+PLAN_TOOL = "present_plan"
+#: Not a card: the portal pins it above the composer as "N/M단계" while the turn runs.
+PLAN_COMPONENT = "plan"
 
 
 class DigestItem(BaseModel):
@@ -102,3 +105,15 @@ class HighlightScreenPayload(PresentationPayload):
     above 8 doesn't make every full call fail this model's own validation."""
     targets: list[HighlightTarget] = Field(min_length=1, max_length=50)
     headline: str | None = Field(default=None, max_length=80)
+
+
+class PlanStep(BaseModel):
+    label: str = Field(min_length=1, max_length=40)
+    #: The tool whose RESULT completes this step. Progress is read from real tool results, never
+    #: from the model saying a step is done.
+    tool: str = Field(min_length=1, max_length=40)
+
+
+class PresentPlanPayload(PresentationPayload):
+    """NOT a card: the steps of a multi-call turn, for the "N/M단계" pill above the composer."""
+    steps: list[PlanStep] = Field(min_length=2, max_length=6)

@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AgentApi } from "./api";
 
 export interface Session {
@@ -21,6 +21,10 @@ export interface Session {
   role?: string;
   /** The signed-in shopper, on storefront sessions. */
   shopper?: { name: string; tier?: string };
+  /** Starts a brand-new session for the same profile/body ("new chat"); the old one stays. */
+  restart?: () => void;
+  /** Switches to an existing session id the caller has already verified (a reopened chat). */
+  adopt?: (sessionId: string) => void;
 }
 
 const generations = new WeakMap<AgentApi, number>();
@@ -37,6 +41,8 @@ export function useSession(
   const { profile, body } = options;
   const bodyKey = body ? JSON.stringify(body) : undefined;
   const [session, setSession] = useState<Session>({ sessionId: null, loading: true });
+  // Bumped by `restart`: the start effect below re-runs with the same profile/body.
+  const [restarts, setRestarts] = useState(0);
 
   useEffect(() => {
     const generation = (generations.get(api) ?? 0) + 1;
@@ -60,7 +66,18 @@ export function useSession(
       generations.set(api, (generations.get(api) ?? 0) + 1);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, profile, bodyKey]);
+  }, [api, profile, bodyKey, restarts]);
 
-  return session;
+  const restart = useCallback(() => setRestarts((n) => n + 1), []);
+  const adopt = useCallback(
+    (sessionId: string) => {
+      // Any start still in flight must not install its token over the one adopted here.
+      generations.set(api, (generations.get(api) ?? 0) + 1);
+      api.session = sessionId;
+      setSession((prev) => ({ ...prev, sessionId, loading: false }));
+    },
+    [api],
+  );
+
+  return useMemo(() => ({ ...session, restart, adopt }), [session, restart, adopt]);
 }

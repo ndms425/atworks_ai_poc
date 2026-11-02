@@ -4,6 +4,7 @@ merchant_agent/executor.py 미러."""
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, get_args
@@ -12,6 +13,7 @@ from commerce_common.execution import BaseToolExecutor, Handler, clamp_limit, pa
 from commerce_common.memory import MemoryRuntime
 from commerce_common.presentation import (
     CHIPS_COMPONENT,
+    CHIPS_TOOL,
     PresentationComponent,
     PresentationExtension,
 )
@@ -112,9 +114,22 @@ def build_memory(config: AtworksAgentConfig, store: Any, write_filter: Any = Non
 #: card come out"; counting these three makes that question unanswerable — `partial` becomes
 #: unreachable, so the Growth view's answered ratio is wrong and a 👍 on a turn that showed
 #: nothing mints a regression case with no behaviour in it.
-NON_CARD_COMPONENTS = frozenset({CHIPS_COMPONENT, "screen_navigate", "screen_highlight"})
+NON_CARD_COMPONENTS = frozenset({CHIPS_COMPONENT, "screen_navigate", "screen_highlight", "plan"})
 
 RUN_STATUS_FILTERS = ("pass", "fail", "error", "non_pass")
+_CHIP_ORDINAL = re.compile(r"^\s*(?:[①-⑳]|\(?\d{1,2}[.)]?|#\d{1,2})\s*")
+
+
+def _chips_that_differ_only_by_number(tool_input: dict[str, Any]) -> list[str]:
+    """Chips that become the same text once a leading ①/1./(2)/#3 is removed: on their own they
+    say nothing about WHICH item each one opens."""
+    chips = [str(c) for c in (tool_input.get("suggestions") or [])]
+    seen: dict[str, list[str]] = {}
+    for chip in chips:
+        seen.setdefault(_CHIP_ORDINAL.sub("", chip).strip(), []).append(chip)
+    return [chip for group in seen.values() if len(group) > 1 for chip in group]
+
+
 # The four reasons note_unmet_ask accepts, read off the Literal so the tool schema, the executor's
 # validation and the ask_log column can never drift apart (self-growth spec §5/§6).
 UNMET_REASONS: tuple[str, ...] = get_args(UnmetReason)
@@ -327,6 +342,23 @@ class AtworksToolExecutor(BaseToolExecutor):
             return ToolOutcome(self.displayed_text)
         if spec.name == RULE_PREVIEW_TOOL and str(tool_input.get("rule_id", "")) in self._previewed_rules:
             return ToolOutcome(self.displayed_text)
+        # Chips alone are not a reply: the operator sees four buttons and no word about what was
+        # understood or proposed. Held, so the model writes first and calls the chips again.
+        if (spec.name == CHIPS_TOOL and not self._asked_form
+                and self._state.turn_cards == 0 and self._state.turn_text_chars == 0):
+            return ToolOutcome.held(
+                "reply_first",
+                "Chips alone are not a reply. First write one or two sentences: what you understood "
+                "the operator to want (for an attached item, what you would do with THAT item) and what "
+                "you propose or did — or act on it with the right tool. Then call present_suggestions again.",
+            )
+        if spec.name == CHIPS_TOOL and (twins := _chips_that_differ_only_by_number(tool_input)):
+            return ToolOutcome.held(
+                "ambiguous_chips",
+                f"These chips differ only by a number: {twins}. A chip is read on its own, after the card "
+                "has scrolled away, so each must name its item — e.g. 'run-00065696 실패 원인', "
+                "'api-001447 스펙 보기' — not '① 실행 상세 보기'. Call present_suggestions again.",
+            )
         outcome = await super()._present(spec, tool_input)
         if not outcome.refused:
             # ask_log's "카드가 나왔나" (asklog.decide_outcome). Counted here, at the one place a
@@ -688,8 +720,54 @@ class AtworksToolExecutor(BaseToolExecutor):
             self._state.remember_job(job)
         return self._fenced([job_record(j) for j in pending] or {"note": "Nothing is waiting for approval."})
 
+    # kind -> (seen bucket, by-id read, remember method, host approval mark, host discard mark)
+    _SETTLED_KINDS: dict[str, tuple[str, str, str, str, str]] = {
+        "job": ("seen_jobs", "get_job", "remember_job", "approved_job_ids", "host_action_job_ids"),
+        "rule": ("seen_rules", "get_rule", "remember_rule", "approved_rule_ids", "host_action_rule_ids"),
+        "profile": ("seen_profiles", "get_profile", "remember_profile", "approved_profile_ids",
+                    "host_action_profile_ids"),
+        "format batch": ("seen_format_batches", "get_format_batch", "remember_format_batch",
+                         "approved_format_batch_ids", "host_action_format_batch_ids"),
+    }
+
+    async def _already_settled(self, kind: str, item_id: str, action: str) -> ToolOutcome | None:
+        """``action`` is "apply" or "discard". Returns a plain (non-error) outcome when the item
+        is already applied or discarded NOW, else None and the usual gates run.
+
+        Only the model's own call takes this path: when the host's route set its mark (a click
+        on the card or the Jobs/Rules page), the route's own semantics stay exactly as they were.
+        The state copy is refreshed either way, so later cards this turn show the real status."""
+        seen, lookup, remember, approved_mark, discard_mark = self._SETTLED_KINDS[kind]
+        if item_id in getattr(self._state, approved_mark if action == "apply" else discard_mark):
+            return None
+        if item_id not in getattr(self._state, seen):
+            return None   # the provenance gate answers an id this session never saw
+        try:
+            current = await getattr(self._backend, lookup)(self._session, item_id)
+        except Exception:
+            return None
+        status = str(getattr(getattr(current, "status", None), "value", "")) if current is not None else ""
+        if status in ("", "staged"):
+            return None
+        getattr(self._state, remember)(current)
+        if status == "applied":
+            who = getattr(current, "applied_by", None) or "the operator"
+            at = getattr(current, "applied_at", None)
+            when = f" at {at.isoformat(timespec='minutes')}" if at else ""
+            runs = " It now runs on its own schedule." if kind == "job" else ""
+            text = (f"{kind} {item_id} is ALREADY APPLIED: {who} approved it{when}.{runs} Nothing is "
+                    f"waiting for approval and there is nothing to {action}. Tell the operator it is "
+                    "approved; do not call apply or discard on it again.")
+        else:
+            who = getattr(current, "discarded_by", None) or "the operator"
+            text = (f"{kind} {item_id} was already DISCARDED by {who}; it cannot be applied or "
+                    f"discarded again. If the operator still wants it, stage a new one.")
+        return ToolOutcome(text)
+
     async def _apply_job(self, tool_input: dict[str, Any]) -> ToolOutcome:
         job_id = str(tool_input.get("job_id", ""))
+        if settled := await self._already_settled("job", job_id, "apply"):
+            return settled
         if held := check_apply_job(self._state, self._config, job_id):
             return held
         try:
@@ -702,6 +780,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _discard_job(self, tool_input: dict[str, Any]) -> ToolOutcome:
         job_id = str(tool_input.get("job_id", ""))
+        if settled := await self._already_settled("job", job_id, "discard"):
+            return settled
         if held := check_discard_job(self._state, job_id):
             return held
         discarded = await self._backend.discard_job(self._session, job_id, take_discard_actor_kind(self._state, job_id))
@@ -803,6 +883,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _apply_rule(self, tool_input: dict[str, Any]) -> ToolOutcome:
         rule_id = str(tool_input.get("rule_id", ""))
+        if settled := await self._already_settled("rule", rule_id, "apply"):
+            return settled
         if held := check_apply_rule(self._state, self._config, rule_id):
             return held
         try:
@@ -815,6 +897,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _discard_rule(self, tool_input: dict[str, Any]) -> ToolOutcome:
         rule_id = str(tool_input.get("rule_id", ""))
+        if settled := await self._already_settled("rule", rule_id, "discard"):
+            return settled
         if held := check_discard_rule(self._state, rule_id):
             return held
         discarded = await self._backend.discard_rule(
@@ -894,6 +978,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _apply_format_batch(self, tool_input: dict[str, Any]) -> ToolOutcome:
         batch_id = str(tool_input.get("batch_id", ""))
+        if settled := await self._already_settled("format batch", batch_id, "apply"):
+            return settled
         if held := check_apply_format_batch(self._state, self._config, batch_id):
             return held
         applied = await self._backend.apply_format_batch(self._session, batch_id)
@@ -903,6 +989,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _discard_format_batch(self, tool_input: dict[str, Any]) -> ToolOutcome:
         batch_id = str(tool_input.get("batch_id", ""))
+        if settled := await self._already_settled("format batch", batch_id, "discard"):
+            return settled
         if held := check_discard_format_batch(self._state, batch_id):
             return held
         discarded = await self._backend.discard_format_batch(
@@ -958,6 +1046,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _apply_profile(self, tool_input: dict[str, Any]) -> ToolOutcome:
         profile_id = str(tool_input.get("profile_id", ""))
+        if settled := await self._already_settled("profile", profile_id, "apply"):
+            return settled
         if held := check_apply_profile(self._state, self._config, profile_id):
             return held
         try:
@@ -970,6 +1060,8 @@ class AtworksToolExecutor(BaseToolExecutor):
 
     async def _discard_profile(self, tool_input: dict[str, Any]) -> ToolOutcome:
         profile_id = str(tool_input.get("profile_id", ""))
+        if settled := await self._already_settled("profile", profile_id, "discard"):
+            return settled
         if held := check_discard_profile(self._state, profile_id):
             return held
         discarded = await self._backend.discard_profile(

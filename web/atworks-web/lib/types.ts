@@ -15,6 +15,8 @@ export interface ScreenTarget {
   kind: ScreenTargetKind;
   ref_id: string;
   label?: string;
+  /** The status the row shows, so the assistant reads the screen as the operator sees it. */
+  status?: string;
 }
 
 export interface ScreenFilter {

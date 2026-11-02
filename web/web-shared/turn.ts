@@ -82,6 +82,9 @@ export interface AgentTurnOptions {
   onTurnEnd?: (turn: number) => void;
   /** Skeleton to mount on `tool_call` for tools whose card arrives in one final event. */
   pendingComponent?: (tool: string) => string | null | undefined;
+  /** The connection dropped mid-reply and the host no longer has the turn running: it finished
+   *  (and was saved) while we were away, so the caller reloads the saved conversation. */
+  onResumeMissed?: () => void;
 }
 
 export interface AgentTurn {
@@ -101,10 +104,42 @@ export interface AgentTurn {
   newMemoryKeys: ReadonlySet<string>;
   /** Re-reads the store after the shopper edits or forgets a fact; that key stops counting as new. */
   reloadMemory: (editedKey: string) => void;
+  /**
+   * Replaces the whole transcript: `[]` for a new chat, a saved conversation's items when one is
+   * reopened. Later turns number on from the highest turn in `items`. Call only while not busy.
+   */
+  resetTranscript: (items: ChatItem[]) => void;
+  /**
+   * Hands the reply in flight to the background: the stream keeps being read to its end (so the
+   * host finishes and saves the turn) but nothing more reaches this transcript, `busy` drops at
+   * once, and the returned promise settles when the stream ends. Null when nothing is in flight.
+   * Used to switch conversations without cutting a reply off mid-turn.
+   */
+  detach: () => Promise<void> | null;
+  /** Picks up a turn the host is still running for this session (after a reload or a reopen). */
+  resume: () => Promise<boolean>;
 }
 
+/** One reply in flight. `detached` turns the rest of its stream into a silent read. */
+interface Run {
+  turn: number;
+  detached: boolean;
+  done: Promise<void>;
+  /** The stream broke (network) rather than ending. */
+  failed: boolean;
+  /** At least one event arrived: the host had the turn, so it may still be running. */
+  gotEvent: boolean;
+}
+
+const RECONNECTING = "연결이 끊겨 다시 연결하는 중…";
+const RECONNECT_DELAYS_MS = [800, 1600, 3200, 6400];
+const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+/** Resolves when the browser is online (at once if it already is). */
+const online = () =>
+  navigator.onLine ? Promise.resolve() : new Promise<void>((resolve) => window.addEventListener("online", () => resolve(), { once: true }));
+
 export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTurn {
-  const { sessionId, unreachable, onEvent, onTurnEnd, pendingComponent } = options;
+  const { sessionId, unreachable, onEvent, onTurnEnd, pendingComponent, onResumeMissed } = options;
   const [items, setItems] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [turnState, setTurnState] = useState({ turnCount: 0, completed: 0, streaming: false });
@@ -120,8 +155,9 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
   const afterToolRef = useRef(false);
   // The tool whose progress line is the current activity; its tool_result clears the line.
   const progressToolRef = useRef<string | null>(null);
-  const callbacks = useRef({ onEvent, onTurnEnd, pendingComponent });
-  callbacks.current = { onEvent, onTurnEnd, pendingComponent };
+  const runRef = useRef<Run | null>(null);
+  const callbacks = useRef({ onEvent, onTurnEnd, pendingComponent, onResumeMissed });
+  callbacks.current = { onEvent, onTurnEnd, pendingComponent, onResumeMissed };
 
   const clearTimers = useCallback(() => {
     for (const slot of slotsRef.current.values()) {
@@ -372,6 +408,9 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
         }
         case "tool_result": {
           const resultTool = String(event.data.tool ?? "tool");
+          if (!event.data.is_error) {
+            updateTurn(turn, (item) => ({ ...item, toolsDone: [...(item.toolsDone ?? []), resultTool] }));
+          }
           if (progressToolRef.current === resultTool) {
             progressToolRef.current = null;
             updateTurn(turn, (item) => ({ ...item, activity: undefined }));
@@ -433,8 +472,17 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
   );
 
   const runTurn = useCallback(
-    async (userText: string, events: AsyncIterable<AgentEvent>) => {
-      const turn = ++turnRef.current;
+    async (userText: string, events: AsyncIterable<AgentEvent>, replayInto?: number) => {
+      const turn = replayInto ?? ++turnRef.current;
+      let finish: () => void = () => {};
+      const run: Run = {
+        turn,
+        detached: false,
+        failed: false,
+        gotEvent: false,
+        done: new Promise<void>((resolve) => (finish = resolve)),
+      };
+      runRef.current = run;
       const startedAt = performance.now();
       clearTimers();
       slotsRef.current = new Map();
@@ -443,13 +491,21 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
       afterToolRef.current = false;
       progressToolRef.current = null;
       setTurnState((state) => ({ ...state, turnCount: turn, streaming: true }));
-      setItems((previous) => [
-        ...previous,
-        { kind: "user", text: userText },
-        { kind: "assistant", turn, segments: [], suggestions: [], pending: true, tools: [] },
-      ]);
+      if (replayInto === undefined) {
+        setItems((previous) => [
+          ...previous,
+          { kind: "user", text: userText },
+          { kind: "assistant", turn, segments: [], suggestions: [], pending: true, tools: [] },
+        ]);
+      } else {
+        // A reconnect replays the turn from its first event: start its reply over, empty.
+        updateTurn(turn, (item) => ({ ...item, segments: [], suggestions: [], tools: [], pending: true, activity: undefined }));
+      }
       try {
         for await (const event of events) {
+          // Detached: keep reading so the host finishes the turn, show nothing of it here.
+          if (run.detached) continue;
+          run.gotEvent = true;
           if (event.type === "turn_complete") {
             const usage = (event.data.usage ?? {}) as Record<string, number>;
             const n = (value?: number) => (value ?? 0).toLocaleString("en-US");
@@ -468,12 +524,22 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
           }
         }
       } catch {
-        updateTurn(turn, (item) =>
-          item.segments.length
-            ? item
-            : { ...item, segments: [{ type: "error", text: unreachable }] },
-        );
+        run.failed = true;
+        // A stream that broke mid-reply is reconnected by `send`; one that never started is a
+        // host that cannot be reached, said at once.
+        if (!run.detached && !run.gotEvent && navigator.onLine) {
+          updateTurn(turn, (item) =>
+            item.segments.length
+              ? item
+              : { ...item, segments: [{ type: "error", text: unreachable }] },
+          );
+        }
       } finally {
+        finish();
+        if (runRef.current === run) runRef.current = null;
+      }
+      if (run.detached) return run;
+      {
         // Partials freeze as they are; unadopted skeletons and failed slots go at turn end.
         flush(turn);
         updateTurn(turn, (item) => ({
@@ -489,17 +555,89 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
         setTurnState((state) => ({ turnCount: turn, completed: state.completed + 1, streaming: false }));
         callbacks.current.onTurnEnd?.(turn);
       }
+      return run;
     },
     [appendTrace, clearTimers, flush, handleEvent, unreachable, updateTurn],
   );
+
+  const resetTranscript = useCallback(
+    (next: ChatItem[]) => {
+      clearTimers();
+      slotsRef.current = new Map();
+      slotByStream.current = new Map();
+      ordinals.current = new Map();
+      afterToolRef.current = false;
+      progressToolRef.current = null;
+      const lastTurn = next.reduce((top, item) => (item.kind === "assistant" ? Math.max(top, item.turn) : top), 0);
+      turnRef.current = lastTurn;
+      setItems(next);
+      setTrace([]);
+      setTurnState((state) => ({ ...state, turnCount: lastTurn, streaming: false }));
+    },
+    [clearTimers],
+  );
+
+  const detach = useCallback((): Promise<void> | null => {
+    const run = runRef.current;
+    if (!run || run.detached) return null;
+    run.detached = true;
+    clearTimers();
+    setBusy(false);
+    setTurnState((state) => ({ ...state, streaming: false }));
+    return run.done;
+  }, [clearTimers]);
+
+  const resume = useCallback(async () => {
+    if (busy || !sessionId) return false;
+    const live = await api.resumeTurn();
+    if (!live) return false;
+    setBusy(true);
+    const run = await runTurn(live.userText, live.events);
+    if (!run.detached) setBusy(false);
+    return true;
+  }, [api, busy, sessionId, runTurn]);
 
   const send = useCallback(
     async (text: string) => {
       const message = text.trim();
       if (!message || busy || !sessionId) return;
       setBusy(true);
-      await runTurn(message, api.chatStream(message));
-      setBusy(false);
+      let run = await runTurn(message, api.chatStream(message));
+      // The connection dropped mid-reply: the host keeps the turn running, so reconnect and
+      // replay it into the same place rather than leaving half an answer.
+      if (run.failed && !run.detached && (run.gotEvent || !navigator.onLine)) {
+        const turn = run.turn;
+        let resumed = false;
+        for (const delay of RECONNECT_DELAYS_MS) {
+          updateTurn(turn, (item) => ({ ...item, pending: true, activity: RECONNECTING }));
+          await online();
+          await sleep(delay);
+          const live = await api.resumeTurn();
+          if (live) {
+            run = await runTurn(live.userText, live.events, turn);
+            resumed = !run.failed;
+            if (resumed) break;
+            continue;
+          }
+          if (navigator.onLine) {
+            // Reachable, nothing running: the turn finished while we were away.
+            resumed = true;
+            updateTurn(turn, (item) => ({ ...item, pending: false, activity: undefined }));
+            callbacks.current.onResumeMissed?.();
+            break;
+          }
+        }
+        if (!resumed) {
+          updateTurn(turn, (item) => ({
+            ...item,
+            pending: false,
+            activity: undefined,
+            segments: [...item.segments, { type: "error", text: unreachable }],
+          }));
+        }
+      }
+      // A detached reply already released `busy`, and a later reply may own it by now.
+      if (!run.detached) setBusy(false);
       window.setTimeout(() => readMemory(), MEMORY_REREAD_MS);
     },
     [api, busy, sessionId, runTurn, readMemory],
@@ -516,5 +654,8 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
     memory,
     newMemoryKeys,
     reloadMemory: readMemory,
+    resetTranscript,
+    detach,
+    resume,
   };
 }

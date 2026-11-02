@@ -649,6 +649,20 @@ def build_tools(
                 "required": ["targets"], "additionalProperties": False},
         },
         {
+            "name": "present_plan",
+            "description": ("When the work takes three or more tool calls, call this FIRST, in the same round as the first "
+                            "of them: 2-6 steps, each naming the tool whose result completes it. The portal shows "
+                            "'N/M단계' above the composer and ticks a step off when that tool's result arrives. Never for "
+                            "one or two calls. Renders no card. / 도구를 3번 이상 부르는 작업이면 첫 라운드에 단계를 알린다."),
+            "input_schema": {"type": "object", "properties": {
+                "steps": {"type": "array", "minItems": 2, "maxItems": 6, "items": {
+                    "type": "object", "properties": {
+                        "label": {"type": "string", "maxLength": 40, "description": "Korean, a few words: what this step does."},
+                        "tool": {"type": "string", "maxLength": 40, "description": "The tool whose result completes the step."}},
+                    "required": ["label", "tool"], "additionalProperties": False}}},
+                "required": ["steps"], "additionalProperties": False},
+        },
+        {
             "name": "present_suggestions",
             "description": (f"Give the turn its 1-4 chips; it ends the reply. Call it in the same round as the turn's last "
                             f"present_* call. Alone, after the text, only on a turn with no other present_* call ({chips_alone_cases})."),

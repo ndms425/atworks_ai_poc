@@ -1308,6 +1308,7 @@ async def test_chips_and_screen_directives_are_not_cards(backend, config, skills
     assert not (await ex.execute("navigate_screen", {"view": "runs"})).refused
     assert not (await ex.execute("highlight_screen", {
         "targets": [{"kind": "run", "ref_id": "run-1"}]})).refused
+    state.turn_text_chars = 12                       # the reply's prose streamed before the chips
     assert not (await ex.execute("present_suggestions", {"suggestions": ["다음"]})).refused
     assert state.turn_cards == 0
     entry = classify_turn(
@@ -1403,3 +1404,24 @@ async def test_re_proposing_an_existing_term_asks_nothing_and_writes_nothing(
     assert not out.refused and f"이미 {status} 상태입니다" in out.result_text
     assert state.pending_aliases == []
     assert backend.vocabulary["결제 계열"].fragment.path_prefix == "/v1/payment"
+
+
+async def test_chips_alone_are_held_until_the_reply_says_something(backend, config, skills, session, state):
+    """A turn whose only output would be chips (no prose, no card) is held: the operator would see
+    four buttons and not a word about what was understood or proposed."""
+    ex = _exec(backend, config, skills, session, state)
+    held = await ex.execute("present_suggestions", {"suggestions": ["실행 계획 세우기"]})
+    assert held.blocked == "reply_first" and "Chips alone are not a reply" in held.result_text
+    state.turn_text_chars = 30
+    assert not (await ex.execute("present_suggestions", {"suggestions": ["실행 계획 세우기"]})).refused
+
+
+async def test_chips_that_differ_only_by_a_number_are_held(backend, config, skills, session, state):
+    """'① 실행 상세 보기 / ② 실행 상세 보기' says nothing about which run each opens once the card has
+    scrolled away; each chip has to name its item."""
+    ex = _exec(backend, config, skills, session, state)
+    state.turn_text_chars = 20
+    held = await ex.execute("present_suggestions", {"suggestions": ["① 실행 상세 보기", "② 실행 상세 보기", "전체 실행 목록"]})
+    assert held.blocked == "ambiguous_chips" and "① 실행 상세 보기" in held.result_text
+    ok = await ex.execute("present_suggestions", {"suggestions": ["run-00065696 실패 원인", "run-00065700 실패 원인"]})
+    assert not ok.refused

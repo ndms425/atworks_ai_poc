@@ -30,6 +30,8 @@ from .tools.presentation import (
     HIGHLIGHT_SCREEN_TOOL,
     NAVIGATE_SCREEN_TOOL,
     PARITY_SUMMARY_TOOL,
+    PLAN_COMPONENT,
+    PLAN_TOOL,
     PREVIEW_TOOL,
     PROFILE_PREVIEW_TOOL,
     QUERY_TABLE_TOOL,
@@ -40,6 +42,7 @@ from .tools.presentation import (
     PresentFormatBatchPayload,
     PresentJobPreviewPayload,
     PresentParitySummaryPayload,
+    PresentPlanPayload,
     PresentProfilePreviewPayload,
     PresentQueryTablePayload,
     PresentRulePreviewPayload,
@@ -443,5 +446,6 @@ PRESENTATION_COMPONENTS: dict[str, PresentationComponent] = {
         PresentationComponent(name=NAVIGATE_SCREEN_TOOL, component="screen_navigate", payload_model=NavigateScreenPayload, enrich=enrich_navigate_screen),
         PresentationComponent(name=HIGHLIGHT_SCREEN_TOOL, component="screen_highlight", payload_model=HighlightScreenPayload, enrich=enrich_highlight_screen),
         PresentationComponent(name=CHIPS_TOOL, component=CHIPS_COMPONENT, payload_model=PresentSuggestionsPayload),
+        PresentationComponent(name=PLAN_TOOL, component=PLAN_COMPONENT, payload_model=PresentPlanPayload),
     )
 }

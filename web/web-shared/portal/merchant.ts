@@ -50,6 +50,8 @@ export function useMerchantChat<TChange extends ChangeRef>(
     onPortalRefresh: () => void;
     /** Final `ui` only — a half-streamed directive (`ui_partial`) must never execute. */
     onScreenDirective?: (directive: ScreenDirective) => void;
+    /** A dropped reply finished while disconnected; reload the saved conversation. */
+    onResumeMissed?: () => void;
   },
 ): MerchantChat<TChange> {
   const { onPortalRefresh } = options;

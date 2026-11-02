@@ -16,12 +16,13 @@ from atworks_agent_runtime.insight_narrator import narrate_insights
 
 from .app import create_app
 from .briefing import Briefings
+from .conversations import SqliteSessionStore
 from .insights import InsightPanels
 from .memory_store import SqliteMemoryStore
 from .mock_backend import MockAtworks
 from .promoter import Promoter
 from .reports import Reports
-from .retention import Retention, TimestampedSessionStore
+from .retention import Retention
 from .scheduler import Scheduler
 from .store import Store
 from .streaming import spawn_background
@@ -80,7 +81,11 @@ def build() -> tuple:
     insights = InsightPanels(insights_dir, config, narrator=functools.partial(narrate_insights, agent.client, config))
     # One session store shared by the router and the retention sweep -- built here, not inside
     # create_app, so the idle TTL really reaches the sessions this process serves.
-    sessions = TimestampedSessionStore(AtworksSessionState)
+    # Saved conversations live in their own SQLite file (its own connection: the turn write-back
+    # runs on Starlette's threadpool, the backend Store must stay on the loop's thread), and they
+    # survive a restart even while the demo backend reloads its fixtures into ":memory:".
+    sessions = SqliteSessionStore(
+        os.environ.get("ATWORKS_CONVERSATIONS_PATH") or HERE / "conversations.sqlite", AtworksSessionState)
     retention = Retention(store, config, insights_dir, sessions)
     # Growth 뷰가 꺼진 배포에는 저장 질문을 볼 라우트가 없다 — 그런데도 승격기를 달아 두면
     # 아무도 열어 볼 수 없는 카드를 하루 한 번 만들어 쌓는다(T7 리뷰 minor).

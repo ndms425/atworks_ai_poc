@@ -23,7 +23,7 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
 export const api = new AgentApi(API_URL, "/api/atworks");
-export const UNREACHABLE = `The aTworks AI host at ${API_URL} is not reachable. Start it with: python -m atworks_host.main`;
+export const UNREACHABLE = `aTworks AI 서버(${API_URL})에 연결할 수 없습니다. 서버가 켜져 있는지 확인한 뒤 다시 시도해 주세요. (실행: python -m atworks_host.main)`;
 
 /**
  * How many rows one page of a list holds. The host caps every list route at 200 and defaults to

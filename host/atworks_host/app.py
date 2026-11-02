@@ -14,7 +14,7 @@ from typing import Any, Literal, TypeVar
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from atworks_agent import (
@@ -47,11 +47,12 @@ from atworks_agent.vocabulary import match_terms
 from atworks_agent_runtime import AtworksAgent
 
 from .briefing import Briefings
+from .conversations import RecordingAgent, SqliteSessionStore, TurnDisplay
 from .evals_writer import default_cases_dir, write_case
 from .insights import InsightPanels
+from .live_turns import SSE_HEADERS, LiveTurns, resume_event
 from .mock_backend import MockAtworks
 from .reports import Reports
-from .retention import TimestampedSessionStore
 from .scheduler import Scheduler
 from .sessions import SessionRecord, SessionStore, session_dependency
 from .streaming import append_user_turn, build_app, stream_turn
@@ -153,6 +154,21 @@ class SessionStart(BaseModel):
     operator_id: str | None = None
 
 
+class ConversationRename(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+
+
+#: The approval cards whose status can move after the turn that showed them. Reopening a
+#: conversation re-reads each one by id so a card never offers to approve what is already
+#: applied: component -> (payload key, AtworksBackend by-id read, record serializer).
+LIVE_CARDS: dict[str, tuple[str, str, Callable[[Any], dict[str, Any]]]] = {
+    "job_preview": ("job", "get_job", job_record),
+    "rule_preview": ("rule", "get_rule", rule_record),
+    "profile_preview": ("profile", "get_profile", profile_record),
+    "format_batch": ("batch", "get_format_batch", format_batch_record),
+}
+
+
 class FeedbackRequest(BaseModel):
     """카드 푸터의 한 표(자가발전 §9). `vote`는 두 값뿐이라 오타는 422다."""
     turn_id: str = Field(min_length=1, max_length=64)
@@ -181,12 +197,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     # 테스트는 tmp_path를 넘겨 리포지토리를 건드리지 않는다.
     evals_cases_dir = evals_cases_dir if evals_cases_dir is not None else default_cases_dir()
     app = build_app("atworks-ai host", on_startup=on_startup)
-    # TimestampedSessionStore, not the bare SessionStore: `sessions.py` is identical to the
-    # reference host contract modulo line endings, so the idle-TTL stamp and sweep (spec §6) live
-    # in the subclass.
+    # SqliteSessionStore (a TimestampedSessionStore), not the bare SessionStore: `sessions.py` is
+    # identical to the reference host contract modulo line endings, so the idle-TTL stamp and sweep
+    # (spec §6) and the saved conversations live in subclasses.
     # main.py passes the SAME instance it handed the retention job, so the sweep really reaches
     # the sessions this app serves.
-    sessions = sessions if sessions is not None else TimestampedSessionStore(AtworksSessionState)
+    sessions = sessions if sessions is not None else SqliteSessionStore(":memory:", AtworksSessionState)
+    # Saved conversations need the SQLite store's listing and display record; a deployment that
+    # hands in a plain in-memory store keeps chat working and simply has no history routes.
+    history = sessions if isinstance(sessions, SqliteSessionStore) else None
+    live_turns = LiveTurns()
     CurrentSession = session_dependency(sessions, "/api/atworks/session")
     router = APIRouter(prefix="/api/atworks")
     Record = SessionRecord[AtworksSessionState]
@@ -224,6 +244,71 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         record = sessions.start(profile.operator_id)
         return {"session_id": record.session_id, "project_id": PROJECT_ID, "operator": profile.operator_id,
                 "operator_name": profile.name, "role": profile.role}
+
+    # -- Saved conversations (open-design's conversation routes, on this host's session) --------
+    # One session is one conversation. "New chat" is simply POST /session again; every route
+    # below is scoped to the operator the CURRENT session is bound to, and an id that operator
+    # does not own answers exactly like one that does not exist.
+
+    def _history() -> SqliteSessionStore:
+        if history is None:
+            raise HTTPException(status_code=404, detail="conversation history disabled")
+        return history
+
+    def _owned(record: Record, conversation_id: str) -> dict[str, Any]:
+        meta = _history().conversation(conversation_id, record.user_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        return meta
+
+    async def _refresh_live_cards(record: Record, turns: list[dict[str, Any]]) -> None:
+        for turn in turns:
+            for segment in turn["segments"]:
+                live = LIVE_CARDS.get(segment.get("component", "")) if segment["type"] == "ui" else None
+                target_id = segment["payload"].get("change_id") if live else None
+                if not live or not target_id:
+                    continue
+                key, lookup, to_record = live
+                try:
+                    current = await getattr(backend, lookup)(context(record), target_id)
+                except Exception:
+                    logger.exception("conversation reopen: %s %s could not be re-read", lookup, target_id)
+                    continue
+                if current is not None:
+                    segment["payload"][key] = to_record(current)
+
+    @router.get("/conversations")
+    async def list_conversations(record: CurrentSession, q: str = Query("", max_length=80),
+                                 limit: int = Query(50, ge=1, le=200)) -> dict:
+        items, total = _history().list_conversations(record.user_id, q, limit)
+        for item in items:
+            item["current"] = item["id"] == record.session_id
+        return {"items": items, "next_cursor": None, "total": total}
+
+    @router.get("/conversations/{conversation_id}")
+    async def open_conversation(conversation_id: str, record: CurrentSession) -> dict:
+        meta = _owned(record, conversation_id)
+        turns = _history().turns(conversation_id)
+        await _refresh_live_cards(record, turns)
+        return {"conversation": meta, "turns": turns}
+
+    @router.patch("/conversations/{conversation_id}")
+    async def rename_conversation(conversation_id: str, payload: ConversationRename,
+                                  record: CurrentSession) -> dict:
+        _owned(record, conversation_id)
+        _history().rename(conversation_id, record.user_id, payload.title.strip() or "새 대화")
+        return {"conversation": _owned(record, conversation_id)}
+
+    @router.delete("/conversations/{conversation_id}")
+    async def delete_conversation(conversation_id: str, record: CurrentSession) -> dict:
+        _owned(record, conversation_id)
+        current = conversation_id == record.session_id
+        if current:
+            # `reset` marks the record ended, so the dependency's write-back cannot recreate it.
+            sessions.reset(record)
+        else:
+            _history().delete(conversation_id)
+        return {"ok": True, "current_deleted": current}
 
     @router.get("/operators")
     async def operators() -> dict:
@@ -284,8 +369,18 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # `note_vocabulary_use`는 `uses + 1`이라 confirmed 집합을 바꾸지 않고 캐시를 버리지
         # 않는다(버리면 어휘가 실린 모든 턴이 캐시 미스가 되어 캐시가 하는 일이 없어진다).
         matched = await matched_vocabulary(record, message)
+        display = TurnDisplay()
 
         async def on_turn_end(rec: Record, tid: str, failure: BaseException | None) -> None:
+            # The display record first, before any await: on a client disconnect the generator is
+            # being closed and an await here can raise, which must not cost the operator's history.
+            if history is not None:
+                if failure is not None:
+                    display.note_failure()
+                try:
+                    history.record_turn(rec.session_id, message, display.document())
+                except Exception:
+                    logger.exception("conversation turn could not be recorded; the turn is unaffected")
             if agent.config.enable_growth:
                 await record_ask(rec, tid, failure, message,
                                  [entry.term for entry in matched])
@@ -294,11 +389,23 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
                     await backend.note_vocabulary_use(
                         context(rec), [entry.term for entry in matched])
 
-        return stream_turn(
-            agent, sessions, record, context(record), env_hint=".env",
+        # The turn runs on its own and this response only subscribes to it (live_turns.py): a
+        # dropped connection no longer stops the agent, and GET /chat/live picks the turn back up.
+        return live_turns.start(record.session_id, request.message, stream_turn(
+            RecordingAgent(agent, display), sessions, record, context(record), env_hint=".env",
             attached_items=request.attached_items, screen_state=request.screen_state,
             turn_id=turn_id, vocabulary=matched, on_turn_end=on_turn_end,
-        )
+        ))
+
+    @router.get("/chat/live", response_model=None)
+    async def chat_live(record: CurrentSession) -> StreamingResponse | Response:
+        """The session's running turn, replayed from its first event and then followed live, led
+        by a `turn_resume` event naming the question. 204 when no turn is running."""
+        turn = live_turns.get(record.session_id)
+        if turn is None:
+            return Response(status_code=204)
+        return StreamingResponse(turn.subscribe(resume_event(turn.user_text)),
+                                 media_type="text/event-stream", headers=SSE_HEADERS)
 
     # -- 자가발전: 질문 기록과 성장 요약 (spec §6/§10) ------------------------------------
     # Both are read-only and gated on `enable_growth` — off, they 404 like the insight panel,

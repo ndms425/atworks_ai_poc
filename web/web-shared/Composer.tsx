@@ -28,6 +28,25 @@ const VARIANTS = {
   },
 };
 
+const DRAFT_PREFIX = "chat-draft:";
+
+function readDraft(key: string): string {
+  try {
+    return localStorage.getItem(DRAFT_PREFIX + key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDraft(key: string, text: string): void {
+  try {
+    if (text.trim()) localStorage.setItem(DRAFT_PREFIX + key, text);
+    else localStorage.removeItem(DRAFT_PREFIX + key);
+  } catch {
+    // Storage may be unavailable; the draft simply does not survive a reload.
+  }
+}
+
 /** A prefill only fills the draft. screenshot_tour.py waits on the "Working…" placeholder. */
 export function Composer({
   send,
@@ -36,6 +55,10 @@ export function Composer({
   label,
   placeholder,
   prefill,
+  focusKey = 0,
+  onQueue,
+  busyPlaceholder = "Working…",
+  draftKey,
   variant = "dock",
   className = "",
 }: {
@@ -45,11 +68,36 @@ export function Composer({
   label: string;
   placeholder: string;
   prefill?: Prefill | null;
+  /** Bump to pull the caret into the field (e.g. right after something was attached). 0 = never. */
+  focusKey?: number;
+  /** While `busy`, a submit goes here (a send queue) instead of being refused. */
+  onQueue?: (text: string) => void;
+  /** The placeholder while busy. */
+  busyPlaceholder?: string;
+  /** When set, the unsent text is kept per key (a conversation) across reloads and switches. */
+  draftKey?: string | null;
   variant?: keyof typeof VARIANTS;
   className?: string;
 }) {
   const [draft, setDraft] = useState("");
   const boxRef = useRef<HTMLTextAreaElement>(null);
+
+  // Drafts: the unsent text of each conversation survives a reload and a switch. On a key change
+  // the outgoing key's text is written at once (a pending debounced write would be dropped).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const keyRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (keyRef.current && keyRef.current !== draftKey) writeDraft(keyRef.current, draftRef.current);
+    keyRef.current = draftKey;
+    if (draftKey) setDraft(readDraft(draftKey));
+  }, [draftKey]);
+  useEffect(() => {
+    if (!draftKey) return;
+    const timer = window.setTimeout(() => writeDraft(draftKey, draft), 250);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
 
   useEffect(() => {
     if (!prefill) return;
@@ -57,9 +105,21 @@ export function Composer({
     boxRef.current?.focus();
   }, [prefill]);
 
+  // On mount as well as on change, so a click that also OPENS the panel still lands in the field.
+  useEffect(() => {
+    if (!focusKey) return;
+    const frame = requestAnimationFrame(() => boxRef.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusKey]);
+
   const submit = () => {
-    if (!draft.trim() || busy || !ready) return;
-    send(draft);
+    if (!draft.trim() || !ready) return;
+    if (busy) {
+      if (!onQueue) return;
+      onQueue(draft);
+    } else {
+      send(draft);
+    }
     setDraft("");
   };
 
@@ -83,12 +143,12 @@ export function Composer({
         }}
         rows={1}
         aria-label={label}
-        placeholder={busy ? "Working…" : placeholder}
+        placeholder={busy ? busyPlaceholder : placeholder}
         className={`max-h-40 min-w-0 flex-1 resize-none text-(--ink) outline-none transition placeholder:text-(--ink-soft)/70 ${VARIANTS[variant].input}`}
       />
       <button
         type="submit"
-        disabled={busy || !ready || !draft.trim()}
+        disabled={(busy && !onQueue) || !ready || !draft.trim()}
         aria-label="Send"
         className={`grid shrink-0 place-items-center bg-(--ink) text-(--surface) transition hover:brightness-110 disabled:opacity-35 ${VARIANTS[variant].button}`}
       >

@@ -106,6 +106,8 @@ export interface AssistantChatItem {
   suggestionsStale?: boolean;
   pending: boolean;
   tools: string[];
+  /** Tools whose result has arrived without error, in order (the plan pill ticks steps off by these). */
+  toolsDone?: string[];
   /**
    * Status line for the call in flight; cleared when prose or a card lands, or when the
    * tool a progress line names returns.

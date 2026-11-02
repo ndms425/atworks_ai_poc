@@ -3,8 +3,8 @@
 
 "use client";
 
-import { useCallback, useMemo } from "react";
-import { AssistantPanel as PanelShell, type MerchantChat, type Prefill } from "web-shared";
+import { type ReactNode, useCallback, useMemo } from "react";
+import { type AssistantChatItem, AssistantPanel as PanelShell, type MerchantChat, type Prefill } from "web-shared";
 import { actOnFormatBatch, actOnProfile, actOnRule } from "@/lib/api";
 import { humanizeFormAnswers } from "@/lib/formAnswers";
 import type { FormatBatchAction } from "@/lib/useFormatBatchActions";
@@ -55,9 +55,29 @@ function Attachments({ items, onRemove }: { items: AttachedItem[]; onRemove: (or
   );
 }
 
+// A reply that ends by asking a yes/no question but came without chips gets "네" / "아니요" to tap,
+// so the operator never has to type a one-word answer. The prompt asks the model for the
+// question's own answers as chips; this only fills the gap when it did not. Open questions
+// ("무엇이 보이나요?") get nothing: there is no answer to guess.
+const YES_NO_ENDING = /(까요|습니까|ㄹ래요|할래요|볼래요|원하시나요|원하세요|필요하신가요|괜찮으신가요|맞나요|될까요)\s*\?\s*$/;
+
+function withAnswerChips(item: AssistantChatItem): AssistantChatItem {
+  if (item.pending || item.suggestions.length) return item;
+  const lastText = [...item.segments].reverse().find((s) => s.type === "text");
+  if (!lastText || lastText.type !== "text" || !YES_NO_ENDING.test(lastText.text.trim())) return item;
+  return { ...item, suggestions: ["네", "아니요"] };
+}
+
 export default function AssistantPanel({
   chat,
   prefill,
+  composerFocus,
+  headerActions,
+  queueSlot,
+  onQueue,
+  busyPlaceholder,
+  draftKey,
+  onQuote,
   onPrefill,
   onAttach,
   attachedRefs,
@@ -67,6 +87,15 @@ export default function AssistantPanel({
 }: {
   chat: MerchantChat<JobSpec>;
   prefill: Prefill | null;
+  composerFocus: number;
+  /** The conversation controls, shown in the panel header. */
+  headerActions?: ReactNode;
+  /** The visible conversation's queued sends, shown above the attachments. */
+  queueSlot?: ReactNode;
+  onQueue?: (text: string) => void;
+  busyPlaceholder?: string;
+  draftKey?: string | null;
+  onQuote?: (text: string) => void;
   onPrefill: (text: string) => void;
   onAttach: (item: Omit<AttachedItem, "order">) => void;
   attachedRefs: ReadonlySet<string>;
@@ -84,7 +113,9 @@ export default function AssistantPanel({
     () => ({
       ...chat,
       items: chat.items.map((item) =>
-        item.kind === "user" ? { ...item, text: humanizeFormAnswers(item.text) ?? item.text } : item,
+        item.kind === "user"
+          ? { ...item, text: humanizeFormAnswers(item.text) ?? item.text }
+          : withAnswerChips(item),
       ),
     }),
     [chat],
@@ -115,7 +146,18 @@ export default function AssistantPanel({
       chat={shown}
       copy={COPY}
       prefill={prefill}
-      aboveComposer={<Attachments items={attachments} onRemove={onRemoveAttachment} />}
+      focusKey={composerFocus}
+      headerActions={headerActions}
+      onQueue={onQueue}
+      busyPlaceholder={busyPlaceholder}
+      draftKey={draftKey}
+      onQuote={onQuote}
+      aboveComposer={
+        <div className="flex flex-col gap-2">
+          {queueSlot}
+          <Attachments items={attachments} onRemove={onRemoveAttachment} />
+        </div>
+      }
       renderBlock={(segment) => (
         <GenerativeBlock
           block={segment.block}

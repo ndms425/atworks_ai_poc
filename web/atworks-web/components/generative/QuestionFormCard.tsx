@@ -3,9 +3,10 @@
 
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button, GenCard, GenCardHeader } from "web-shared";
 import type { FormQuestion, QuestionFormPayload } from "@/lib/types";
+import { DateField, isTargetQuestion, NumberField, TimeField } from "./FormFields";
 
 /** `.chip-on`/`.btn-primary` are storefront-only classes (see web-shared/base.css); this merchant
  * portal declares its own picked-chip rule in `app/globals.css` and the submit button uses the
@@ -16,6 +17,16 @@ import type { FormQuestion, QuestionFormPayload } from "@/lib/types";
  * `@layer utilities` regardless of specificity — so `bg-(--accent-soft)` here never reached the
  * screen and a picked chip looked exactly like an unpicked one. */
 const CHIP_ON = "chip-selected";
+
+/** Environments/servers are picked several at once even when the model sent a single-pick
+ *  question: the job runs every chosen target, and the guardrail still caps how many. */
+function normalized(q: FormQuestion): FormQuestion {
+  if ((q.type === "radio" || q.type === "select") && q.options?.length && isTargetQuestion(q.id, q.label)) {
+    const d = q.default;
+    return { ...q, type: "checkbox", default: d == null || d === "" ? [] : Array.isArray(d) ? d : [d] };
+  }
+  return q;
+}
 
 function initial(qs: FormQuestion[]): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
@@ -41,14 +52,16 @@ export function formatFormAnswers(form: QuestionFormPayload, answers: Record<str
 }
 
 export default function QuestionFormCard({ payload, onSubmit }: { payload: QuestionFormPayload; onSubmit?: (text: string) => void }) {
-  const [answers, setAnswers] = useState(() => initial(payload.questions));
+  const questions = useMemo(() => payload.questions.map(normalized), [payload.questions]);
+  const form = useMemo(() => ({ ...payload, questions }), [payload, questions]);
+  const [answers, setAnswers] = useState(() => initial(questions));
   const [sent, setSent] = useState(false);
   const set = (id: string, v: string | string[]) => setAnswers((a) => ({ ...a, [id]: v }));
   return (
     <GenCard>
       <GenCardHeader title={payload.title} meta={payload.description ? <span>{payload.description}</span> : null} />
       <div className="px-3.5 pb-3">
-        {payload.questions.map((q) => (
+        {questions.map((q) => (
           <fieldset key={q.id} className={`my-2 rounded-lg border p-2 ${q.highlight ? "border-(--warn) bg-(--warn-soft)" : "border-(--line)"}`} disabled={sent}>
             <legend className="text-[13px] font-medium">{q.label}</legend>
             <p className="mb-1 text-[11.5px] text-(--ink-soft)">왜 묻나: {q.why}</p>
@@ -62,7 +75,7 @@ export default function QuestionFormCard({ payload, onSubmit }: { payload: Quest
                 ))}
               </div>
             ) : q.type === "checkbox" ? (
-              <div className="flex flex-wrap gap-1">
+              <div className="flex flex-wrap items-center gap-1">
                 {(q.options ?? []).map((o) => {
                   const cur = (answers[q.id] as string[]) ?? [];
                   const on = cur.includes(o.value);
@@ -73,15 +86,22 @@ export default function QuestionFormCard({ payload, onSubmit }: { payload: Quest
                     </label>
                   );
                 })}
+                <span className="ml-1 text-[11.5px] text-(--ink-faint)">여러 개 선택 가능</span>
               </div>
             ) : q.type === "switch" ? (
               <label className="chip">
                 <input type="checkbox" checked={answers[q.id] === "true"} onChange={(e) => set(q.id, e.target.checked ? "true" : "false")} /> {answers[q.id] === "true" ? "예" : "아니오"}
               </label>
+            ) : q.type === "time" ? (
+              <TimeField value={answers[q.id] as string} onChange={(v) => set(q.id, v)} />
+            ) : q.type === "number" ? (
+              <NumberField value={answers[q.id] as string} onChange={(v) => set(q.id, v)} label={q.label} placeholder={q.placeholder} />
+            ) : q.type === "date" ? (
+              <DateField value={answers[q.id] as string} onChange={(v) => set(q.id, v)} />
             ) : (
               <input
                 className="w-full rounded border border-(--line) px-2 py-1 text-[13px]"
-                type={q.type === "number" ? "number" : q.type === "date" ? "date" : q.type === "time" ? "time" : "text"}
+                type="text"
                 value={answers[q.id] as string}
                 placeholder={q.placeholder}
                 onChange={(e) => set(q.id, e.target.value)}
@@ -95,7 +115,7 @@ export default function QuestionFormCard({ payload, onSubmit }: { payload: Quest
           disabled={sent || !onSubmit}
           onClick={() => {
             setSent(true);
-            onSubmit?.(formatFormAnswers(payload, answers));
+            onSubmit?.(formatFormAnswers(form, answers));
           }}
         >
           {sent ? "보냈습니다" : "이대로 보내기"}

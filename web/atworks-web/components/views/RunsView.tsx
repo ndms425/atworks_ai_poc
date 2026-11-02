@@ -9,6 +9,7 @@ import { fetchRuns } from "@/lib/api";
 import { attachToggle } from "@/lib/attachments";
 import Pager from "@/components/Pager";
 import { RUN_STATUS } from "@/lib/kinds";
+import { methodTone } from "@/lib/method";
 import { usePagedList } from "@/lib/usePagedList";
 import { useScreenFocus } from "@/lib/useScreenFocus";
 import type { AttachedItem, RunResult, ScreenFilter, ScreenIntent, ScreenTarget } from "@/lib/types";
@@ -59,7 +60,7 @@ export default function RunsView({
   useEffect(() => {
     onScreen?.({
       filter: { status: filter },
-      visible: runs.slice(0, 40).map((run) => ({ kind: "run", ref_id: run.run_id, label: `${labelFor(run)} ${run.target_env}` })),
+      visible: runs.slice(0, 40).map((run) => ({ kind: "run", ref_id: run.run_id, label: `${labelFor(run)} ${run.target_env}`, status: run.status })),
     });
   }, [runs, filter, onScreen]);
 
@@ -109,7 +110,15 @@ export default function RunsView({
                   return (
                     <tr key={run.run_id} data-ref={`run:${run.run_id}`} className="border-t border-(--line)">
                       <td className="py-2 pl-[18px] pr-3">
-                        <div className="font-mono text-[12.5px] text-(--ink)">{labelFor(run)}</div>
+                        <div className="font-mono text-[12.5px] text-(--ink)">
+                          {run.api_method && run.api_path ? (
+                            <>
+                              <span className={`font-semibold ${methodTone(run.api_method)}`}>{run.api_method}</span> {run.api_path}
+                            </>
+                          ) : (
+                            labelFor(run)
+                          )}
+                        </div>
                         <div className="text-[11.5px] tabular-nums text-(--ink-soft)">
                           {run.run_id}
                           {run.failed_rules?.length ? <span> · {run.failed_rules.join(", ")}</span> : null}

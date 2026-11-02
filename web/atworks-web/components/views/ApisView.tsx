@@ -8,6 +8,7 @@ import { AskButton, formatDate, Notice, PageHeader, Panel, Pill, plural, SearchF
 import { fetchApis } from "@/lib/api";
 import { attachToggle } from "@/lib/attachments";
 import Pager from "@/components/Pager";
+import { methodTone } from "@/lib/method";
 import { usePagedList } from "@/lib/usePagedList";
 import { useScreenFocus } from "@/lib/useScreenFocus";
 import type { ApiSpec, AttachedItem, ScreenFilter, ScreenIntent, ScreenTarget } from "@/lib/types";
@@ -86,7 +87,7 @@ export default function ApisView({
               <tbody className="cv-rows">
                 {apis.map((api) => (
                   <tr key={api.api_id} data-ref={`api:${api.api_id}`} className="border-t border-(--line)">
-                    <td className="py-2 pl-[18px] pr-3 text-[12.5px] font-semibold tabular-nums text-(--ink-soft)">{api.method}</td>
+                    <td className={`py-2 pl-[18px] pr-3 text-[12.5px] font-semibold tabular-nums ${methodTone(api.method)}`}>{api.method}</td>
                     <td className="px-3 py-2 font-mono text-[12.5px] text-(--ink)">{api.path}</td>
                     <td className="px-3 py-2 text-[13px] text-(--ink)">{api.name}</td>
                     <td className="px-3 py-2 text-[12.5px] tabular-nums text-(--ink-soft)">{formatDate(api.updated_at)}</td>

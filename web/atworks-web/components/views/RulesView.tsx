@@ -91,7 +91,7 @@ export default function RulesView({
   // Report what's actually on screen so api.screenState stays current for the next chat turn:
   // the CURRENT PAGE (sliced to 40), which is exactly what the operator can see and point at.
   useEffect(() => {
-    onScreen?.({ visible: rules.slice(0, 40).map((rule) => ({ kind: "rule", ref_id: rule.rule_id, label: rule.message })) });
+    onScreen?.({ visible: rules.slice(0, 40).map((rule) => ({ kind: "rule", ref_id: rule.rule_id, label: rule.message, status: rule.status })) });
   }, [rules, onScreen]);
 
   return (

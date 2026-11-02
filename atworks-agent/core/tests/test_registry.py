@@ -18,7 +18,7 @@ EXPECTED = ["load_skill", "search_apis", "get_api", "list_runs", "get_run", "ran
             "stage_profile", "apply_profile", "discard_profile", "get_pending_profiles", "recommend_ignore_paths",
             "present_run_digest", "present_run_groups", "present_query_table", "present_job_preview", "present_rule_preview",
             "present_format_batch", "present_parity_summary", "present_profile_preview",
-            "present_question_form", "navigate_screen", "highlight_screen", "present_suggestions"]
+            "present_question_form", "navigate_screen", "highlight_screen", "present_plan", "present_suggestions"]
 
 
 def test_fixed_order_and_status_field():

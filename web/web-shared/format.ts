@@ -43,34 +43,55 @@ function parseDate(value: string): Date {
 
 const ISO_DAY = /\d{4}-\d{2}-\d{2}/g;
 
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+
+/** The one date shape every screen shows: "2026.06.24" (local calendar day). */
+function ymd(date: Date): string {
+  return `${date.getFullYear()}.${pad2(date.getMonth() + 1)}.${pad2(date.getDate())}`;
+}
+
 function dayLabel(value: string): string {
   const date = parseDate(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return ymd(date);
 }
 
-/** "Jun 24, 2026"; dates inside a trailing note ("(revised from ...)") are formatted too. */
+/** "2026.06.24"; dates inside a trailing note ("(revised from ...)") are formatted too. */
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "";
   if (/^\d{4}-\d{2}-\d{2}(?!T)/.test(value)) return value.replace(ISO_DAY, dayLabel);
   return dayLabel(value);
 }
 
-/** "Jun 24" */
-export function formatDayMonth(value: string | null | undefined): string {
+/** "2026.06.24 09:30" for an instant; a date-only value stays "2026.06.24". */
+export function formatDateTime(value: string | null | undefined): string {
   if (!value) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDate(value);
   const date = parseDate(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return `${ymd(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
-/** "Fri, Aug 21", or "Fri, Jan 2, 2027" outside the current year. */
+const ISO_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+
+/** Server values of unknown type (chips, table keys): ISO dates and instants are reformatted,
+ *  anything else passes through untouched. */
+export function formatIfDate(value: unknown): string {
+  if (typeof value !== "string") return String(value ?? "");
+  if (ISO_DATE_ONLY.test(value)) return formatDate(value);
+  if (ISO_INSTANT.test(value)) return formatDateTime(value);
+  return value;
+}
+
+/** "2026.06.24" (kept as a separate name for existing callers). */
+export function formatDayMonth(value: string | null | undefined): string {
+  return formatDate(value);
+}
+
+/** "2026.08.21" (kept as a separate name for existing callers). */
 export function formatWeekday(value: string | null | undefined): string {
-  if (!value) return "";
-  const date = parseDate(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const year = date.getFullYear() === new Date().getFullYear() ? undefined : "numeric";
-  return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year });
+  return formatDate(value);
 }
 
 /** "1 order", "3 orders". */
@@ -160,21 +181,12 @@ export function formatFieldValue(field: string, value: unknown, kinds: FieldKind
 
 const ISO_RANGE = /^(\d{4}-\d{2}-\d{2})\s*\/\s*(\d{4}-\d{2}-\d{2})$/;
 
-/** "2026-06-19/2026-06-25" as "Jun 19–25". */
+/** "2026-06-19/2026-06-25" as "2026.06.19 – 2026.06.25". */
 export function formatPeriodLabel(value: string | null | undefined): string {
   if (!value) return "";
   const match = ISO_RANGE.exec(value.trim());
   if (!match) return value;
-  const start = parseDate(match[1]);
-  const end = parseDate(match[2]);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return value;
-  if (start.getFullYear() !== end.getFullYear()) {
-    return `${formatDate(match[1])} – ${formatDate(match[2])}`;
-  }
-  if (start.getMonth() !== end.getMonth()) {
-    return `${formatDayMonth(match[1])} – ${formatDayMonth(match[2])}`;
-  }
-  return `${formatDayMonth(match[1])}–${end.getDate()}`;
+  return `${formatDate(match[1])} – ${formatDate(match[2])}`;
 }
 
 /** "prior week"/"prior period" when the windows abut at equal length; else the window's label. */

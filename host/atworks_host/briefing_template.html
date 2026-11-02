@@ -20,14 +20,16 @@ tr.differs{background:#fff7ed}
 <script id="briefing-data" type="application/json">__BRIEFING_DATA__</script>
 <script>
 const esc=(v)=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const p2=(n)=>String(n).padStart(2,"0");
+const fd=(v)=>{if(v==null||v==="")return v;const s=String(v);if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s.replaceAll("-",".");if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s))return v;const d=new Date(s);if(isNaN(d))return v;return `${d.getFullYear()}.${p2(d.getMonth()+1)}.${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;};
 const d=JSON.parse(document.getElementById('briefing-data').textContent);
-document.getElementById('title').textContent=`일일 브리핑 ${d.date}`;
-document.getElementById('meta').textContent=`${d.window.from} → ${d.window.to}`;
+document.getElementById('title').textContent=`일일 브리핑 ${fd(d.date)}`;
+document.getElementById('meta').textContent=`${fd(d.window.from)} → ${fd(d.window.to)}`;
 for(const k of ['total','fail','error','pass'])document.getElementById('t-'+k).textContent=d.counts[k];
 document.getElementById('t-flaky').textContent=d.insights.flaky;document.getElementById('t-reg').textContent=d.insights.regression_suspect;
-document.getElementById('groups').innerHTML=d.top_groups.map(g=>`<tr><td>${esc(g.label)}</td><td>${esc(g.count)}</td><td>${esc(g.first_non_pass_at??'—')}</td><td>${(g.run_ids||[]).slice(0,3).map(id=>`<a href="${esc(d.portal_origin)}/?attach=run:${encodeURIComponent(id)}" target="_blank" rel="noreferrer">${esc(id)}</a>`).join(' ')}</td></tr>`).join('')||'<tr><td colspan="4">없음</td></tr>';
+document.getElementById('groups').innerHTML=d.top_groups.map(g=>`<tr><td>${esc(g.label)}</td><td>${esc(g.count)}</td><td>${esc(fd(g.first_non_pass_at)??'—')}</td><td>${(g.run_ids||[]).slice(0,3).map(id=>`<a href="${esc(d.portal_origin)}/?attach=run:${encodeURIComponent(id)}" target="_blank" rel="noreferrer">${esc(id)}</a>`).join(' ')}</td></tr>`).join('')||'<tr><td colspan="4">없음</td></tr>';
 document.getElementById('executed').innerHTML=d.jobs.executed.map(j=>`<li>${esc(j.job_id)} · ${esc(j.summary)} · ${esc(j.runs)}건</li>`).join('')||'<li>없음</li>';
 document.getElementById('stale').textContent=d.jobs.stale_pending?`24시간 넘게 대기 중 ${d.jobs.stale_pending}건`:'';
-document.getElementById('pending').innerHTML=d.jobs.pending.map(j=>`<li>${esc(j.job_id)} · ${esc(j.summary)} · ${esc(j.created_at)}</li>`).join('')||'<li>없음</li>';
-document.getElementById('prov').textContent=`generated at ${d.generated_at} — ${d.note}`;
+document.getElementById('pending').innerHTML=d.jobs.pending.map(j=>`<li>${esc(j.job_id)} · ${esc(j.summary)} · ${esc(fd(j.created_at))}</li>`).join('')||'<li>없음</li>';
+document.getElementById('prov').textContent=`generated at ${fd(d.generated_at)} — ${d.note}`;
 </script></body></html>

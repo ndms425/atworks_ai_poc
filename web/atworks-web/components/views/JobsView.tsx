@@ -96,7 +96,7 @@ export default function JobsView({
   // Report what's actually on screen so api.screenState stays current for the next chat turn:
   // the CURRENT PAGE (sliced to 40), which is exactly what the operator can see and point at.
   useEffect(() => {
-    onScreen?.({ visible: jobs.slice(0, 40).map((job) => ({ kind: "job", ref_id: job.job_id, label: job.summary })) });
+    onScreen?.({ visible: jobs.slice(0, 40).map((job) => ({ kind: "job", ref_id: job.job_id, label: job.summary, status: job.status })) });
   }, [jobs, onScreen]);
 
   return (

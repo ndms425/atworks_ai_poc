@@ -6,6 +6,7 @@
 import type { ReactNode } from "react";
 import { ApproveBar, type ChangeAction, ChangeStatusPill, formatDate, GenCard, GenCardHeader, GuardrailNotes, useChangeActions } from "web-shared";
 import { reportUrl } from "@/lib/api";
+import { methodTone } from "@/lib/method";
 import type { JobPreviewPayload, JobSchedule, JobSpec } from "@/lib/types";
 
 const SLOT_LABEL: Record<string, string> = {
@@ -37,6 +38,7 @@ export default function JobPreviewCard({ payload, onAct }: { payload: JobPreview
   const ceiling = isLate ? "최대 " : "";
   const perExecution = isLate ? m.max_runs_per_execution : m.runs_per_execution;
   const total = isLate ? m.max_runs_total : m.runs_total;
+  const apisById = new Map(payload.apis.map((a) => [a.api_id, a]));
   const rows: Array<[string, ReactNode]> = [
     [
       "target_envs",
@@ -46,7 +48,30 @@ export default function JobPreviewCard({ payload, onAct }: { payload: JobPreview
         ))}
       </ul>,
     ],
-    ["api_ids", `${job.api_ids.length}개 (${payload.apis.slice(0, 3).map((a) => a.path).join(", ")}${payload.apis.length > 3 ? " …" : ""})`],
+    [
+      "api_ids",
+      // Every API the approval covers, one per line: the click is consent to this whole list, so
+      // none of it may hide behind an ellipsis. A long list scrolls inside the row instead.
+      <div key="apis">
+        <div className="text-(--ink-soft)">{job.api_ids.length}개</div>
+        <ul className={`mt-0.5 space-y-0.5 font-mono text-[12.5px] ${job.api_ids.length > 10 ? "panel-scroll max-h-60 overflow-y-auto pr-1" : ""}`}>
+          {job.api_ids.map((id) => {
+            const api = apisById.get(id);
+            return (
+              <li key={id} className="break-all">
+                {api ? (
+                  <>
+                    <span className={`font-semibold ${methodTone(api.method)}`}>{api.method}</span> {api.path}
+                  </>
+                ) : (
+                  id
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>,
+    ],
     ...(job.selection_basis ? ([["selection_basis", job.selection_basis]] as Array<[string, ReactNode]>) : []),
     ["binding", job.binding === "FROZEN" ? "오늘 고른 목록 고정" : "실행 때마다 재선택"],
     [

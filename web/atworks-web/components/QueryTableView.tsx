@@ -4,6 +4,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { formatIfDate } from "web-shared";
 import { QUERY_DIMENSION_LABEL, QUERY_MEASURE_LABEL, QUERY_SOURCE_LABEL } from "@/lib/kinds";
 import type { QueryDimension, QueryMeasure, QueryResult, QueryTableColumn, QueryTableRow } from "@/lib/types";
 
@@ -106,7 +107,7 @@ export function QueryTable({
             {columns.map((column) =>
               column.kind === "dimension" ? (
                 <td key={column.key} className="py-1.5 pr-3 font-mono text-(--ink)">
-                  {noDimensions ? "전체" : (row.keys[column.key] ?? "—")}
+                  {noDimensions ? "전체" : row.keys[column.key] != null ? formatIfDate(row.keys[column.key]) : "—"}
                 </td>
               ) : (
                 <td key={column.key} className={`px-2 py-1.5 text-right tabular-nums ${cellTone(row.measures[column.key], column.kind)}`}>

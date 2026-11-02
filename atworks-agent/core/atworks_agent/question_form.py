@@ -58,7 +58,8 @@ QUESTION_FORM_INPUT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "string", "maxLength": 40, "pattern": "^[a-z0-9_.-]+$"},
                     "label": {"type": "string", "maxLength": 120},
-                    "type": {"type": "string", "enum": ["radio", "checkbox", "select", "text", "date", "time", "number", "switch"]},
+                    "type": {"type": "string", "enum": ["radio", "checkbox", "select", "text", "date", "time", "number", "switch"],
+                             "description": "checkbox for target environments/servers (several may be picked); time is 24h HH:MM; number for counts and day spans."},
                     "why": {"type": "string", "maxLength": 200,
                             "description": "Why this question is being asked — the fact that was missing or ambiguous. Shown beside the control."},
                     "default": {"description": "Recommended answer, prefilled. Put this key BEFORE options.",

@@ -53,7 +53,7 @@ export default function RunDigestCard({
                   <>
                     <span>{sub}</span>
                     {item.rank ? <span className="tabular-nums text-(--ink-soft)">{item.rank.score.toFixed(1)}</span> : null}
-                    <AskButton label="왜?" onClick={() => onPrefill?.(`${item.run!.run_id} 왜 실패했어`)} />
+                    <AskButton label="원인 보기" onClick={() => onPrefill?.(`${item.run!.run_id} 실패 원인 알려줘`)} />
                   </>
                 ) : null
               }

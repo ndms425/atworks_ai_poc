@@ -8,6 +8,11 @@ import { ActivityButton } from "../ActivityButton";
 import { Composer, type Prefill } from "../Composer";
 import { Icon } from "../icons";
 import { useStickToBottom } from "../scroll";
+import type { ErrorCardActions } from "../MessageBubble";
+import type { AssistantChatItem } from "../protocol";
+import { MessageRail } from "../MessageRail";
+import { PlanPill } from "../PlanPill";
+import { QuoteBar } from "../QuoteBar";
 import { LatestPill, Transcript, type TranscriptProps } from "../Transcript";
 import type { AgentTurn } from "../turn";
 import { IconButton } from "../ui";
@@ -26,22 +31,39 @@ export interface AssistantPanelCopy {
 }
 
 /** The merchant portals' assistant rail. */
+/** Starts a file download of `data` as pretty JSON, entirely client-side. */
+function downloadJson(name: string, data: unknown): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export function AssistantPanel({
   chat,
   copy,
   renderBlock,
   prefill,
+  focusKey,
   newMemoryCount,
   onOpenActivity,
   onClose,
   fullscreen = false,
   onToggleFullscreen,
   aboveComposer,
+  headerActions,
+  onQueue,
+  busyPlaceholder,
+  draftKey,
+  onQuote,
 }: {
   chat: AgentTurn;
   copy: AssistantPanelCopy;
   renderBlock: TranscriptProps["renderBlock"];
   prefill?: Prefill | null;
+  focusKey?: number;
   newMemoryCount: number;
   onOpenActivity: () => void;
   onClose: () => void;
@@ -51,6 +73,15 @@ export function AssistantPanel({
    * whatever the next send will carry (a portal's attached records, say). Layout only: this
    * file stays domain-agnostic, so the app owns what goes in here. */
   aboveComposer?: ReactNode;
+  /** Extra header controls, left of Activity (an app's conversation switcher, say). */
+  headerActions?: ReactNode;
+  /** A send while a reply is streaming goes to this queue instead of being refused. */
+  onQueue?: (text: string) => void;
+  busyPlaceholder?: string;
+  /** Keeps the composer's unsent text per conversation. */
+  draftKey?: string | null;
+  /** Selecting part of a reply offers to quote it into the next question. */
+  onQuote?: (text: string) => void;
 }) {
   const { scrollRef, onScroll, showLatest, jumpToLatest } = useStickToBottom(chat.items, chat.busy, {
     onlyWhileBusy: true,
@@ -71,9 +102,41 @@ export function AssistantPanel({
 
   const column = fullscreen ? "mx-auto w-full max-w-3xl" : "";
 
+  // A failed reply offers: send its question again (only the latest reply, and not mid-stream),
+  // copy a diagnostic, and download this session's trace. No session id goes into either: it is
+  // the session's bearer token.
+  const errorActions = (item: AssistantChatItem, index: number): ErrorCardActions => {
+    const question = chat.items[index - 1];
+    const errors = item.segments.filter((s) => s.type === "error").map((s) => (s.type === "error" ? s.text : ""));
+    const diagnostic = JSON.stringify(
+      { at: new Date().toISOString(), turn: item.turn, question: question?.kind === "user" ? question.text : null,
+        tools: item.tools, errors },
+      null,
+      2,
+    );
+    return {
+      diagnostic,
+      onRetry:
+        index === chat.items.length - 1 && !chat.busy && question?.kind === "user"
+          ? () => void chat.send(question.text)
+          : undefined,
+      onExportLog: () =>
+        downloadJson(`chat-log-${new Date().toISOString().replace(/[:.]/g, "-")}.json`, {
+          exported_at: new Date().toISOString(),
+          turns: chat.items.map((entry) =>
+            entry.kind === "user"
+              ? { role: "user", text: entry.text }
+              : { role: "assistant", turn: entry.turn, tools: entry.tools,
+                  segments: entry.segments.map((s) => (s.type === "ui" ? { type: "ui", component: s.block.component } : s)) },
+          ),
+          trace: chat.trace,
+        }),
+    };
+  };
+
   return (
     <div className="flex h-full w-full flex-col border-l border-(--line) bg-(--card)">
-      <div className="flex items-center gap-2.5 border-b border-(--line) py-3 pl-4 pr-2.5">
+      <div className="relative flex items-center gap-2.5 border-b border-(--line) py-3 pl-4 pr-2.5">
         <span className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[10px] bg-(--accent) text-(--on-accent)" aria-hidden>
           <Icon name="spark" size={15} />
         </span>
@@ -81,6 +144,7 @@ export function AssistantPanel({
           <div className="truncate text-[14px] font-semibold leading-tight text-(--ink)">{copy.title}</div>
           <div className="truncate text-[11.5px] text-(--ink-soft)">You approve every change</div>
         </div>
+        {headerActions}
         <ActivityButton streaming={chat.streaming} newMemoryCount={newMemoryCount} onClick={onOpenActivity} />
         {onToggleFullscreen ? (
           <IconButton
@@ -123,14 +187,20 @@ export function AssistantPanel({
                 renderBlock={renderBlock}
                 suggestionFilter={isPlainChip}
                 gap="gap-2.5"
+                errorActions={errorActions}
               />
             )}
           </div>
         </div>
         {showLatest ? <LatestPill onClick={jumpToLatest} /> : null}
+        {onQuote ? <QuoteBar containerRef={scrollRef} onQuote={onQuote} /> : null}
+        <MessageRail containerRef={scrollRef} version={chat.items.length + (chat.busy ? 0.5 : 0)} />
       </div>
 
       <div className="border-t border-(--line) p-3">
+        <div className={`mb-2 empty:hidden ${column}`}>
+          <PlanPill item={[...chat.items].reverse().find((entry) => entry.kind === "assistant") as AssistantChatItem | undefined} />
+        </div>
         {aboveComposer ? <div className={`mb-2 ${column}`}>{aboveComposer}</div> : null}
         <Composer
           send={chat.send}
@@ -139,6 +209,10 @@ export function AssistantPanel({
           label={copy.label}
           placeholder={copy.placeholder}
           prefill={prefill}
+          focusKey={focusKey}
+          onQueue={onQueue}
+          busyPlaceholder={busyPlaceholder}
+          draftKey={draftKey}
           variant="field"
           className={column}
         />

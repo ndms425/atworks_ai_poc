@@ -74,6 +74,7 @@ from atworks_agent.gates import (
     turn_attempted_staging,
 )
 from atworks_agent.grounding import GROUNDING_RULES, job_requested
+from atworks_agent.live_state import live_state
 from atworks_agent.prompt import build_dynamic_context, build_static_system
 from atworks_agent.tools.registry import build_tools
 from atworks_agent.types import (
@@ -163,11 +164,17 @@ class AtworksAgent:
         state.current_turn_id = turn_id
         state.turn_tool_names = []
         state.turn_cards = 0
+        state.turn_text_chars = 0
         state.turn_unmet = None
         state.pending_aliases = []
         turn_started = time.monotonic()
         usage = usage_totals()
         atworks_context = await fetched(self.backend.get_context(session))
+        try:
+            state_now = await live_state(self.backend, session, state)
+        except Exception:
+            logger.exception("state_now could not be read; the turn runs without it")
+            state_now = None
         try:
             attached_items = await enrich_attached_items(self.backend, session, state, list(attached_items))
         except Exception:
@@ -181,6 +188,7 @@ class AtworksAgent:
             context_max_chars=self.config.max_context_chars,
             screen_state=screen_state,
             vocabulary=vocabulary,
+            state_now=state_now,
         )
         system = build_system_blocks(self._static_system, context)
         # Delegates post progress lines while their executions are in flight; the loop
@@ -270,6 +278,8 @@ class AtworksAgent:
                         async for event in streamed.relay(
                             stream, dispatcher, executor.tool_call_event
                         ):
+                            if event.type == "text_delta":
+                                state.turn_text_chars += len(str(event.data.get("text", "")))
                             yield event
                         final = None if streamed.abandoned else await stream.get_final_message()
                     response = final or streamed

@@ -776,6 +776,8 @@ class ScreenTarget(BaseModel):
     kind: ScreenTargetKind
     ref_id: str = Field(max_length=64)
     label: str | None = Field(default=None, max_length=120)
+    #: The status the row shows on screen (job/rule: staged/applied/discarded; run: pass/fail/error).
+    status: str | None = Field(default=None, max_length=32)
 
 
 class ScreenFilter(BaseModel):
@@ -860,6 +862,9 @@ class AtworksSessionState(BaseModel):
     # 불필요하게 일어나고, 재접속한 세션이 남의 턴 도구 목록을 안고 시작한다.
     turn_tool_names: list[str] = Field(default_factory=list, exclude=True)
     turn_cards: int = Field(default=0, exclude=True)
+    #: Prose characters streamed this turn (orchestrator). With turn_cards it is how the chips
+    #: tool knows a reply would otherwise be nothing but chips.
+    turn_text_chars: int = Field(default=0, exclude=True)
     turn_unmet: tuple[UnmetReason, str, str] | None = Field(default=None, exclude=True)
     # 이번 턴에 propose_alias가 낸 제안들 (self-growth §7). 카드 푸터의 "‘결제 계열’을 …로
     # 해석했습니다 — 맞나요?"가 여기서 나온다. 세션 문서에 실리지 않는(`exclude=True`) 이유는 위와

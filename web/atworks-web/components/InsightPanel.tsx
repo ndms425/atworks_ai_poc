@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AskButton, Button, formatDate, Notice, Panel, Pill, Skeleton, useResource } from "web-shared";
+import { AskButton, Button, formatDate, formatIfDate, Notice, Panel, Pill, Skeleton, useResource } from "web-shared";
 import { fetchInsightPanel, refreshInsightPanel } from "@/lib/api";
 import { ROLE_KO } from "@/lib/types";
 import type { InsightItem, InsightPanelData } from "@/lib/types";
@@ -34,7 +34,7 @@ function InsightRow({ item, onAskAssistant }: { item: InsightItem; onAskAssistan
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {figures.map(([key, value]) => (
             <Pill key={key} tone="muted">
-              {key} {value}
+              {key} {formatIfDate(value)}
             </Pill>
           ))}
         </div>
