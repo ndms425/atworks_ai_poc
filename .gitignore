@@ -28,3 +28,7 @@ scripts/smoke/shots/
 # CI가 재생할 손으로 쓴 시드 케이스만 커밋한다.
 evals/cases/*.json
 !evals/cases/seed-*.json
+
+# 가져온 실데이터셋(scripts/import/superfine.py 가 만든다). scripts/scale/out/ 과 같은 이유로
+# 커밋하지 않는다 -- 생성물이고, 만드는 스크립트는 저장소에 있다.
+data/
