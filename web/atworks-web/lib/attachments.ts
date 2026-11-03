@@ -16,7 +16,10 @@ export function attachToggle(
   attachedRefs: ReadonlySet<string>,
   item: Omit<AttachedItem, "order">,
   onAttach: (item: Omit<AttachedItem, "order">) => void,
-): { label: string; on: boolean; onClick: () => void } {
+): { label: string; on: boolean; onClick: () => void; icon: "pin"; iconOnly: true } {
   const on = attachedRefs.has(attachKey(item.kind, item.ref_id));
-  return { label: on ? "첨부 해제" : "채팅에 첨부", on, onClick: () => onAttach(item) };
+  // 글자 없이 아이콘만. 이 버튼은 거의 모든 목록의 **모든 행**에 반복되는데, 행마다 "채팅에
+  // 첨부" 다섯 글자가 들어가면 그 폭이 열 하나를 차지해 정작 읽어야 할 경로·이름을 민다.
+  // `label`은 사라지지 않고 aria-label과 툴팁으로 남는다.
+  return { label: on ? "첨부 해제" : "채팅에 첨부", on, onClick: () => onAttach(item), icon: "pin", iconOnly: true };
 }

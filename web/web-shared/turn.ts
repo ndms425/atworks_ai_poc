@@ -18,6 +18,7 @@ import type {
   AssistantSegment,
   ChatItem,
   MemoryFact,
+  SentAttachment,
   ToolCallData,
   TraceEntry,
   UIBlock,
@@ -391,11 +392,17 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
           const tool = String(data.tool ?? "tool");
           const input = data.input ?? {};
           // The model's own line for the call when it carries one, else the stock copy.
-          const label = typeof data.label === "string" ? data.label.trim() : "";
+          // The model sometimes answers the status field with a bare value ("non_pass") instead
+          // of a sentence. A single ASCII token is an identifier, not a line a person reads, so
+          // the stock copy wins over it; anything with a space or a Korean character is prose.
+          const given = typeof data.label === "string" ? data.label.trim() : "";
+          const label = /^[\w.:-]+$/.test(given) ? "" : given;
+          const line = label || describeToolCall(tool, input);
           updateTurn(turn, (item) => ({
             ...item,
             tools: [...item.tools, tool],
-            activity: label || describeToolCall(tool, input),
+            steps: [...(item.steps ?? []), { tool, label: line, startedAt: Date.now() }],
+            activity: line,
           }));
           const component = callbacks.current.pendingComponent?.(tool);
           if (component && !findSlot(component)) {
@@ -408,9 +415,17 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
         }
         case "tool_result": {
           const resultTool = String(event.data.tool ?? "tool");
-          if (!event.data.is_error) {
-            updateTurn(turn, (item) => ({ ...item, toolsDone: [...(item.toolsDone ?? []), resultTool] }));
-          }
+          const resultFailed = Boolean(event.data.is_error);
+          // Closes the OLDEST still-open step naming this tool, so a tool called twice closes
+          // its two steps in order rather than closing the same one twice.
+          updateTurn(turn, (item) => {
+            const steps = item.steps ?? [];
+            const at = steps.findIndex((step) => step.tool === resultTool && step.doneAt == null);
+            if (at < 0) return item;
+            const closed = [...steps];
+            closed[at] = { ...closed[at], doneAt: Date.now(), ...(resultFailed ? { failed: true } : {}) };
+            return { ...item, steps: closed };
+          });
           if (progressToolRef.current === resultTool) {
             progressToolRef.current = null;
             updateTurn(turn, (item) => ({ ...item, activity: undefined }));
@@ -472,7 +487,8 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
   );
 
   const runTurn = useCallback(
-    async (userText: string, events: AsyncIterable<AgentEvent>, replayInto?: number) => {
+    async (userText: string, events: AsyncIterable<AgentEvent>, replayInto?: number,
+           attachments?: SentAttachment[]) => {
       const turn = replayInto ?? ++turnRef.current;
       let finish: () => void = () => {};
       const run: Run = {
@@ -494,12 +510,12 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
       if (replayInto === undefined) {
         setItems((previous) => [
           ...previous,
-          { kind: "user", text: userText },
-          { kind: "assistant", turn, segments: [], suggestions: [], pending: true, tools: [] },
+          { kind: "user", text: userText, ...(attachments?.length ? { attachments } : {}) },
+          { kind: "assistant", turn, segments: [], suggestions: [], pending: true, tools: [], steps: [] },
         ]);
       } else {
         // A reconnect replays the turn from its first event: start its reply over, empty.
-        updateTurn(turn, (item) => ({ ...item, segments: [], suggestions: [], tools: [], pending: true, activity: undefined }));
+        updateTurn(turn, (item) => ({ ...item, segments: [], suggestions: [], tools: [], steps: [], pending: true, activity: undefined }));
       }
       try {
         for await (const event of events) {
@@ -602,7 +618,10 @@ export function useAgentTurn(api: AgentApi, options: AgentTurnOptions): AgentTur
       const message = text.trim();
       if (!message || busy || !sessionId) return;
       setBusy(true);
-      let run = await runTurn(message, api.chatStream(message));
+      // `chatStream`이 `pendingAttachments`를 비우므로, 그 전에(같은 틱에서) 복사해 둔다.
+      // 대기열에서 온 전송도 호출자가 보내기 직전에 자기 첨부를 꽂아 두므로 여기서 맞게 읽힌다.
+      const sent = (api.pendingAttachments as SentAttachment[]).slice();
+      let run = await runTurn(message, api.chatStream(message), undefined, sent);
       // The connection dropped mid-reply: the host keeps the turn running, so reconnect and
       // replay it into the same place rather than leaving half an answer.
       if (run.failed && !run.detached && (run.gotEvent || !navigator.onLine)) {

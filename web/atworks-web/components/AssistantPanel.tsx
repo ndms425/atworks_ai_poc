@@ -6,11 +6,12 @@
 import { type ReactNode, useCallback, useMemo } from "react";
 import { type AssistantChatItem, AssistantPanel as PanelShell, type MerchantChat, type Prefill } from "web-shared";
 import { actOnFormatBatch, actOnProfile, actOnRule } from "@/lib/api";
+import { collapseApprovals } from "@/lib/approvals";
 import { humanizeFormAnswers } from "@/lib/formAnswers";
 import type { FormatBatchAction } from "@/lib/useFormatBatchActions";
 import type { ProfileAction } from "@/lib/useProfileActions";
 import type { RuleAction } from "@/lib/useRuleActions";
-import type { AttachedItem, ComparisonProfile, FormatBatch, JobSpec, ValidationRule } from "@/lib/types";
+import type { AttachedItem, ComparisonProfile, FormatBatch, JobSpec, PortalViewId, ValidationRule } from "@/lib/types";
 import GenerativeBlock from "./generative";
 
 const COPY = {
@@ -83,6 +84,7 @@ export default function AssistantPanel({
   attachedRefs,
   attachments,
   onRemoveAttachment,
+  onOpenView,
   ...shell
 }: {
   chat: MerchantChat<JobSpec>;
@@ -101,6 +103,8 @@ export default function AssistantPanel({
   attachedRefs: ReadonlySet<string>;
   attachments: AttachedItem[];
   onRemoveAttachment: (order: number) => void;
+  /** 접힌 승인 안내가 운영자를 보낼 화면(Jobs / Rules). */
+  onOpenView: (view: PortalViewId) => void;
   newMemoryCount: number;
   onOpenActivity: () => void;
   onClose: () => void;
@@ -108,14 +112,15 @@ export default function AssistantPanel({
   onToggleFullscreen: () => void;
 }) {
   // Display only: the model still receives `chat`'s exact `formatFormAnswers` text via chat.send;
-  // this only reshapes the bubble the transcript shows for it.
+  // this only reshapes the bubble the transcript shows for it. `collapseApprovals` is the same
+  // kind of transform: 승인 카드 묶음을 안내 하나로 바꾸되, 턴의 기록 자체는 그대로 둔다.
   const shown = useMemo(
     () => ({
       ...chat,
       items: chat.items.map((item) =>
         item.kind === "user"
           ? { ...item, text: humanizeFormAnswers(item.text) ?? item.text }
-          : withAnswerChips(item),
+          : withAnswerChips(collapseApprovals(item)),
       ),
     }),
     [chat],
@@ -169,6 +174,7 @@ export default function AssistantPanel({
           onPrefill={onPrefill}
           onSend={(text) => void chat.send(text)}
           onAttach={onAttach}
+          onOpenView={onOpenView}
           attachedRefs={attachedRefs}
         />
       )}

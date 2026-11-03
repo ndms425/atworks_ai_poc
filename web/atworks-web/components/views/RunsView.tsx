@@ -4,8 +4,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AskButton, formatDate, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton } from "web-shared";
+import { AskButton, formatDateTimeSeconds, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton } from "web-shared";
 import { fetchRuns } from "@/lib/api";
+import RunDetail from "@/components/RunDetail";
 import { attachToggle } from "@/lib/attachments";
 import Pager from "@/components/Pager";
 import { RUN_STATUS } from "@/lib/kinds";
@@ -32,6 +33,9 @@ export default function RunsView({
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
+  // 펼쳐 둔 실행. APIs 와 같은 이유로 목록을 남긴다 -- `screen_state.visible` 과
+  // `navigate_screen` 의 focus 계약을 건드리지 않는다.
+  const [openId, setOpenId] = useState<string | null>(null);
   // The status segment IS the reset key: switching it restarts at page one, while a refreshKey
   // bump re-reads whichever page is open.
   const load = useCallback((cursor: string | null) => fetchRuns(filter === "all" ? undefined : filter, cursor), [filter]);
@@ -52,6 +56,9 @@ export default function RunsView({
     // "show me the failures" means the FIRST page of failures.
     if (intent.filter?.status) setFilter(intent.filter.status);
   }, [intent]);
+
+  // 다른 집합으로 바뀐 뒤에도 남아 있으면 화면에 없는 행의 상세가 혼자 떠 있게 된다.
+  useEffect(() => setOpenId(null), [filter]);
 
   useScreenFocus(intent, "run", runs.length > 0);
 
@@ -90,7 +97,8 @@ export default function RunsView({
       ) : runs.length === 0 ? (
         <Notice>해당하는 실행 기록이 없습니다.</Notice>
       ) : (
-        <>
+        <div className={openId ? "grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,460px)] lg:items-start" : ""}>
+        <div className={`flex flex-col gap-4 ${openId ? "hidden lg:flex" : ""}`}>
           <Panel bodyClassName="panel-scroll overflow-x-auto">
             <table className="w-full border-collapse">
               <thead>
@@ -98,9 +106,14 @@ export default function RunsView({
                   <th className="py-2.5 pl-[18px] pr-3 font-semibold">API</th>
                   <th className="px-3 py-2.5 font-semibold">Executed</th>
                   <th className="px-3 py-2.5 font-semibold">Env</th>
-                  <th className="px-3 py-2.5 font-semibold">데이터</th>
+                  {/* 데이터(test_data_label) 열을 뺐다: 목록에서 늘 비어 있고, 채워지더라도
+                      그 실행 하나를 열었을 때 볼 값이지 132개 행에 매번 비울 열이 아니다.
+                      그 자리에 HTTP 와 소요 시간을 둔다 -- 둘 다 실행마다 다르고, `fail` 301건이
+                      실은 400·404·409 가 섞인 것임을 여기서만 구별할 수 있다. */}
+                  <th className="px-3 py-2.5 font-semibold">HTTP</th>
+                  <th className="px-3 py-2.5 text-right font-semibold">소요</th>
                   <th className="px-3 py-2.5 font-semibold">Status</th>
-                  <th className="py-2.5 pl-3 pr-[18px]" />
+                  <th className="w-[56px] py-2.5 pl-3 pr-[18px]" />
                 </tr>
               </thead>
               {/* cv-rows: content-visibility hint for off-screen rows (globals.css). */}
@@ -108,7 +121,24 @@ export default function RunsView({
                 {runs.map((run) => {
                   const style = RUN_STATUS[run.status];
                   return (
-                    <tr key={run.run_id} data-ref={`run:${run.run_id}`} className="border-t border-(--line)">
+                    <tr
+                      key={run.run_id}
+                      data-ref={`run:${run.run_id}`}
+                      // APIs 목록과 같은 규칙: 행 전체가 상세를 여는 버튼이고, 다시 누르면 닫힌다.
+                      tabIndex={0}
+                      role="button"
+                      aria-expanded={openId === run.run_id}
+                      aria-label={`${labelFor(run)} 상세 열기`}
+                      onClick={() => setOpenId((current) => (current === run.run_id ? null : run.run_id))}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        setOpenId((current) => (current === run.run_id ? null : run.run_id));
+                      }}
+                      className={`cursor-pointer border-t border-(--line) transition hover:bg-(--well) focus-visible:bg-(--well) focus-visible:outline-none ${
+                        openId === run.run_id ? "bg-(--accent-soft)" : ""
+                      }`}
+                    >
                       <td className="py-2 pl-[18px] pr-3">
                         <div className="font-mono text-[12.5px] text-(--ink)">
                           {run.api_method && run.api_path ? (
@@ -124,15 +154,20 @@ export default function RunsView({
                           {run.failed_rules?.length ? <span> · {run.failed_rules.join(", ")}</span> : null}
                         </div>
                       </td>
-                      <td className="px-3 py-2 text-[12.5px] tabular-nums text-(--ink-soft)">{formatDate(run.executed_at)}</td>
+                      {/* 초까지. 같은 분 안에 수십 건이 쌓이는 목록이라 분 단위로는 순서도
+                          간격도 보이지 않는다. */}
+                      <td className="px-3 py-2 text-[12.5px] tabular-nums text-(--ink-soft)">{formatDateTimeSeconds(run.executed_at)}</td>
                       <td className="px-3 py-2 text-[12.5px] text-(--ink-soft)">{run.target_env}</td>
-                      <td className="px-3 py-2 text-[12.5px] text-(--ink-soft)">{run.test_data_label ?? "—"}</td>
+                      <td className="px-3 py-2 text-[12.5px] tabular-nums text-(--ink-soft)">{run.http_status ?? "—"}</td>
+                      <td className="px-3 py-2 text-right text-[12.5px] tabular-nums text-(--ink-soft)">
+                        {run.duration_ms != null ? `${run.duration_ms}ms` : "—"}
+                      </td>
                       <td className="px-3 py-2">
                         <Pill tone={style.tone} dot>
                           {style.label}
                         </Pill>
                       </td>
-                      <td className="py-2 pl-3 pr-[18px]">
+                      <td className="w-[56px] py-2 pl-3 pr-[18px] text-right">
                         <AskButton
                           {...attachToggle(
                             attachedRefs,
@@ -154,7 +189,14 @@ export default function RunsView({
             </table>
           </Panel>
           <Pager page={page} />
-        </>
+        </div>
+        {openId ? (() => {
+          const open = runs.find((run) => run.run_id === openId);
+          return open ? (
+            <RunDetail run={open} onAttach={onAttach} attachedRefs={attachedRefs} onClose={() => setOpenId(null)} />
+          ) : null;
+        })() : null}
+        </div>
       )}
     </div>
   );

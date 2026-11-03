@@ -3,6 +3,7 @@
 
 import { AgentApi } from "web-shared";
 import type {
+  RunBodies,
   ApiSpec,
   AskEntry,
   Briefing,
@@ -40,7 +41,25 @@ export const fetchApis = (query = "", cursor: string | null = null) =>
   api.getPage<ApiSpec>("/apis", { query, cursor, limit: PAGE_SIZE });
 export const fetchRuns = (status?: string, cursor: string | null = null) =>
   api.getPage<RunResult>("/runs", { status, cursor, limit: PAGE_SIZE });
+
+// -- API 상세가 읽는 세 가지 --------------------------------------------------------------
+// 전부 서버 필터다. 목록 한 페이지를 받아 여기서 거르면, 찾는 행이 그 페이지에 없으면 못 찾고
+// 있어도 우연이며, "실행 12건" 같은 수가 전체가 아니라 그 페이지의 몫이 된다.
+export const fetchApi = (apiId: string) =>
+  api.get<{ api: ApiSpec }>(`/apis/${encodeURIComponent(apiId)}`);
+export const fetchRunsForApi = (apiId: string, limit = 10) =>
+  api.getPage<RunResult>("/runs", { api_id: apiId, limit });
+
+/** 한 실행의 저장된 요청/응답 본문. 목록에는 절대 실리지 않으므로, 사람이 그 실행 하나를
+ *  펼쳤을 때만 이 호출이 나간다. 본문이 없는 실행은 404라 null이 돌아온다. */
+export const fetchRunBodies = (runId: string) =>
+  api.get<RunBodies>(`/runs/${encodeURIComponent(runId)}/body`);
+export const fetchRulesForApi = (apiId: string, status?: string) =>
+  api.getPage<ValidationRule>("/rules", { api_id: apiId, status, limit: PAGE_SIZE });
 export const fetchJobs = (cursor: string | null = null) => api.getPage<JobSpec>("/jobs", { cursor, limit: PAGE_SIZE });
+// 승인 대기 건수만 필요할 때. limit 1로 받아 봉투의 `total`만 읽는다 — 그 값은 필터를 적용한
+// 전체 건수이지 이 페이지의 몫이 아니라서, 대기가 여러 페이지에 걸쳐 있어도 정확하다.
+export const countPendingJobs = () => api.getPage<JobSpec>("/jobs", { status: "staged", limit: 1 });
 // `status` is a SERVER-side filter (host `/rules?status=`): the Rules page re-queries per
 // segment instead of bucketing one page, so "적용됨" is the ledger's applied rules and its
 // count is the envelope's `total`, not this page's share.
@@ -49,6 +68,27 @@ export const fetchRules = (status?: string, cursor: string | null = null) =>
 // /changes/ 가 아니다 — rule_action은 job_action의 미러지만 별도 경로다.
 export const actOnRule = (ruleId: string, action: "apply" | "discard") =>
   api.post<{ ok: boolean; change: ValidationRule | null }>(`/rules/${encodeURIComponent(ruleId)}/${action}`, {});
+/**
+ * 전체 승인 / 전체 반려. 서버는 대기 큐를 열거해 단건 승인 경로를 건건이 되풀이하므로
+ * 승인 계약(마크·감사 2행·id 단건 조회)은 그대로다 — 여기는 그 라우트를 부르는 클라이언트뿐이다.
+ *
+ * `expected`는 화면이 표시하던 대기 건수. 서버의 지금 큐와 다르면 409가 오고 아무것도 승인되지
+ * 않는다: 모델이 방금 올린 항목이 "전체"에 조용히 섞이는 것을 막는 장치라 생략하지 않는다.
+ */
+export type BulkResult = {
+  ok: boolean;
+  applied: number;
+  applied_ids: string[];
+  failed: { id: string; reason: string }[];
+  remaining: number;
+  cap: number;
+};
+export const bulkAct = (
+  surface: "changes" | "rules" | "profiles" | "format-batches",
+  action: "apply" | "discard",
+  expected: number,
+) => api.post<BulkResult>(`/${surface}/bulk-${action}`, { expected });
+
 export const fetchFormats = () => api.get<{ formats: FormatDefinition[] }>("/formats");
 export const fetchFormatBatches = () => api.get<{ format_batches: FormatBatch[] }>("/format-batches");
 // /changes/ 가 아니다 — format_batch_action은 job_action의 미러지만 별도 경로다 (rule_action과 동일 패턴).

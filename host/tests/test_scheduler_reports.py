@@ -240,6 +240,10 @@ class RecordingBackend(AtworksBackend):
         self.calls.append("get_body")
         return None
 
+    async def get_bodies(self, session, run_id):
+        self.calls.append("get_bodies")
+        return None
+
     async def get_body_masked_paths(self, session, run_id):
         self.calls.append("get_body_masked_paths")
         return []

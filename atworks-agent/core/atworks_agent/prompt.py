@@ -207,4 +207,10 @@ def build_dynamic_context(
             for entry in vocabulary
         ]
     block = "# aTworks context\n\n" + ATWORKS_FENCE.fence_payload(payload, max_chars=max_chars)
-    return block + render_attached_items_hint(attached_items) + render_screen_state_hint(screen_state)
+    # 화면 상태가 먼저, 첨부가 마지막이다. 첨부는 운영자가 **직접 고른** 한두 건이고 화면 목록은
+    # 그냥 지금 보이는 수십 건인데, 순서가 반대였을 때 모델이 "이거"를 첨부가 아니라 화면 목록으로
+    # 받아 답하는 일이 재현됐다(크고 구체적인 블록이 질문에 더 가까이 붙어 있었다). 가장 좁고
+    # 가장 확실한 신호가 질문 바로 앞에 오도록 둔다.
+    return (block
+            + render_screen_state_hint(screen_state, attached_count=len(attached_items))
+            + render_attached_items_hint(attached_items))

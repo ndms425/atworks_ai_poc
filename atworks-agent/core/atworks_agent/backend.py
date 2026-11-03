@@ -442,6 +442,19 @@ class AtworksBackend(ABC):
         필요한 경로가 나머지 필드를 실어 나르지 않게 한다. 없는 run이면 None."""
 
     @abstractmethod
+    async def get_bodies(self, session: AtworksSessionContext, run_id: str) -> dict | None:
+        """이 run 의 요청/응답 본문을 **한 번에**: ``{"request", "request_masked_paths",
+        "response", "response_masked_paths"}``. 본문 행 자체가 없으면 None.
+
+        따로 두 번 읽지 않는 이유는 비용이 아니라 일관성이다 -- 두 읽기 사이에 보관 기간
+        정리가 행을 지우면 한쪽만 있는 화면이 나온다.
+
+        REST 구현 의무: 마스킹 경로는 `get_body_masked_paths` 와 같은 규칙으로, **캡처 시점에
+        기록해 둔 값**을 그대로 돌려준다 -- 저장된 본문을 나중에 훑어 ``***`` 를 세는 식은
+        안 된다. 요청 본문도 응답과 똑같이 캡처 시점에 마스킹된다: 로그인·가입 요청에는
+        비밀번호가 들어 있고, 그건 응답의 개인정보와 같은 취급을 받아야 한다."""
+
+    @abstractmethod
     async def get_body_masked_paths(self, session: AtworksSessionContext, run_id: str) -> list[str]:
         """이 run의 저장된 바디에서 **캡처 시점 마스킹이 실제로 바꾼** JSON 경로들(``$.a.b[2]``
         모양, parity가 쓰는 그 표기). 마스킹된 게 없거나 바디 자체가 없으면 빈 리스트다.

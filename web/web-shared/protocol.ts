@@ -91,9 +91,22 @@ export type AssistantSegment =
 
 export type UISegment = Extract<AssistantSegment, { type: "ui" }>;
 
+/** 질문과 함께 나간 첨부의 표시용 요약 — 보낸 뒤에도 어떤 턴이 무엇을 달고 갔는지 남긴다. */
+export interface SentAttachment {
+  kind: "run" | "api" | "job";
+  ref_id: string;
+  label: string;
+}
+
 export interface UserChatItem {
   kind: "user";
   text: string;
+  /**
+   * 이 질문이 달고 나간 첨부. 전송이 끝나면 입력창 위의 칩은 사라지므로, 그 턴이 첨부를
+   * 실어 보냈는지 확인할 수 있는 곳은 여기뿐이다 — 없으면 "첨부가 안 갔나?"를 되짚을
+   * 방법이 없고, 모델이 엉뚱한 것을 답했을 때 원인을 가릴 수 없다.
+   */
+  attachments?: SentAttachment[];
 }
 
 export interface AssistantChatItem {
@@ -106,13 +119,31 @@ export interface AssistantChatItem {
   suggestionsStale?: boolean;
   pending: boolean;
   tools: string[];
-  /** Tools whose result has arrived without error, in order (the plan pill ticks steps off by these). */
-  toolsDone?: string[];
+  /**
+   * One row per tool call, in call order — what the step list renders. `tools` stays a bare
+   * name list because the diagnostic and the exported log read it; this carries what a person
+   * needs to SEE a step: the model's own line for the call, and when it ran.
+   */
+  steps?: TurnStep[];
   /**
    * Status line for the call in flight; cleared when prose or a card lands, or when the
    * tool a progress line names returns.
    */
   activity?: string;
+}
+
+/**
+ * A tool call as the operator sees it. `doneAt` is stamped by the tool's own result — never by
+ * the model saying it finished — so a step ticks off only when the work actually came back.
+ */
+export interface TurnStep {
+  tool: string;
+  /** The line shown for this step: the model's status line for the call, else the stock copy. */
+  label: string;
+  startedAt: number;
+  doneAt?: number;
+  /** The result came back an error: the step stops rather than spinning forever. */
+  failed?: boolean;
 }
 
 export type ChatItem = UserChatItem | AssistantChatItem;

@@ -72,31 +72,53 @@ body {
 }
 
 /*
- * Task 8: numbered screen-highlight boxes. `.ac-highlight` is applied by useScreenHighlight to a
- * `[data-ref]` row (or, for a `<tr>` which can't reliably host `position: relative` + `::before`
- * across browsers, that row's first `<td>` — see the hook) — an outline plus a small numbered
- * red badge pinned to its top-left corner. No `--font-sans` token exists in this codebase (only
- * `--font-body`, used on body above), so the badge falls back to the same stack.
+ * Numbered screen-highlight rows, applied by useScreenHighlight.
+ *
+ * `.ac-highlight` goes on the matched `[data-ref]` row itself — a `<tr>` or an `<li>` — and
+ * `.ac-highlight-n` on the element that hosts the number: the row's first `<td>` for a table,
+ * the row itself for a list. `<tr>` cannot reliably host `position: relative` + `::before`, but
+ * a `<td>` can, which is the only reason the badge is split off the row.
+ *
+ * It marks a row the answer refers to, not an error, so it is drawn in the portal's own accent
+ * (terracotta) rather than `--danger`: a soft fill, a 3px left rail, hairline accent edges. The
+ * number sits INSIDE the first cell, in padding this rule adds — pinned to the row's outer
+ * corner it was clipped by the table wrapper's own overflow and read as a sliver.
  */
 .ac-highlight {
-  outline: 2px solid var(--danger);
-  outline-offset: 2px;
-  position: relative;
+  background: var(--accent-soft);
 }
-.ac-highlight::before {
+tr.ac-highlight > td {
+  background: var(--accent-soft);
+  box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent);
+}
+tr.ac-highlight > td:first-child {
+  box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent), inset 3px 0 0 var(--accent);
+}
+tr.ac-highlight > td:last-child {
+  box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent), inset -1px 0 0 var(--accent);
+}
+li.ac-highlight {
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--accent), inset 3px 0 0 var(--accent);
+}
+.ac-highlight-n {
+  position: relative;
+  padding-left: 36px;
+}
+.ac-highlight-n::before {
   content: attr(data-highlight-n);
   position: absolute;
-  top: -10px;
-  left: -10px;
-  min-width: 18px;
-  height: 18px;
-  border-radius: 9px;
-  background: var(--danger);
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--accent);
   color: #fff;
-  font: 600 11px/18px var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  font: 600 10.5px/17px var(--font-body), ui-sans-serif, system-ui, sans-serif;
   text-align: center;
-  padding: 0 5px;
-  z-index: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 /*

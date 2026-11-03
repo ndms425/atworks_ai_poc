@@ -291,20 +291,43 @@ export function StatStrip({ children }: { children: ReactNode }) {
  * so a row the operator already acted on reads as picked at a glance and not only from its label.
  * Leaving `on` out keeps the plain one-shot button and emits no `aria-pressed`, which would claim a
  * toggle that isn't there. */
-export function AskButton({ label, onClick, on }: { label: string; onClick: () => void; on?: boolean }) {
+export function AskButton({
+  label,
+  onClick,
+  on,
+  icon,
+  iconOnly,
+}: {
+  label: string;
+  onClick: () => void;
+  on?: boolean;
+  /** 기본은 `spark`(어시스턴트 표식). 동작이 다르면 그 동작의 글리프를 준다. */
+  icon?: IconName;
+  /**
+   * 글자를 빼고 아이콘만 둔다. 같은 버튼이 목록의 모든 행에 반복될 때 쓴다 — 행마다 같은
+   * 문구가 열 하나를 통째로 차지하면 정작 읽어야 할 경로·이름이 밀린다. `label`은 사라지지
+   * 않고 `aria-label`과 툴팁으로 남으므로, 스크린리더와 마우스 양쪽에 뜻이 그대로 전달된다.
+   */
+  iconOnly?: boolean;
+}) {
+  const glyph = <Icon name={on ? "check" : (icon ?? "spark")} size={13} className="text-(--accent)" />;
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={on}
-      className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 py-[5px] text-[12px] font-semibold transition-colors ${
+      aria-label={iconOnly ? label : undefined}
+      title={iconOnly ? label : undefined}
+      className={`inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-lg border text-[12px] font-semibold transition-colors ${
+        iconOnly ? "h-[26px] w-[26px]" : "gap-1.5 px-2.5 py-[5px]"
+      } ${
         on
           ? "border-(--accent) bg-(--accent-soft) text-(--accent-ink)"
           : "border-(--line-strong) bg-(--card) text-(--ink-2) hover:border-(--accent) hover:bg-(--accent-soft) hover:text-(--accent-ink)"
       }`}
     >
-      <Icon name={on ? "check" : "spark"} size={13} className="text-(--accent)" />
-      {label}
+      {glyph}
+      {iconOnly ? null : label}
     </button>
   );
 }

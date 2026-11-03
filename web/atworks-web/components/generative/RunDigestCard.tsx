@@ -53,14 +53,16 @@ export default function RunDigestCard({
                   <>
                     <span>{sub}</span>
                     {item.rank ? <span className="tabular-nums text-(--ink-soft)">{item.rank.score.toFixed(1)}</span> : null}
-                    <AskButton label="원인 보기" onClick={() => onPrefill?.(`${item.run!.run_id} 실패 원인 알려줘`)} />
                   </>
                 ) : null
               }
-              action={
-                item.run
-                  ? {
-                      ...attachToggle(
+              // 버튼은 메타 줄이 아니라 전용 줄에 — 순서도 행마다 같다(원인 보기 → 첨부).
+              actions={
+                item.run ? (
+                  <>
+                    <AskButton label="원인 보기" onClick={() => onPrefill?.(`${item.run!.run_id} 실패 원인 알려줘`)} />
+                    <AskButton
+                      {...attachToggle(
                         attachedRefs,
                         {
                           kind: "run",
@@ -69,10 +71,11 @@ export default function RunDigestCard({
                           field: item.run.failed_rules?.[0]?.split(/\s/)[0],
                           expected: item.run.failed_rules?.[0],
                         },
-                        (item) => onAttach?.(item),
-                      ),
-                    }
-                  : null
+                        (attached) => onAttach?.(attached),
+                      )}
+                    />
+                  </>
+                ) : null
               }
             />
           );

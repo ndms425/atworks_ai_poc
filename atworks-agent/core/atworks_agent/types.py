@@ -81,6 +81,32 @@ class AggregateQuery(BaseModel):
 
 # -- 레코드 ---------------------------------------------------------------------------
 
+FieldLocation = Literal["path", "query", "body", "response"]
+
+
+class ApiField(BaseModel):
+    """스펙의 필드 한 개.
+
+    **관측된 값이지 선언된 값이 아니다.** 이 배포에는 OpenAPI 문서가 없고, 아는 것은 실제로
+    오간 요청·응답뿐이다. 그래서 화면은 이걸 "관측된 스펙"이라고 말해야 한다 -- 한 번도 안
+    보낸 선택 필드는 여기 없고, 그게 "그 API 에 없다"는 뜻은 아니다.
+
+    평평한 ``ApiSpec.params`` 와 왜 따로 있나: ``params`` 는 **검증 규칙을 걸 수 있는 이름의
+    목록**이고(``gates.check_rule_param`` 이 그걸로 거절한다), 여기는 **보여 주기 위한 구조**다.
+    둘을 한 필드로 합치면 규칙 대상 판정이 위치·타입까지 들고 다니게 된다.
+    """
+    name: str = Field(max_length=120)
+    location: FieldLocation
+    #: 관측된 JSON 타입. 호출마다 달랐으면 본 것들을 모두 싣는다 (예: 값이 때로 null).
+    types: list[str] = Field(default_factory=list, max_length=8)
+    #: 배열이면 원소의 타입. 배열이 아니면 None.
+    item_type: str | None = None
+    #: 이 필드를 본 호출 수와, 그 위치의 전체 호출 수. 둘의 비가 곧 "선택이냐 필수냐"다 --
+    #: 모든 호출에 있었으면 필수로 **보이는** 것이고, 그래도 선언이 아니라 관측이다.
+    seen: int = 0
+    of: int = 0
+
+
 class ApiSpec(BaseModel):
     api_id: str
     method: str
@@ -89,7 +115,10 @@ class ApiSpec(BaseModel):
     group: str | None = None
     updated_at: datetime
     has_rules: bool = False
+    #: 검증 규칙을 걸 수 있는 이름들 (요청 쪽만). 규칙 게이트가 이 목록으로 거절한다.
     params: list[str] = Field(default_factory=list)
+    #: 관측된 스펙. 위치(path/query/body/response)와 타입을 갖고 있어 화면이 구분해 그린다.
+    fields: list[ApiField] = Field(default_factory=list, max_length=400)
 
 
 class RunStatus(StrEnum):
@@ -110,6 +139,10 @@ class RunResult(BaseModel):
     http_status: int | None = None
     duration_ms: int | None = None
     response_body: dict[str, Any] | None = None
+    # 요청 본문. 응답과 **같은 취급**을 받는다: 캡처 시점에 마스킹되고, `bodies`에 같이 들어가며,
+    # 어떤 목록 조회에도 실리지 않고, 모델에게 가지 않는다. 응답만 담던 시절에는 POST/PUT이
+    # 무엇을 보냈는지가 어디에도 남지 않아, 실패를 보고도 입력을 되짚을 수가 없었다.
+    request_body: dict[str, Any] | None = None
     job_id: str | None = None
     executed_by: str | None = None   # operator who approved the executing job; None = unattributed/legacy
     day: str | None = None           # local YYYY-MM-DD partition key; None = unpartitioned/legacy
@@ -530,6 +563,11 @@ class MaskingRule(BaseModel):
 class MaskingPolicy(BaseModel):
     rules: list[MaskingRule] = Field(default_factory=list, max_length=50)
     disabled_groups: list[str] = Field(default_factory=list, max_length=100)
+    # 값이 아니라 **키 이름**으로 가리는 필드. 비밀번호나 토큰은 생김새에 규칙이 없어서
+    # (`Pwmvb3gguogwvyi!9` 는 어떤 정규식에도 안 걸린다) 값 패턴으로는 영영 못 잡는다.
+    # 잡을 수 있는 단서는 그 값이 `password` 라는 이름 아래 있다는 사실 하나뿐이다.
+    # 비교는 소문자로, 부분 일치 -- `password`, `newPassword`, `accessToken` 이 다 걸린다.
+    secret_keys: list[str] = Field(default_factory=list, max_length=50)
 
 
 # -- 자가발전 질의 엔진 (self-growth, spec 2026-09-07) -----------------------------------

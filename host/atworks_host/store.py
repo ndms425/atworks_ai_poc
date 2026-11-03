@@ -95,6 +95,11 @@ CREATE TABLE IF NOT EXISTS apis (
     updated_at TEXT NOT NULL,
     has_rules INTEGER NOT NULL DEFAULT 0,
     params JSON NOT NULL DEFAULT '[]',
+    -- 관측된 필드 스펙 (위치·타입·배열 여부). `params` 가 **규칙을 걸 수 있는 이름의 목록**인
+    -- 반면 이쪽은 **보여 주기 위한 구조**라, 한 열에 합치지 않았다 -- 규칙 게이트가 위치·타입
+    -- 까지 들고 다니게 된다. 읽기도 다르다: `params` 는 모든 목록 응답에 실리고, 이건 한 건을
+    -- 여는 상세에서만 나간다.
+    fields JSON NOT NULL DEFAULT '[]',
     -- The path, pre-split at ingest (self-growth spec 2026-09-07 §11). `query_runs` groups by
     -- "endpoint family" -- the first or second `/`-separated segment, or the two of them joined --
     -- and a GROUP BY over a SUBSTR/INSTR expression of `path` can use no index at all: every
@@ -177,6 +182,11 @@ CREATE TABLE IF NOT EXISTS bodies (
     -- `equal` with `basis: "body"`. Recorded here, at capture, because it is the only moment
     -- anything knows: by the time the report compares, the original value is gone for good.
     masked_paths JSON,
+    -- 요청 본문도 같은 행에 둔다. 한 실행의 입력과 출력은 늘 같이 읽히고(이 요청이 저 응답을
+    -- 냈다), 같은 보관 기간을 따르며, 같은 순간에 같은 규칙으로 마스킹된다. 테이블을 나누면
+    -- 그 셋을 세 군데서 따로 지켜야 한다.
+    request_body JSON,
+    request_masked_paths JSON,
     captured_at TEXT
 );
 -- Retention deletes bodies in bounded slices (`delete_bodies_before(limit=...)`); without this
@@ -450,6 +460,12 @@ class _AllDays:
 
 #: ``archive_runs_before``'s default -- "every day partition, one statement".
 ALL_DAYS = _AllDays()
+
+
+def _has(row: sqlite3.Row, column: str) -> bool:
+    """SELECT 가 그 열을 골랐는지. `fields` 처럼 나중에 생긴 열은 모든 SELECT 에 들어 있지
+    않으므로, 없는 열을 읽어 터지는 대신 없다고 답한다."""
+    return column in row.keys()
 
 
 def _iso(dt: datetime) -> str:
@@ -796,12 +812,15 @@ class Store:
         added: set[tuple[str, str]] = set()
         for table, column, decl in (("rollup_day", "http_status_counts", "JSON"),
                                     ("bodies", "masked_paths", "JSON"),
+                                    ("bodies", "request_body", "JSON"),
+                                    ("bodies", "request_masked_paths", "JSON"),
                                     ("rollup_key_day", "p95_duration_ms", "INTEGER"),
                                     ("apis", "path_segment_1", "TEXT"),
                                     ("apis", "path_segment_2", "TEXT"),
                                     ("apis", "path_segment_3", "TEXT"),
                                     ("apis", "path_prefix_2", "TEXT"),
-                                    ("ask_log", "vocabulary_terms", "JSON")):
+                                    ("ask_log", "vocabulary_terms", "JSON"),
+                                    ("apis", "fields", "JSON")):
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if existing and column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
@@ -930,7 +949,9 @@ class Store:
         ``apis`` DDL for why the split happens on the write rather than inside a GROUP BY."""
         return [
             (a.api_id, a.method, a.path, a.name, a.group, _iso(a.updated_at), int(a.has_rules),
-             json.dumps(a.params), *path_segments(a.path))
+             json.dumps(a.params),
+             json.dumps([f.model_dump(mode="json", exclude_none=True) for f in a.fields]),
+             *path_segments(a.path))
             for a in apis
         ]
 
@@ -938,8 +959,8 @@ class Store:
         """Rows in, no commit -- the caller owns the transaction."""
         self._conn.executemany(
             'INSERT OR REPLACE INTO apis (api_id, method, path, name, "group", updated_at, has_rules, params, '
-            "path_segment_1, path_segment_2, path_segment_3, path_prefix_2) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "fields, path_segment_1, path_segment_2, path_segment_3, path_prefix_2) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         self._refresh_api_updated_at([a[0] for a in rows])
@@ -950,10 +971,13 @@ class Store:
 
     @staticmethod
     def _row_to_api(row: sqlite3.Row) -> ApiSpec:
+        # `fields` 는 나중에 생긴 열이다. 마이그레이션 전에 열린 행이나 이 열을 고르지 않은
+        # SELECT 에서도 터지지 않아야 하므로 존재 여부를 먼저 본다.
         return ApiSpec(
             api_id=row["api_id"], method=row["method"], path=row["path"], name=row["name"],
             group=row["group"], updated_at=_parse_iso(row["updated_at"]),
             has_rules=bool(row["has_rules"]), params=json.loads(row["params"]) if row["params"] else [],
+            fields=json.loads(row["fields"]) if _has(row, "fields") and row["fields"] else [],
         )
 
     def search_apis(
@@ -1024,14 +1048,26 @@ class Store:
         )
         body_rows: list[tuple] = []
         for run in runs:
-            if run.response_body is None:
+            # 요청만 있고 응답이 없는 실행(에러로 끊긴 호출)도 행을 남긴다 -- 그 입력이야말로
+            # 왜 끊겼는지를 되짚는 유일한 단서다.
+            if run.response_body is None and run.request_body is None:
                 continue
-            body, masked_paths = mask(run.response_body) if mask is not None else (run.response_body, [])
-            body_rows.append((run.run_id, json.dumps(body), json.dumps(masked_paths),
-                              _iso(run.executed_at)))
+            body, masked_paths = (None, [])
+            if run.response_body is not None:
+                body, masked_paths = mask(run.response_body) if mask is not None else (run.response_body, [])
+            request, request_masked = (None, [])
+            if run.request_body is not None:
+                request, request_masked = mask(run.request_body) if mask is not None else (run.request_body, [])
+            body_rows.append((
+                run.run_id,
+                json.dumps(body) if body is not None else None, json.dumps(masked_paths),
+                json.dumps(request) if request is not None else None, json.dumps(request_masked),
+                _iso(run.executed_at),
+            ))
         if body_rows:
             self._conn.executemany(
-                f"{verb} INTO bodies (run_id, body, masked_paths, captured_at) VALUES (?,?,?,?)",
+                f"{verb} INTO bodies (run_id, body, masked_paths, request_body, "
+                "request_masked_paths, captured_at) VALUES (?,?,?,?,?,?)",
                 body_rows,
             )
 
@@ -1550,6 +1586,27 @@ class Store:
         if row is None or row["body"] is None:
             return None
         return json.loads(row["body"])
+
+    def get_bodies(self, run_id: str) -> dict | None:
+        """이 실행의 요청/응답 본문과 각각의 마스킹 경로를 **한 번의 조회**로.
+
+        `get_body`를 두 번 부르지 않는 이유는 비용이 아니라 일관성이다: 둘을 따로 읽으면
+        그 사이에 보관 기간 정리가 행을 지울 수 있고, 그러면 한쪽만 있는 화면이 나온다.
+        행 자체가 없으면 None -- 본문이 애초에 안 담겼거나 만료됐다는 뜻이다.
+        """
+        row = self._conn.execute(
+            "SELECT body, masked_paths, request_body, request_masked_paths "
+            "FROM bodies WHERE run_id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        def load(value, fallback):
+            return json.loads(value) if value is not None else fallback
+        return {
+            "response": load(row["body"], None),
+            "response_masked_paths": load(row["masked_paths"], []),
+            "request": load(row["request_body"], None),
+            "request_masked_paths": load(row["request_masked_paths"], []),
+        }
 
     def get_body_masked_paths(self, run_id: str) -> list[str]:
         """The JSON paths capture-time masking rewrote in this run's stored body -- empty when

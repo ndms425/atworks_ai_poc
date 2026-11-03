@@ -75,7 +75,7 @@ export function Transcript({
 }: TranscriptProps) {
   return items.map((item, index) =>
     item.kind === "user" ? (
-      <UserBubble key={index} text={item.text} />
+      <UserBubble key={index} text={item.text} attachments={item.attachments} />
     ) : (
       <div key={index} data-turn={item.turn} className={`flex flex-col ${gap}`}>
         {item.segments.map((segment, i) => {

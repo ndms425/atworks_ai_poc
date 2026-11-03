@@ -65,6 +65,25 @@ export interface ScreenIntent {
   nonce: number;
 }
 
+export type FieldLocation = "path" | "query" | "body" | "response";
+
+/**
+ * 스펙의 필드 하나. **관측된 값이지 선언된 값이 아니다** — 이 배포에 OpenAPI 문서가 없어서,
+ * 아는 것은 실제로 오간 요청·응답뿐이다. 한 번도 안 보낸 선택 필드는 여기 없고, 그게 "그 API
+ * 에 없다"는 뜻은 아니다. 화면이 그 사실을 말해야 한다.
+ */
+export interface ApiField {
+  name: string;
+  location: FieldLocation;
+  /** 본 JSON 타입 전부. 호출마다 달랐으면(가끔 null) 여럿이 들어온다. */
+  types: string[];
+  /** 배열이면 원소 타입, 섞여 있으면 "mixed". 배열이 아니면 없음. */
+  item_type?: string | null;
+  /** 이 필드를 본 호출 수 / 그 위치의 전체 호출 수. 둘이 같으면 늘 있었다는 뜻. */
+  seen: number;
+  of: number;
+}
+
 export interface ApiSpec {
   api_id: string;
   method: string;
@@ -73,10 +92,23 @@ export interface ApiSpec {
   group?: string;
   updated_at: string;
   has_rules: boolean;
+  /** 검증 규칙을 걸 수 있는 이름들(요청 쪽만). 규칙 게이트가 이 목록으로 거절한다. */
   params?: string[];
+  /** 관측된 스펙. 목록 응답에는 없고 `GET /apis/{id}` 에만 실린다. */
+  fields?: ApiField[];
 }
 
 export type RunStatus = "pass" | "fail" | "error";
+
+/** `GET /runs/{id}/body`. 본문이 없는 쪽은 null이고, `*_masked_paths`는 캡처 시점에 가려진
+ *  JSON 경로다 — `***`를 보고 "가려진 값"과 "원래 ***였던 값"을 구별할 유일한 근거. */
+export interface RunBodies {
+  run_id: string;
+  request: Record<string, unknown> | null;
+  request_masked_paths: string[];
+  response: Record<string, unknown> | null;
+  response_masked_paths: string[];
+}
 
 export interface RunResult {
   run_id: string;
@@ -89,6 +121,11 @@ export interface RunResult {
   http_status?: number;
   duration_ms?: number;
   job_id?: string;
+  /** 이 실행을 낸 job 을 승인한 운영자. 귀속이 없는(레거시) 실행에는 없다. */
+  executed_by?: string | null;
+  /** 저장된 요청/응답 본문이 있는지. 본문 자체는 목록에 절대 실리지 않으므로, 상세를 열기
+   *  전에 "열어 볼 게 있는지"를 아는 길은 이 불리언뿐이다. */
+  has_body?: boolean;
   /** The row's display label, joined from the API mirror on the host's run read paths. Optional
    * because an aggregation-only read (or a run whose API is gone) leaves them off — fall back to
    * `api_id`. Their presence is what lets a run list render without downloading every API spec. */

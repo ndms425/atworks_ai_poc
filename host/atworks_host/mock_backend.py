@@ -268,7 +268,14 @@ class MockAtworks(AtworksBackend):
                                       limit=limit, path_prefix=path_prefix)
 
     async def get_api(self, session, api_id):
-        return self.apis.get(api_id)
+        # 스토어를 읽는다. 전에는 메모리 딕셔너리(`self.apis`)를 읽어서, 같은 스펙이 목록
+        # (`search_apis` → SQL)과 상세(`get_api`)에서 서로 다른 모습으로 나왔다 -- 스토어를
+        # 왕복한 datetime은 UTC(`...Z`)인데 픽스처 객체는 로컬 오프셋(`+09:00`)이라, 같은
+        # 순간인데도 문자열이 달랐다. 읽기 경로가 하나여야 그런 차이가 생기지 않고,
+        # "Mock의 모든 읽기는 실제 SQL"이라는 성질도 이 메서드에서만 깨져 있었다.
+        del session
+        found = self.store.apis_by_ids([api_id])
+        return found[0] if found else None
 
     async def get_apis(self, session, api_ids):
         del session
@@ -520,6 +527,10 @@ class MockAtworks(AtworksBackend):
 
     async def get_body(self, session, run_id: str) -> dict | None:
         return self.store.get_body(run_id)
+
+    async def get_bodies(self, session, run_id: str) -> dict | None:
+        del session
+        return self.store.get_bodies(run_id)
 
     async def get_body_masked_paths(self, session, run_id: str) -> list[str]:
         return self.store.get_body_masked_paths(run_id)

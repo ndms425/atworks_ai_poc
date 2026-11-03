@@ -20,8 +20,15 @@ from .types import (
 from .vocabulary import fragment_summary_ko
 
 
-def api_record(api: ApiSpec) -> dict[str, Any]:
-    return api.model_dump(mode="json", exclude_none=True)
+def api_record(api: ApiSpec, *, fields: bool = False) -> dict[str, Any]:
+    """기본은 `fields` 없이. 관측된 필드 목록은 한 API 에 수십 개가 붙을 수 있어서, 목록
+    응답과 모델의 도구 결과에 그대로 실으면 `search_apis` 한 번이 수십 KB가 된다. 규칙을 걸
+    대상은 평평한 `params` 로 충분하고(게이트도 그걸 본다), 위치·타입이 필요한 곳은 한 건을
+    여는 포털 상세뿐이다 -- `response_body` 를 빼는 것과 같은 이유, 같은 자리."""
+    record = api.model_dump(mode="json", exclude_none=True)
+    if not fields:
+        record.pop("fields", None)
+    return record
 
 
 def run_record(run: RunResult) -> dict[str, Any]:
@@ -31,7 +38,8 @@ def run_record(run: RunResult) -> dict[str, Any]:
     # stored `has_body` flag answers for it; a freshly EXECUTED run still holds its body in
     # memory and answers from that. The `exclude` stays regardless: it is the last line, not the
     # only one.
-    record = run.model_dump(mode="json", exclude_none=True, exclude={"response_body"})
+    record = run.model_dump(mode="json", exclude_none=True,
+                            exclude={"response_body", "request_body"})
     record["has_body"] = run.response_body is not None or bool(run.has_body)
     return record
 

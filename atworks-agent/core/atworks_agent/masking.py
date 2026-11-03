@@ -19,6 +19,11 @@ def unanchored(pattern: str) -> str:
     return pattern.removeprefix("^").removesuffix("$")
 
 
+# 값이 아니라 키 이름으로 가리는 필드. 소문자 부분 일치라 `newPassword`·`accessToken`도 걸린다.
+DEFAULT_SECRET_KEYS: list[str] = ["password", "passwd", "secret", "token", "credential", "apikey", "api_key"]
+
+MASK = "***"
+
 DEFAULT_MASKING_RULES: list[MaskingRule] = [
     MaskingRule(name="krn-resident-id", pattern=r"\b\d{6}-?[1-4]\d{6}\b"),
     # 15-16 digits in 4-4-4-3/4 groups, separators optional but the GROUPING is not: the earlier
@@ -42,14 +47,29 @@ def _compiled(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern)
 
 
-def _mask(node: Any, policy: MaskingPolicy, path: str, rewritten: list[str]) -> Any:
+def _is_secret(key: str, policy: MaskingPolicy) -> bool:
+    lowered = key.lower()
+    return any(needle in lowered for needle in policy.secret_keys)
+
+
+def _mask(node: Any, policy: MaskingPolicy, path: str, rewritten: list[str],
+          secret: bool = False) -> Any:
     """The recursion both public entry points share. ``path`` is the JSON path of ``node`` in the
     exact shape ``parity.compare_bodies`` speaks (``$.a.b[2]``), and every leaf this actually
-    changes appends its own path to ``rewritten``."""
+    changes appends its own path to ``rewritten``.
+
+    ``secret`` is set once a key on the way down matched ``policy.secret_keys``; from there the
+    whole subtree is replaced, not scanned. A secret's value has no shape to match -- the only
+    thing that identifies it is the name it sits under."""
     if isinstance(node, dict):
-        return {key: _mask(value, policy, f"{path}.{key}", rewritten) for key, value in node.items()}
+        return {key: _mask(value, policy, f"{path}.{key}", rewritten,
+                           secret or _is_secret(key, policy))
+                for key, value in node.items()}
     if isinstance(node, list):
-        return [_mask(item, policy, f"{path}[{i}]", rewritten) for i, item in enumerate(node)]
+        return [_mask(item, policy, f"{path}[{i}]", rewritten, secret) for i, item in enumerate(node)]
+    if secret and node is not None:
+        rewritten.append(path)
+        return MASK
     if isinstance(node, str):
         masked = node
         for rule in policy.rules:
@@ -91,4 +111,6 @@ def policy_from_config(config: AtworksAgentConfig) -> MaskingPolicy:
     """`masking_enabled=False` empties `rules` (masking is off, full stop) but `disabled_groups`
     is still honoured -- capture opt-out is a separate switch from the masking rules themselves."""
     rules = list(DEFAULT_MASKING_RULES) if config.masking_enabled else []
-    return MaskingPolicy(rules=rules, disabled_groups=list(config.masking_disabled_groups))
+    secret_keys = list(DEFAULT_SECRET_KEYS) if config.masking_enabled else []
+    return MaskingPolicy(rules=rules, secret_keys=secret_keys,
+                         disabled_groups=list(config.masking_disabled_groups))

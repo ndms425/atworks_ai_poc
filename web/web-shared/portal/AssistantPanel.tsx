@@ -159,10 +159,13 @@ export function AssistantPanel({
 
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} onScroll={onScroll} className="panel-scroll h-full overflow-y-auto px-4 py-4">
-          <div className={`flex flex-col gap-3 text-[14.5px] ${column}`}>
+          {/* 대화 본문의 크기. 패널의 나머지 본문 층은 12.5~13px(카드 본문·행 메타)이라
+              14.5px은 혼자 두 단계 위였다 -- 좁은 패널에서 산문만 크게 떠 보인다. 13.5px은
+              카드 본문보다는 여전히 위라 읽는 글이 주인 자리를 지키면서 층이 이어진다. */}
+          <div className={`flex flex-col gap-3 text-[13.5px] ${column}`}>
             {chat.items.length === 0 ? (
               <div className="mt-4">
-                <p className="text-[16px] leading-relaxed text-(--ink)">{copy.intro}</p>
+                <p className="text-[14.5px] leading-relaxed text-(--ink)">{copy.intro}</p>
                 <div className="mt-4 flex flex-col gap-2">
                   {copy.starters.map((starter) => (
                     <button

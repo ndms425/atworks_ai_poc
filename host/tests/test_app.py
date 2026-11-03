@@ -922,3 +922,84 @@ async def test_home_insights_returns_404_when_panel_disabled(tmp_path):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as c:
         sid = (await c.post("/api/atworks/session")).json()["session_id"]
         assert (await c.get("/api/atworks/home/insights", headers={"X-Session-Id": sid})).status_code == 404
+
+
+# -- API 상세 화면이 읽는 세 가지 ------------------------------------------------------
+# 목록 한 페이지를 받아 클라이언트에서 고르는 방식은 쓰지 않는다. 찾는 API나 그 API의 규칙이
+# 지금 열린 페이지에 없으면 못 찾고, 있어도 그건 필터가 남긴 우연이다 -- `/rules?status=`를
+# 서버로 민 것과 같은 이유다(위 test_rules_route_filters_by_status_server_side).
+
+async def test_api_detail_reads_one_spec_by_id_and_404s_for_an_unknown_one(client):
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    listed = (await client.get("/api/atworks/apis?limit=1", headers=h)).json()["items"][0]
+
+    detail = (await client.get(f"/api/atworks/apis/{listed['api_id']}", headers=h)).json()["api"]
+
+    # 상세는 목록 행 + `fields` 다. 관측된 필드 목록은 한 API 에 수십 개가 붙을 수 있어서
+    # 목록 응답과 모델의 도구 결과에는 싣지 않는다 -- 그 비대칭이 의도라는 것을 여기서 못 박는다.
+    assert "fields" not in listed
+    assert {key: value for key, value in detail.items() if key != "fields"} == listed
+
+    assert (await client.get("/api/atworks/apis/api-nope", headers=h)).status_code == 404
+
+
+async def test_api_detail_needs_a_session(client):
+    assert (await client.get("/api/atworks/apis/api-001")).status_code in (401, 422)
+
+
+async def test_runs_filter_by_api_id_is_server_side(client):
+    """`total`은 그 API의 실제 실행 수여야 한다 -- 한 페이지를 받아 거른 수가 아니라."""
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    every = (await client.get("/api/atworks/runs?limit=200", headers=h)).json()
+    target = every["items"][0]["api_id"]
+    expected = [r["run_id"] for r in every["items"] if r["api_id"] == target]
+
+    body = (await client.get(f"/api/atworks/runs?api_id={target}&limit=200", headers=h)).json()
+    assert set(body) == {"items", "next_cursor", "total"}
+    assert [r["run_id"] for r in body["items"]] == expected
+    assert body["total"] == len(expected) < every["total"]
+
+    empty = (await client.get("/api/atworks/runs?api_id=api-nope", headers=h)).json()
+    assert empty["items"] == [] and empty["total"] == 0
+
+
+async def test_rules_filter_by_api_id_and_status_narrow_together(client_backend):
+    client, backend = client_backend
+    session = AtworksSessionContext(session_id="staging", project_id="mes-demo", operator="minseong")
+    mine = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="contractNo", kind="required"), ActorKind.AGENT)
+    applied = await backend.stage_rule(
+        session, RuleDraft(api_id="api-001", param="amount", kind="required"), ActorKind.AGENT)
+    await backend.apply_rule(session, applied.rule_id)
+    await backend.stage_rule(
+        session, RuleDraft(api_id="api-002", param="id", kind="required"), ActorKind.AGENT)
+
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    one_api = (await client.get("/api/atworks/rules?api_id=api-001", headers=h)).json()
+    assert one_api["total"] == 2
+    assert {r["rule_id"] for r in one_api["items"]} == {mine.rule_id, applied.rule_id}
+
+    both = (await client.get("/api/atworks/rules?api_id=api-001&status=applied", headers=h)).json()
+    assert [r["rule_id"] for r in both["items"]] == [applied.rule_id] and both["total"] == 1
+
+
+async def test_run_body_route_serves_the_stored_response_and_404s_without_one(client):
+    """본문은 목록에 절대 실리지 않는다 -- 사람이 그 실행 하나를 열었을 때만 이 라우트로 온다."""
+    sid = (await client.post("/api/atworks/session")).json()["session_id"]
+    h = {"X-Session-Id": sid}
+    runs = (await client.get("/api/atworks/runs?limit=200", headers=h)).json()["items"]
+    assert all("response_body" not in run for run in runs), "목록이 본문을 실어 나르면 안 된다"
+
+    with_body = next((run for run in runs if run.get("has_body")), None)
+    if with_body is not None:
+        body = (await client.get(f"/api/atworks/runs/{with_body['run_id']}/body", headers=h)).json()
+        assert set(body) == {"run_id", "body", "masked_paths"}
+        assert isinstance(body["body"], dict) and isinstance(body["masked_paths"], list)
+
+    without = next((run for run in runs if not run.get("has_body")), None)
+    if without is not None:
+        assert (await client.get(f"/api/atworks/runs/{without['run_id']}/body", headers=h)).status_code == 404
+    assert (await client.get("/api/atworks/runs/run-nope/body", headers=h)).status_code == 404

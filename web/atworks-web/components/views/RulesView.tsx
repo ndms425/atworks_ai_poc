@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApproveBar, ChangeStatusPill, formatDate, Notice, PageHeader, Panel, Pill, plural, Segmented, Skeleton } from "web-shared";
 import { fetchRules } from "@/lib/api";
+import BulkApproveBar from "@/components/BulkApproveBar";
 import Pager from "@/components/Pager";
 import { usePagedList } from "@/lib/usePagedList";
 import { type RuleAction, useRuleActions } from "@/lib/useRuleActions";
@@ -64,11 +65,14 @@ export default function RulesView({
   onAct,
   intent,
   onScreen,
+  onRefresh,
 }: {
   refreshKey: number;
   onAct: (id: string, action: RuleAction) => Promise<ValidationRule | null>;
   intent?: ScreenIntent | null;
   onScreen?: (report: { filter?: ScreenFilter; visible: ScreenTarget[] }) => void;
+  /** 일괄 승인이 끝난 뒤 포털 전체를 다시 읽게 한다. */
+  onRefresh?: () => void;
 }) {
   // The status segment is a SERVER-side filter (`/rules?status=`) and doubles as usePagedList's
   // reset key, so switching it re-queries the ledger from page one. It used to be a client-side
@@ -82,6 +86,14 @@ export default function RulesView({
     [status],
   );
   const page = usePagedList<ValidationRule>(load, status, [refreshKey]);
+
+  // 승인 대기 건수는 지금 보고 있는 세그먼트와 무관하게 원장에서 읽는다 — "적용됨"을 보고 있어도
+  // 전체 승인이 덮는 수는 staged 전체이고, 그 수가 곧 서버에 보내는 경쟁 상태 검사값이다.
+  const [pendingRules, setPendingRules] = useState(0);
+  const readPendingRules = useCallback(() => {
+    void fetchRules("staged", null).then((envelope) => setPendingRules(envelope?.total ?? 0));
+  }, []);
+  useEffect(readPendingRules, [readPendingRules, refreshKey, page.total]);
   const rules = page.items;
 
   // RulesView has no filter of its own, so there's nothing to apply-once by nonce — the shared
@@ -97,6 +109,15 @@ export default function RulesView({
   return (
     <div className="ac-reveal flex flex-col gap-4">
       <PageHeader title="Rules" subtitle={page.loaded ? plural(page.total, "rule") : undefined}>
+        <BulkApproveBar
+          surface="rules"
+          pending={pendingRules}
+          noun="규칙"
+          onDone={() => {
+            readPendingRules();
+            onRefresh?.();
+          }}
+        />
         <Segmented<StatusFilter>
           label="Filter rules"
           value={status}

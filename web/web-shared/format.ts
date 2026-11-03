@@ -72,6 +72,16 @@ export function formatDateTime(value: string | null | undefined): string {
   return `${ymd(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
+/** "2026.06.24 09:30:12" -- 초까지. 실행 목록처럼 같은 분 안에 여러 건이 쌓이는 자리에서는
+ *  분 단위로는 순서도 간격도 보이지 않는다. 날짜만 있는 값은 그대로 날짜로 둔다. */
+export function formatDateTimeSeconds(value: string | null | undefined): string {
+  if (!value) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDate(value);
+  const date = parseDate(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${ymd(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
 const ISO_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
@@ -226,11 +236,11 @@ export function describeResolver(change: {
   discarded_by?: string | null;
   discarded_by_kind?: "operator" | "agent" | null;
 }): string | null {
-  if (change.status === "applied" && change.applied_by) return `Approved by ${change.applied_by}`;
+  if (change.status === "applied" && change.applied_by) return `${change.applied_by} 님이 승인`;
   if (change.status === "discarded" && change.discarded_by) {
     return change.discarded_by_kind === "agent"
-      ? `Dismissed by ${change.discarded_by}'s assistant`
-      : `Dismissed by ${change.discarded_by}`;
+      ? `${change.discarded_by} 님의 어시스턴트가 반려`
+      : `${change.discarded_by} 님이 반려`;
   }
   return null;
 }

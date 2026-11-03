@@ -8,7 +8,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { type FieldKinds, formatDate, formatFieldValue, formatMoney, humanizeField } from "../format";
 import { Icon, type IconName } from "../icons";
-import { AskButton, Button, KindIcon, Pill, type Tone } from "../ui";
+import { Button, KindIcon, Pill, type Tone } from "../ui";
 import type { ChangeAction } from "./merchant";
 
 export function GenCard({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -39,14 +39,24 @@ export function DigestRow({
   headline,
   why,
   context,
-  action,
+  actions,
 }: {
   icon: IconName;
   tone: Tone;
   headline: ReactNode;
   why?: ReactNode;
   context?: ReactNode;
-  action?: { label: string; onClick: () => void; on?: boolean } | null;
+  /**
+   * 행의 버튼들. 메타 텍스트(`context`)와 **같은 줄에 두지 않는다** — 섞어 두면 버튼의 x 위치가
+   * 그 행의 경로·규칙 이름 길이를 따라가서 행마다 다른 자리에 앉는다.
+   *
+   * 자리는 오른쪽 끝, 본문과 나란히 위아래로 쌓는다. 포털이 이미 쓰는 층을 그대로 따른다 —
+   * 행의 보조 동작은 오른쪽(Jobs 행의 첨부·상태, 집계표·질의표의 마지막 열), 승인 바만 왼쪽
+   * 아래. 세로로 쌓는 이유는 두 가지다: 본문이 두세 줄이라 그 높이가 어차피 비어 있고,
+   * `items-stretch`로 폭을 맞추면 버튼의 왼쪽·오른쪽 모서리가 모든 행에서 같은 세로선에
+   * 선다(가로로 늘어놓으면 글자 수가 다른 만큼 왼쪽 모서리가 행마다 어긋난다).
+   */
+  actions?: ReactNode;
 }) {
   return (
     <li className="flex gap-2.5 px-2 py-2">
@@ -54,13 +64,13 @@ export function DigestRow({
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium leading-snug text-(--ink)">{headline}</div>
         {why ? <div className="mt-0.5 text-[12px] leading-snug text-(--ink-soft)">{why}</div> : null}
-        {context || action ? (
+        {context ? (
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] tabular-nums text-(--ink-soft)">
             {context}
-            {action ? <AskButton label={action.label} onClick={action.onClick} on={action.on} /> : null}
           </div>
         ) : null}
       </div>
+      {actions ? <div className="flex shrink-0 flex-col items-stretch gap-1.5">{actions}</div> : null}
     </li>
   );
 }
@@ -81,9 +91,9 @@ interface ChangeLike {
 }
 
 export const CHANGE_STATUS: Record<ChangeLike["status"], { tone: Tone; label: string }> = {
-  staged: { tone: "violet", label: "Awaiting approval" },
-  applied: { tone: "ok", label: "Approved" },
-  discarded: { tone: "muted", label: "Dismissed" },
+  staged: { tone: "violet", label: "승인 대기" },
+  applied: { tone: "ok", label: "승인됨" },
+  discarded: { tone: "muted", label: "반려됨" },
 };
 
 export function ChangeStatusPill({ status }: { status: ChangeLike["status"] }) {
@@ -124,6 +134,11 @@ export function useChangeActions<T extends ChangeLike>(
 }
 
 /** Approve and Dismiss go through the same change gate the assistant uses. */
+/**
+ * 승인 바. 세 갈래(대기 중 안내 / 처리됨 서술 / 오류)는 전부 **같은 성격의 설명문**이므로
+ * 같은 크기(12.5px)로 둔다 — 전에는 11.5 / 13 / 13이라, 같은 자리의 같은 문장이 상태에 따라
+ * 커졌다 작아졌다 했다. 크기가 다르면 뜻이 다른 것처럼 읽힌다. 버튼만 한 단 위(13px)다.
+ */
 export function ApproveBar({
   change,
   busy,
@@ -141,25 +156,23 @@ export function ApproveBar({
     <div className="px-3.5 pb-3.5 pt-3">
       {change.status === "staged" ? (
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="accent" size="sm" icon="check" onClick={() => onAct("apply")} disabled={busy !== null || !canAct}>
-            {busy === "apply" ? "Applying…" : "Approve"}
+          <Button variant="accent" size="sm" onClick={() => onAct("apply")} disabled={busy !== null || !canAct}>
+            {busy === "apply" ? "승인 중…" : "승인"}
           </Button>
           <Button variant="secondary" size="sm" onClick={() => onAct("discard")} disabled={busy !== null || !canAct}>
-            {busy === "discard" ? "Dismissing…" : "Dismiss"}
+            {busy === "discard" ? "반려 중…" : "반려"}
           </Button>
-          <span className="text-[11.5px] leading-tight text-(--ink-soft)">Nothing applies until you approve.</span>
+          <span className="text-[12.5px] leading-tight text-(--ink-soft)">승인하기 전에는 아무것도 적용되지 않습니다.</span>
         </div>
       ) : (
-        <div className="flex items-center gap-2 text-[13px] text-(--ink-soft)">
+        <div className="flex items-center gap-2 text-[12.5px] text-(--ink-soft)">
           <Icon name={change.status === "applied" ? "check" : "x"} size={15} className={change.status === "applied" ? "text-(--ok)" : "text-(--ink-faint)"} />
           {change.status === "applied"
-            ? `Approved${change.applied_by ? ` by ${change.applied_by}` : ""}${change.applied_at ? ` on ${formatDate(change.applied_at)}` : ""}.`
-            : `Dismissed${
-                change.discarded_by ? ` by ${change.discarded_by}${change.discarded_by_kind === "agent" ? "'s assistant" : ""}` : ""
-              }. Nothing was changed.`}
+            ? `${change.applied_at ? `${formatDate(change.applied_at)} ` : ""}${change.applied_by ? `${change.applied_by} 님이 ` : ""}승인했습니다.`
+            : `${change.discarded_by ? `${change.discarded_by}${change.discarded_by_kind === "agent" ? " 님의 어시스턴트가" : " 님이"} ` : ""}반려했습니다. 바뀐 것은 없습니다.`}
         </div>
       )}
-      {error ? <div className="mt-2 text-[13px] text-(--danger)">{error}</div> : null}
+      {error ? <div className="mt-2 text-[12.5px] text-(--danger)">{error}</div> : null}
     </div>
   );
 }

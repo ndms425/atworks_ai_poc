@@ -145,8 +145,14 @@ class TurnDisplay:
         if not any(s["type"] == "error" for s in self.segments):
             self.segments.append({"type": "error", "text": FAILED_TURN_TEXT})
 
-    def document(self) -> dict[str, Any]:
-        return {"segments": self.segments, "suggestions": self.suggestions}
+    def document(self, attachments: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        """이 턴의 표시 기록. `attachments`는 이벤트 스트림이 아니라 **요청**에서 온다 —
+        전송 뒤 입력창의 칩은 사라지므로, 다시 연 대화에서 그 턴이 무엇을 달고 갔는지
+        확인할 수 있는 곳은 이 기록뿐이다."""
+        document: dict[str, Any] = {"segments": self.segments, "suggestions": self.suggestions}
+        if attachments:
+            document["attachments"] = attachments
+        return document
 
 
 class RecordingAgent:

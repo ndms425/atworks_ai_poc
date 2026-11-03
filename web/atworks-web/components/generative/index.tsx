@@ -4,6 +4,7 @@
 /** One entry per aTworks presentation tool. */
 
 import { type ChangeAction, type GenerativeBlockProps, UnknownBlock } from "web-shared";
+import { APPROVAL_OVERFLOW, type ApprovalOverflowPayload } from "@/lib/approvals";
 import type { FormatBatchAction } from "@/lib/useFormatBatchActions";
 import type { ProfileAction } from "@/lib/useProfileActions";
 import type { RuleAction } from "@/lib/useRuleActions";
@@ -15,6 +16,7 @@ import type {
   JobPreviewPayload,
   JobSpec,
   ParitySummaryPayload,
+  PortalViewId,
   ProfilePreviewPayload,
   QueryTablePayload,
   QuestionFormPayload,
@@ -23,6 +25,7 @@ import type {
   RunGroupsPayload,
   ValidationRule,
 } from "@/lib/types";
+import ApprovalOverflowCard from "./ApprovalOverflowCard";
 import FormatBatchCard from "./FormatBatchCard";
 import JobPreviewCard from "./JobPreviewCard";
 import ParitySummaryCard from "./ParitySummaryCard";
@@ -43,6 +46,7 @@ export default function GenerativeBlock({
   onPrefill,
   onSend,
   onAttach,
+  onOpenView,
   attachedRefs,
 }: GenerativeBlockProps & {
   onChangeAction?: (id: string, action: ChangeAction) => Promise<JobSpec | null>;
@@ -55,6 +59,8 @@ export default function GenerativeBlock({
   onPrefill?: (text: string) => void;
   onSend?: (text: string) => void;
   onAttach?: (item: Omit<AttachedItem, "order">) => void;
+  /** 승인 카드가 상한을 넘어 접혔을 때, 안내 블록이 운영자를 보낼 화면. */
+  onOpenView?: (view: PortalViewId) => void;
   attachedRefs: ReadonlySet<string>;
 }) {
   switch (block.component) {
@@ -74,6 +80,9 @@ export default function GenerativeBlock({
       return <ParitySummaryCard payload={block.payload as ParitySummaryPayload} />;
     case "profile_preview":
       return <ProfilePreviewCard payload={block.payload as ProfilePreviewPayload} onProfileAct={onProfileAction} />;
+    // 카드가 아니라 카드 묶음을 대신하는 안내 — collapseApprovals가 넣는다(모델이 내지 않는다).
+    case APPROVAL_OVERFLOW:
+      return <ApprovalOverflowCard payload={block.payload as ApprovalOverflowPayload} onOpenView={onOpenView} />;
     case "question_form":
       return <QuestionFormCard payload={block.payload as QuestionFormPayload} onSubmit={onSend} />;
     // Screen directives are intercepted in useMerchantChat and executed by the portal, never rendered as a card.

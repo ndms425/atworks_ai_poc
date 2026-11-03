@@ -36,7 +36,7 @@ class AtworksAgentConfig(BaseAgentConfig):
     # 한다); REST 어댑터가 이름을 실제 URL로 매핑할 때 쓴다. 타깃별 인증은 MVP 범위 밖이다.
     target_endpoints: dict[str, str] = {}
     max_schedules_per_job: int = Field(default=3, ge=1)        # 스케줄 항목 수 (회차 수가 아니다)
-    max_test_data_sets: int = Field(default=5, ge=1)           # 테스트 데이터 세트 수
+    max_test_data_sets: int = Field(default=100, ge=1)         # 테스트 데이터 세트 수
     max_matrix_size: int = Field(default=400, ge=1)            # apis × envs × data 곱의 상한
     max_schedule_count: int = Field(default=14, ge=1)          # 전체 스케줄의 회차 합
     max_concurrency: int = Field(default=4, ge=1, le=32)
@@ -69,6 +69,14 @@ class AtworksAgentConfig(BaseAgentConfig):
     max_format_examples: int = Field(default=8, ge=1)
     max_format_library: int = Field(default=200, ge=1)
     max_format_batch: int = Field(default=30, ge=1)
+
+    # -- 일괄 승인/반려 (호스트 라우트 전용, 모델 도구 없음) ---------------------------
+    # 한 번의 클릭이 덮는 최대 건수. 초과분은 승인되지 않고 remaining으로 보고된다 —
+    # 큐가 5000건이면 한 요청이 5000번의 실행기 호출이 되고, 그건 클릭 한 번이 책임질
+    # 범위가 아니다. 채팅 카드는 이 수를 넘기 전에 요약으로 접힌다(max_inline_approvals).
+    max_bulk_approve: int = Field(default=100, ge=1)
+    # 채팅창에 카드를 그대로 펼치는 한계. 넘으면 요약 목록 + 일괄 버튼으로 바뀐다.
+    max_inline_approvals: int = Field(default=5, ge=1)
 
     # -- 화면 지시어 (navigate_screen/highlight_screen) --------------------------------
     enable_screen_directives: bool = True

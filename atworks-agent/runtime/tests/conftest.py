@@ -331,6 +331,13 @@ class InMemoryBackend(AtworksBackend):
         run = next((r for r in self.runs if r.run_id == run_id), None)
         return run.response_body if run is not None else None
 
+    async def get_bodies(self, session, run_id):
+        run = next((r for r in self.runs if r.run_id == run_id), None)
+        if run is None or (run.response_body is None and run.request_body is None):
+            return None
+        return {"response": run.response_body, "response_masked_paths": [],
+                "request": run.request_body, "request_masked_paths": []}
+
     async def get_body_masked_paths(self, session, run_id):
         # This double never masks anything on the way in, so nothing was rewritten.
         del session, run_id

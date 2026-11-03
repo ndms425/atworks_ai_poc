@@ -53,7 +53,12 @@ def test_api_and_job_kinds_render_their_own_lines_and_scope():
     assert "field:" not in text.split("1. api-1")[1].split("2. job-0001")[0]   # run-only lines are not printed for api
 
 
-async def test_enrich_fills_api_and_job_details_from_the_backend(backend, session):
+async def test_enrich_fills_every_kind_s_details_from_the_backend(backend, session):
+    """세 종류 모두 백엔드 레코드로 펼쳐진다.
+
+    run만 비워 두면 첨부는 ref_id 한 줄이 전부가 되고, 같은 프롬프트의 <screen-state>에는
+    상태까지 달린 행이 여러 개 들어간다 — 모델이 첨부를 무시하고 화면 쪽을 답하게 된다.
+    """
     state = AtworksSessionState()
     job = backend.ledger.stage(JobDraft(kind=JobKind.RUN_NOW, summary="s", api_ids=["api-1"], target_envs=["dev"]), actor="op")
     items = [AttachedItem(order=1, kind="api", ref_id="api-1", label="x"),
@@ -62,4 +67,7 @@ async def test_enrich_fills_api_and_job_details_from_the_backend(backend, sessio
     out = await enrich_attached_items(backend, session, state, items)
     assert out[0].details["path"] == "/v1/contracts" and "api-1" in state.seen_apis
     assert out[1].details["status"] == "staged" and job.job_id in state.seen_jobs
-    assert out[2].details == {} and "run-1" in state.seen_runs
+    assert "run-1" in state.seen_runs
+    run_details = out[2].details
+    assert run_details["api_id"] == "api-1" and run_details["status"] == "fail"
+    assert run_details["failed_rules"] == "amount >= 0" and run_details["target_env"]

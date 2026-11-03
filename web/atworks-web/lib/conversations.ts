@@ -2,7 +2,7 @@
 // record into the transcript's ChatItems. One session is one conversation, so "new chat" is just a
 // fresh session and "open" switches the portal's session id to the chosen one.
 
-import type { AssistantSegment, ChatItem } from "web-shared";
+import type { AssistantSegment, ChatItem, SentAttachment } from "web-shared";
 import { api } from "./api";
 import type { AttachedItem } from "./types";
 
@@ -27,6 +27,8 @@ export interface SavedTurn {
   at: string;
   segments: SavedSegment[];
   suggestions: string[];
+  /** 그 턴이 달고 나갔던 첨부(표시용 요약). 첨부 없이 보낸 턴에는 키가 없다. */
+  attachments?: SentAttachment[];
 }
 
 export const fetchConversations = (query = "") =>
@@ -47,7 +49,11 @@ export const deleteConversation = (id: string) =>
 export function itemsFromTurns(turns: SavedTurn[]): ChatItem[] {
   const items: ChatItem[] = [];
   for (const turn of turns) {
-    items.push({ kind: "user", text: turn.user_text });
+    items.push({
+      kind: "user",
+      text: turn.user_text,
+      ...(turn.attachments?.length ? { attachments: turn.attachments } : {}),
+    });
     const ordinals = new Map<string, number>();
     const changeIds: string[] = [];
     const segments: AssistantSegment[] = turn.segments.map((segment) => {

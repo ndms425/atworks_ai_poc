@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "./icons";
 
 export interface Prefill {
@@ -99,6 +99,22 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
+  // 입력이 길어지면 상자도 같이 커진다. `rows={1}`과 `max-h-*`만 있으면 상자는 한 줄 높이에
+  // 고정되고 내용만 안에서 스크롤돼서, 열 줄을 붙여넣어도 두 줄만 보이고 나머지는 화살표로
+  // 밀어 봐야 한다. 높이를 내용 높이로 다시 잡아 주되 `max-h-*`가 상한이고, 거기 닿은 뒤부터
+  // 스크롤이다. 지우면 다시 줄어야 하므로 재는 쪽이 아니라 `auto`로 먼저 푼 다음 잰다.
+  // paint 전에 끝나야 높이가 한 프레임 튀지 않으므로 useLayoutEffect.
+  //
+  // 비어 있을 때 재지 않는 이유: Chrome은 **플레이스홀더의 줄바꿈까지** scrollHeight에 넣는다.
+  // 좁은 패널에서 플레이스홀더가 두 줄로 접히면 빈 상자가 34px이 아니라 57px로 잡혀서, 아무것도
+  // 안 쓴 상태의 입력창이 괜히 두 줄 높이가 된다. `auto`로 두면 rows={1}이 평소 높이를 정한다.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    box.style.height = "auto";
+    if (draft) box.style.height = `${box.scrollHeight}px`;
+  }, [draft]);
+
   useEffect(() => {
     if (!prefill) return;
     setDraft(prefill.text);
@@ -144,7 +160,7 @@ export function Composer({
         rows={1}
         aria-label={label}
         placeholder={busy ? busyPlaceholder : placeholder}
-        className={`max-h-40 min-w-0 flex-1 resize-none text-(--ink) outline-none transition placeholder:text-(--ink-soft)/70 ${VARIANTS[variant].input}`}
+        className={`max-h-48 min-w-0 flex-1 resize-none text-(--ink) outline-none transition placeholder:text-(--ink-soft)/70 ${VARIANTS[variant].input}`}
       />
       <button
         type="submit"

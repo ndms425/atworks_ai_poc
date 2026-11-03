@@ -97,20 +97,39 @@ class TurnAgent(Protocol):
     ) -> AsyncIterator[AgentEvent]: ...
 
 
-def append_user_turn(record: SessionRecord[Any], message: str, events_label: str) -> None:
-    """Add the user's message to the transcript, preceded by a note listing what happened
-    outside the conversation since the last reply, when anything did."""
-    if not record.pending_app_events:
+def append_user_turn(record: SessionRecord[Any], message: str, events_label: str,
+                     reference: str = "") -> None:
+    """Add the user's message to the transcript.
+
+    Two notes can precede it, both part of the SAME user turn:
+
+    ``reference`` names what the operator picked on screen before typing. 첨부는 파일이 아니라
+    문장에 참조를 끼워 넣는 UX라 -- "이거 뭐야?" + run-0028은 "PUT /v1/users/{id} 뭐야?"와 같은
+    질문이다 -- 그 참조는 질문과 같은 메시지 안에 있어야 한다. 전에는 질문만 "이거 뭐야?"로
+    가고 대상은 다른 블록에 있어서 지시대명사가 가리킬 것이 문장에 없었다. 이 줄은 대화 기록에
+    남으므로 다음 턴의 후속 질문도 같은 참조를 그대로 읽는다.
+
+    ``events_label`` note lists what happened outside the conversation since the last reply.
+    """
+    notes = [note for note in (reference, _app_events_note(record, events_label)) if note]
+    if not notes:
         record.messages.append({"role": "user", "content": message})
         return
-    note = f"[{events_label} since your last reply: " + " ".join(record.pending_app_events) + "]"
-    record.pending_app_events.clear()
     record.messages.append(
         {
             "role": "user",
-            "content": [{"type": "text", "text": note}, {"type": "text", "text": message}],
+            "content": [{"type": "text", "text": note} for note in notes]
+                       + [{"type": "text", "text": message}],
         }
     )
+
+
+def _app_events_note(record: SessionRecord[Any], events_label: str) -> str:
+    if not record.pending_app_events:
+        return ""
+    note = f"[{events_label} since your last reply: " + " ".join(record.pending_app_events) + "]"
+    record.pending_app_events.clear()
+    return note
 
 
 def stream_turn(

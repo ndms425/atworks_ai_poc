@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./icons";
+import type { SentAttachment } from "./protocol";
 import { Markdown } from "./Markdown";
 
 /** Copies `text` and says so for a moment. */
@@ -30,12 +31,40 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
-/** `data-user-msg` is what the question rail finds; the copy button shows on hover. */
-export function UserBubble({ text }: { text: string }) {
+const ATTACHMENT_KIND_LABEL: Record<SentAttachment["kind"], string> = { run: "실행", api: "API", job: "작업" };
+
+/**
+ * 질문이 달고 나간 첨부. 말풍선 **아래**, 같은 오른쪽 줄에 붙인다 — 보낸 뒤 입력창 위의 칩은
+ * 사라지므로 여기가 유일한 기록이다. 모델이 엉뚱한 것을 답했을 때 "첨부가 갔는데 모델이
+ * 무시한 것"과 "첨부를 안 달고 보낸 것"을 이 줄 하나로 가른다.
+ */
+function SentAttachments({ items }: { items: SentAttachment[] }) {
   return (
-    <div className="group flex items-start justify-end gap-1" data-user-msg="">
-      <CopyButton text={text} label="질문 복사" />
-      <div className="user-bubble max-w-[72%] whitespace-pre-wrap px-3.5 py-2 text-[14.5px] leading-normal">{text}</div>
+    <div className="flex max-w-[72%] flex-wrap justify-end gap-1" aria-label={`이 질문의 첨부 ${items.length}건`}>
+      {items.map((item) => (
+        <span
+          key={`${item.kind}:${item.ref_id}`}
+          className="inline-flex min-w-0 items-center gap-1 rounded-full bg-(--well) px-2 py-0.5 text-[11.5px] text-(--ink-soft)"
+          title={`${ATTACHMENT_KIND_LABEL[item.kind]} ${item.ref_id}`}
+        >
+          <Icon name="pin" size={11} className="shrink-0 text-(--ink-faint)" />
+          <span className="shrink-0">{ATTACHMENT_KIND_LABEL[item.kind]}</span>
+          <span className="truncate">{item.label || item.ref_id}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** `data-user-msg` is what the question rail finds; the copy button shows on hover. */
+export function UserBubble({ text, attachments }: { text: string; attachments?: SentAttachment[] }) {
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="group flex w-full items-start justify-end gap-1" data-user-msg="">
+        <CopyButton text={text} label="질문 복사" />
+        <div className="user-bubble max-w-[72%] whitespace-pre-wrap px-3.5 py-2 text-[13.5px] leading-normal">{text}</div>
+      </div>
+      {attachments?.length ? <SentAttachments items={attachments} /> : null}
     </div>
   );
 }

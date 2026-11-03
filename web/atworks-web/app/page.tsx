@@ -599,6 +599,7 @@ export default function PortalPage() {
                 attachedRefs={attachedRefs}
                 attachments={attached}
                 onRemoveAttachment={onRemoveAttachment}
+                onOpenView={onUserViewChange}
                 newMemoryCount={chat.newMemoryKeys.size}
                 onOpenActivity={() => setActivityOpen(true)}
                 {...rail}
@@ -619,7 +620,6 @@ export default function PortalPage() {
             {view === "apis" ? (
               <ApisView
                 refreshKey={refreshKey}
-                onAskAssistant={askAssistant}
                 onAttach={onAttach}
                 attachedRefs={attachedRefs}
                 intent={screenIntent}
@@ -644,9 +644,10 @@ export default function PortalPage() {
                 attachedRefs={attachedRefs}
                 intent={screenIntent}
                 onScreen={onScreen}
+                onRefresh={refreshPortal}
               />
             ) : null}
-            {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} intent={screenIntent} onScreen={onScreen} /> : null}
+            {view === "rules" ? <RulesView refreshKey={refreshKey} onAct={onRuleAct} intent={screenIntent} onScreen={onScreen} onRefresh={refreshPortal} /> : null}
             {/* Growth는 화면 지시어의 목적지가 아니다(kind를 넓히지 않는 라운드) — `intent`를 받지
                 않고 `onScreen`으로 `visible: []`만 보고한다. */}
             {view === "growth" ? <GrowthView refreshKey={refreshKey} onScreen={onScreen} /> : null}

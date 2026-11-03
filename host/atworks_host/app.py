@@ -5,6 +5,7 @@ Route parameters below are annotated with dependencies built at call time (``Cur
 annotations``) — FastAPI resolves string annotations against a function's globals, and these
 names are local to ``create_app``."""
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ from .mock_backend import MockAtworks
 from .reports import Reports
 from .scheduler import Scheduler
 from .sessions import SessionRecord, SessionStore, session_dependency
+from atworks_agent.attachments import render_reference_line
 from .streaming import append_user_turn, build_app, stream_turn
 
 logger = logging.getLogger(__name__)
@@ -100,18 +102,27 @@ class _Surface:
     host_marks: str     # ...the host-action (discard) mark set
     remember: str       # ...the method that records a freshly looked-up object
     lookup: str         # AtworksBackend: the by-id read (never a list page -- see get_rule)
+    pending: str        # ...the unpaged pending-queue read, for bulk approve/dismiss
+    plural: str         # how the one pending_app_events line names a bulk run
 
 
 JOB_SURFACE = _Surface("job", "job_id", "job", "seen_jobs", "approved_job_ids",
-                       "host_action_job_ids", "remember_job", "get_job")
+                       "host_action_job_ids", "remember_job", "get_job",
+                       "get_pending_jobs", "jobs")
 RULE_SURFACE = _Surface("rule", "rule_id", "rule", "seen_rules", "approved_rule_ids",
-                        "host_action_rule_ids", "remember_rule", "get_rule")
+                        "host_action_rule_ids", "remember_rule", "get_rule",
+                        "get_pending_rules", "rules")
 PROFILE_SURFACE = _Surface("profile", "profile_id", "comparison profile", "seen_profiles",
                            "approved_profile_ids", "host_action_profile_ids", "remember_profile",
-                           "get_profile")
+                           "get_profile", "get_pending_profiles", "comparison profiles")
 FORMAT_BATCH_SURFACE = _Surface("format_batch", "batch_id", "format batch", "seen_format_batches",
                                 "approved_format_batch_ids", "host_action_format_batch_ids",
-                                "remember_format_batch", "get_format_batch")
+                                "remember_format_batch", "get_format_batch",
+                                "get_pending_format_batches", "format batches")
+
+# A bulk run yields to the event loop every this many items, so a 100-item approval does not
+# hold the loop (and the SSE turns sharing it) for its whole duration.
+_BULK_YIELD_EVERY = 10
 
 
 async def _paged(call: Coroutine[Any, Any, T]) -> T:
@@ -237,10 +248,22 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.post("/session")
     async def start_session(payload: SessionStart | None = None) -> dict:
-        operator_id = (payload.operator_id if payload is not None else None) or DEFAULT_OPERATOR_ID
-        profile = backend.operator_profile(operator_id)
+        asked = payload.operator_id if payload is not None else None
+        profile = backend.operator_profile(asked) if asked else None
+        if asked and profile is None:
+            raise HTTPException(status_code=400, detail=f"unknown operator: {asked!r}")
         if profile is None:
-            raise HTTPException(status_code=400, detail=f"unknown operator: {operator_id!r}")
+            # 고른 운영자가 없을 때. `DEFAULT_OPERATOR_ID`는 데모 픽스처의 이름이라, 다른
+            # 데이터셋(ATWORKS_FIXTURES_DIR)으로 부팅하면 그 이름이 없어서 **아무도 세션을 못
+            # 열었다** -- 400 "unknown operator: 'minseong'"으로 호스트 전체가 막혔다. 기본값이
+            # 그 목록에 있으면 그대로 쓰고, 없으면 목록의 첫 사람으로 떨어진다. 데이터셋이
+            # 호스트의 하드코딩된 이름을 품고 있어야 할 이유는 없다.
+            profile = backend.operator_profile(DEFAULT_OPERATOR_ID)
+        if profile is None:
+            listed = await backend.list_operators(None)
+            profile = listed[0] if listed else None
+        if profile is None:
+            raise HTTPException(status_code=400, detail="this deployment has no operator profiles")
         record = sessions.start(profile.operator_id)
         return {"session_id": record.session_id, "project_id": PROJECT_ID, "operator": profile.operator_id,
                 "operator_name": profile.name, "role": profile.role}
@@ -359,7 +382,11 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.post("/chat")
     async def chat(request: ChatRequest, record: CurrentSession) -> StreamingResponse:
-        append_user_turn(record, request.message, "Portal events")
+        # 첨부는 질문과 같은 메시지 안에 참조로 들어간다 (append_user_turn 참고). 보강 전의
+        # 원본 항목이면 충분하다 -- 지시대명사가 가리킬 이름만 있으면 되고, 상세 레코드는
+        # <attached-result-items>가 따로 싣는다.
+        append_user_turn(record, request.message, "Portal events",
+                         reference=render_reference_line(request.attached_items))
         turn_id = uuid4().hex
         message = request.message
         # 어휘 주입(자가발전 §7 단계 3): 이번 메시지에 실제로 나온 **확정된** 용어만, 최신순으로
@@ -370,6 +397,10 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         # 않는다(버리면 어휘가 실린 모든 턴이 캐시 미스가 되어 캐시가 하는 일이 없어진다).
         matched = await matched_vocabulary(record, message)
         display = TurnDisplay()
+        # 저장되는 것은 표시용 요약뿐이다(종류·id·라벨). 모델에 가는 풍부한 details는 턴 안에서만
+        # 쓰이고 기록에 남기지 않는다 — 기록의 용도는 "이 턴이 무엇을 달고 갔나" 하나다.
+        sent_attachments = [{"kind": item.kind, "ref_id": item.ref_id, "label": item.label}
+                            for item in request.attached_items]
 
         async def on_turn_end(rec: Record, tid: str, failure: BaseException | None) -> None:
             # The display record first, before any await: on a client disconnect the generator is
@@ -378,7 +409,7 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
                 if failure is not None:
                     display.note_failure()
                 try:
-                    history.record_turn(rec.session_id, message, display.document())
+                    history.record_turn(rec.session_id, message, display.document(sent_attachments))
                 except Exception:
                     logger.exception("conversation turn could not be recorded; the turn is unaffected")
             if agent.config.enable_growth:
@@ -627,6 +658,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         return {"items": [api_record(a) for a in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
+    @router.get("/apis/{api_id}")
+    async def api_detail(record: CurrentSession, api_id: str) -> dict:
+        """스펙 1건. 목록 페이지를 받아 거기서 찾는 방식은 쓰지 않는다 — 찾는 API가 지금 열린
+        페이지에 없으면 못 찾고, 있어도 그건 필터가 남긴 우연이다. 승인 라우트들이 id로 바로
+        읽는 것과 같은 규칙이다."""
+        api = await backend.get_api(context(record), api_id)
+        if api is None:
+            raise HTTPException(status_code=404, detail=f"unknown api: {api_id!r}")
+        return {"api": api_record(api, fields=True)}
+
     @router.get("/runs/insights")
     async def insights(record: CurrentSession) -> dict:
         s = context(record)
@@ -642,24 +683,52 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/runs")
     async def runs(record: CurrentSession, status: RunStatusFilter | None = None,
-                   since: str | None = None, cursor: str | None = None,
-                   limit: int = Query(50, ge=1, le=200)) -> dict:
+                   since: str | None = None, api_id: str | None = None,
+                   cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
         s = context(record)
         since_dt = _aware(since)
         # RunsQuery.limit caps at 200 (the paged read contract, spec 2026-09-06); the route's
         # own bound matches so an over-limit request 422s here instead of a validation error
         # surfacing from inside list_runs.
         page = await _paged(
-            backend.list_runs(s, RunsQuery(since=since_dt, status=status, cursor=cursor, limit=limit)))
+            backend.list_runs(s, RunsQuery(since=since_dt, status=status, api_id=api_id,
+                                           cursor=cursor, limit=limit)))
         # `page.total` IS the old `population` (the count after this filter, limit-independent) —
         # the separate count_runs call that used to fill it was a second scan of the same predicate.
         return {"items": [run_record(r) for r in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
+    @router.get("/runs/{run_id}/body")
+    async def run_body(record: CurrentSession, run_id: str) -> dict:
+        """이 실행의 저장된 **요청/응답 본문**. 포털이 본문에 닿는 유일한 길이다.
+
+        본문은 어떤 목록 조회에도 실리지 않는다 -- `_RUN_SELECT`는 `bodies`를 조인하지 않고,
+        `run_record`는 `has_body` 불리언만 싣는다. 그래서 이 라우트가 따로 있다: 사람이 그
+        실행 하나를 **콕 집어 열었을 때만** 본문이 프로세스로 올라온다.
+
+        모델은 여전히 못 본다. 이건 호스트 라우트고 도구가 아니다.
+
+        `masked_paths`를 같이 돌려주는 이유: 마스킹은 단방향이라, `***`를 보고 "원래 값이
+        가려졌다"와 "원래 값이 진짜 ***였다"를 구별할 수 없다. 어느 경로가 가려졌는지는
+        캡처 시점에 기록해 둔 이 목록만 답할 수 있다.
+        """
+        session = context(record)
+        run = await backend.get_run(session, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"unknown run: {run_id!r}")
+        bodies = await backend.get_bodies(session, run_id)
+        if bodies is None:
+            # 본문이 없는 이유는 둘이고, 화면이 구별해 말해야 한다: 애초에 안 담겼거나
+            # (그룹이 본문 캡처를 끈 경우), 보관 기간이 지나 지워졌거나.
+            raise HTTPException(status_code=404, detail="no stored body for this run")
+        return {"run_id": run_id, **bodies}
+
     @router.get("/jobs")
-    async def jobs(record: CurrentSession, cursor: str | None = None,
+    async def jobs(record: CurrentSession, status: str | None = None, cursor: str | None = None,
                    limit: int = Query(50, ge=1, le=200)) -> dict:
-        page = await _paged(backend.all_jobs(context(record), cursor=cursor, limit=limit))
+        # `status`는 서버 필터다(`/rules?status=`와 같은 이유): 한 페이지를 받아 클라이언트가
+        # 나누면 "승인 대기 N건"이 그 페이지의 몫이 되고, 전체 승인이 보내는 expected가 틀린다.
+        page = await _paged(backend.all_jobs(context(record), status=status, cursor=cursor, limit=limit))
         return {"items": [job_record(j) for j in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
@@ -687,7 +756,8 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
         del record, ref
         return {"ok": True}
 
-    async def host_action(record: Record, *, action: str, target_id: str, surface: _Surface) -> dict:
+    async def host_action(record: Record, *, action: str, target_id: str, surface: _Surface,
+                          quiet: bool = False) -> dict:
         """The ONE host approval surface, in one place (final review I8). The four routes below
         were four 40-line copies that differed only in the four names `_Surface` carries; a rule
         as load-bearing as "the approval mark comes off on every path" must not live in four
@@ -729,14 +799,81 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
             await audit_action(record, action, surface.kind, target_id, "blocked")
             return {"ok": False, "change": None, "reason": execution.result_text}
         await audit_action(record, action, surface.kind, target_id, "ok")
-        record.pending_app_events.append(
-            f"Operator {'approved' if approving else 'dismissed'} {surface.noun} {target_id} from the card."
-        )
+        # `quiet` is for a bulk run, which writes ONE line for the whole batch instead: 100 items
+        # would otherwise put 100 sentences into the next turn's context block. It suppresses only
+        # this note -- the audit pair above and the approval mark are per item either way.
+        if not quiet:
+            record.pending_app_events.append(
+                f"Operator {'approved' if approving else 'dismissed'} {surface.noun} {target_id} from the card."
+            )
         change = next((e.data.get("change") for e in execution.events if e.type == "change_update"), None)
         return {"ok": True, "change": change}
 
+    async def host_action_bulk(record: Record, *, action: str, surface: _Surface,
+                               expected: int | None) -> dict:
+        """전체 승인 / 전체 반려. 대기 큐를 열거해 `host_action`을 건건이 부른다.
+
+        승인 계약(마크 on → 감사 2행 → try/finally → 마크 off → id 단건 조회)은 그 함수 안에
+        한 벌만 있고 여기서 복제하지 않는다. 일괄은 그 위의 루프일 뿐이다 -- 그래서 100건을
+        승인해도 승인 100건이지, 새로운 종류의 승인이 아니다.
+
+        `expected`는 화면이 본 대기 건수다. 지금 큐와 다르면 아무것도 승인하지 않고 409로
+        돌려준다: 모델이 방금 올린 항목이 "전체"에 조용히 섞여 들어가는 것을 막는다.
+
+        부분 실패는 전체를 멈추지 않는다. 승인된 job은 스케줄러가 바로 집어갈 수 있어 되돌릴
+        수 없으므로, all-or-nothing은 지킬 수 없는 약속이다. 건건이 처리하고 결과를 보고한다.
+        """
+        pending = await getattr(backend, surface.pending)(context(record))
+        ids = [getattr(item, surface.arg) for item in pending]
+        if expected is not None and expected != len(ids):
+            raise HTTPException(
+                status_code=409,
+                detail=f"대기 건수가 바뀌었습니다: 화면 {expected}건, 현재 {len(ids)}건. 새로고침 후 다시 시도하세요.",
+            )
+        cap = agent.config.max_bulk_approve
+        todo, remaining = ids[:cap], max(0, len(ids) - cap)
+        applied: list[str] = []
+        failed: list[dict] = []
+        for index, target_id in enumerate(todo):
+            try:
+                result = await host_action(record, action=action, target_id=target_id,
+                                           surface=surface, quiet=True)
+            except HTTPException as exc:
+                failed.append({"id": target_id, "reason": str(exc.detail)})
+            except Exception as exc:  # noqa: BLE001 - one bad item must not strand the rest
+                logger.exception("bulk %s failed for %s", action, target_id)
+                failed.append({"id": target_id, "reason": str(exc)})
+            else:
+                if result.get("ok"):
+                    applied.append(target_id)
+                else:
+                    failed.append({"id": target_id, "reason": result.get("reason") or "blocked"})
+            if (index + 1) % _BULK_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+        verb = "approved" if action.startswith("apply_") else "dismissed"
+        record.pending_app_events.append(
+            f"Operator {verb} {len(applied)} {surface.plural} in one click"
+            + (f" ({len(failed)} failed)" if failed else "") + "."
+        )
+        return {"ok": not failed, "applied": len(applied), "applied_ids": applied,
+                "failed": failed, "remaining": remaining, "cap": cap}
+
+    class BulkRequest(BaseModel):
+        """`expected`는 화면이 표시하던 대기 건수. 생략하면 경쟁 상태 검사를 건너뛴다."""
+        expected: int | None = Field(default=None, ge=0)
+
     async def job_action(job_id: str, action: str, record: Record) -> dict:
         return await host_action(record, action=action, target_id=job_id, surface=JOB_SURFACE)
+
+    @router.post("/changes/bulk-apply")
+    async def approve_all(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="apply_job", surface=JOB_SURFACE,
+                                      expected=body.expected)
+
+    @router.post("/changes/bulk-discard")
+    async def discard_all(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="discard_job", surface=JOB_SURFACE,
+                                      expected=body.expected)
 
     # web-shared의 useMerchantChat.actOnChange가 치는 경로 — 이름을 바꾸지 않는다.
     @router.post("/changes/{job_id:path}/apply")
@@ -749,13 +886,15 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
 
     @router.get("/rules")
     async def rules(record: CurrentSession, status: LedgerStatusFilter | None = None,
+                    api_id: str | None = None,
                     cursor: str | None = None, limit: int = Query(50, ge=1, le=200)) -> dict:
         # `status` is a SERVER-side filter (the ABC's `list_rules(status=...)`), not a client-side
         # split of one page: the Rules page used to fetch page 1 and bucket it into
         # staged/applied/discarded, so "applied" showed whatever applied rules happened to be in
         # the newest 50 and its count was the page's, not the ledger's.
         page = await _paged(
-            backend.list_rules(context(record), status=status, cursor=cursor, limit=limit))
+            backend.list_rules(context(record), api_id=api_id, status=status,
+                               cursor=cursor, limit=limit))
         return {"items": [rule_record(r) for r in page.items], "next_cursor": page.next_cursor,
                 "total": page.total}
 
@@ -769,6 +908,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/rules/{rule_id}/discard")
     async def discard_rule(rule_id: str, record: CurrentSession) -> dict:
         return await rule_action(rule_id, "discard_rule", record)
+
+    @router.post("/rules/bulk-apply")
+    async def approve_all_rules(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="apply_rule", surface=RULE_SURFACE,
+                                      expected=body.expected)
+
+    @router.post("/rules/bulk-discard")
+    async def discard_all_rules(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="discard_rule", surface=RULE_SURFACE,
+                                      expected=body.expected)
 
     @router.get("/profiles")
     async def profiles(record: CurrentSession, job_id: str | None = None, cursor: str | None = None,
@@ -789,6 +938,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     async def discard_profile(profile_id: str, record: CurrentSession) -> dict:
         return await profile_action(profile_id, "discard_profile", record)
 
+    @router.post("/profiles/bulk-apply")
+    async def approve_all_profiles(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="apply_profile", surface=PROFILE_SURFACE,
+                                      expected=body.expected)
+
+    @router.post("/profiles/bulk-discard")
+    async def discard_all_profiles(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="discard_profile", surface=PROFILE_SURFACE,
+                                      expected=body.expected)
+
     @router.get("/formats")
     async def formats(record: CurrentSession) -> dict:
         return {"formats": [format_record(f) for f in await backend.list_formats(context(record))]}
@@ -807,6 +966,16 @@ def create_app(*, agent: AtworksAgent, backend: MockAtworks, scheduler: Schedule
     @router.post("/format-batches/{batch_id}/discard")
     async def discard_format_batch(batch_id: str, record: CurrentSession) -> dict:
         return await format_batch_action(batch_id, "discard_format_batch", record)
+
+    @router.post("/format-batches/bulk-apply")
+    async def approve_all_format_batches(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="apply_format_batch",
+                                      surface=FORMAT_BATCH_SURFACE, expected=body.expected)
+
+    @router.post("/format-batches/bulk-discard")
+    async def discard_all_format_batches(record: CurrentSession, body: BulkRequest) -> dict:
+        return await host_action_bulk(record, action="discard_format_batch",
+                                      surface=FORMAT_BATCH_SURFACE, expected=body.expected)
 
     @router.post("/scheduler/tick")
     async def tick(now: str | None = None) -> dict:

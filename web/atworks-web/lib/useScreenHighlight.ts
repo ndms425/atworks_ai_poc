@@ -8,16 +8,17 @@ import type { PortalViewId, ScreenHighlightPayload } from "@/lib/types";
 
 /**
  * Applies a `screen_highlight` directive's targets to the mounted view's rows: for each target,
- * finds `[data-ref="kind:ref_id"]`, adds class `ac-highlight` and sets `data-highlight-n` to the
- * target's number. Attempts immediately, then again at 150, 400, 800 and 1500ms so a
+ * finds `[data-ref="kind:ref_id"]` and adds class `ac-highlight` to it, plus `ac-highlight-n` and
+ * `data-highlight-n` to whichever element hosts the number (see below).
+ * Attempts immediately, then again at 150, 400, 800 and 1500ms so a
  * just-navigated view's rows (which can render well after fetch, e.g. a slow request) still get
  * boxed. Stops scheduling further attempts once every target has been matched, or after the last
  * scheduled attempt. Missing targets are silently skipped on every pass.
  *
- * `<tr>` cannot reliably host `position: relative` + `::before` across browsers, so when the
- * matched element is a table row the class/attribute go on its first `<td>` instead (the visible
- * cell content still sits inside a positioned ancestor, so the numbered badge anchors correctly).
- * `<li>` rows (jobs, rules) take the class directly.
+ * `<tr>` cannot reliably host `position: relative` + `::before` across browsers, so for a table
+ * row the number's class/attribute go on its first `<td>` while the row itself keeps
+ * `ac-highlight` — the fill and edges are the row's, only the badge is the cell's. `<li>` rows
+ * (jobs, rules) host both.
  *
  * Paging (Task 10): "missing targets are silently skipped" now also covers a target on another
  * cursor page — the model highlights what the operator can see, and `screen_state.visible` reports
@@ -30,7 +31,7 @@ export function useScreenHighlight(targets: ScreenHighlightPayload["targets"] | 
   useEffect(() => {
     const clear = () => {
       for (const el of applied.current) {
-        el.classList.remove("ac-highlight");
+        el.classList.remove("ac-highlight", "ac-highlight-n");
         el.removeAttribute("data-highlight-n");
       }
       applied.current = [];
@@ -49,10 +50,14 @@ export function useScreenHighlight(targets: ScreenHighlightPayload["targets"] | 
         const el = document.querySelector<HTMLElement>(`[data-ref="${CSS.escape(`${target.kind}:${target.ref_id}`)}"]`);
         if (!el) continue;
         matched += 1;
-        const host = el.tagName === "TR" ? ((el.firstElementChild as HTMLElement | null) ?? el) : el;
-        host.classList.add("ac-highlight");
-        host.setAttribute("data-highlight-n", String(target.number));
-        hosts.push(host);
+        // The row carries the fill and the edges; the number needs a `position: relative` host,
+        // which a `<tr>` is not — so for a table it goes on the first cell instead.
+        el.classList.add("ac-highlight");
+        hosts.push(el);
+        const badge = el.tagName === "TR" ? ((el.firstElementChild as HTMLElement | null) ?? el) : el;
+        badge.classList.add("ac-highlight-n");
+        badge.setAttribute("data-highlight-n", String(target.number));
+        if (badge !== el) hosts.push(badge);
       }
       applied.current = hosts;
       return matched === targets.length;

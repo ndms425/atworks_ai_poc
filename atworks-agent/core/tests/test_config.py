@@ -38,7 +38,7 @@ def test_max_apis_per_job_default_is_below_the_provenance_cap():
 def test_matrix_caps_are_config_fields_with_defaults():
     cfg = AtworksAgentConfig(model="m")
     assert (cfg.max_target_envs_per_job, cfg.max_schedules_per_job,
-            cfg.max_test_data_sets, cfg.max_matrix_size) == (2, 3, 5, 400)
+            cfg.max_test_data_sets, cfg.max_matrix_size) == (2, 3, 100, 400)
 
 
 def test_allowed_target_envs_default_includes_dev_stg_and_parity_targets():
